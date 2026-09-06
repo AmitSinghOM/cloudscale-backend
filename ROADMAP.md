@@ -4,15 +4,32 @@ Built in weekend-sized phases. Each phase ends in a tagged release, a short demo
 
 > Rule: ship small, iterate visibly. Earn scope by finishing.
 
-## Phase 0 — Command/query split  ·  ~2 wknds
+## Phase 0 — Command/query split  ·  ~2 wknds  ·  ✅ done
 **Goal:** Write path appends events; read path serves projections
 
-- [ ] (break into tasks when you start this phase)
+- [x] Append-only in-memory `EventStore` (per-stream 1-based seq, immutable, locked)
+- [x] `CommandHandler` — Deposit/Withdraw account aggregate, no-overdraft via replay
+- [x] `BalanceProjection` — pure fold, rebuildable from the log
+- [x] Tests green (6)
 
-## Phase 1 — Kafka event log  ·  ~2 wknds
+## Phase 1 — Durable event log + idempotent consumer  ·  ✅ tier realized (SQLite)
 **Goal:** Events to Kafka; consumer builds read models; idempotent consume
 
-- [ ] (break into tasks when you start this phase)
+**Status:** The *durable-log + idempotent-consumer tier* is built and tested.
+Kafka + PostgreSQL themselves remain **deferred** (heavy deps; memory-tight
+host). SQLite is the stdlib-only realization of the same tier — same guarantees
+(durability, ordering, exactly-once projection effect), swappable later behind
+the existing store seam. Not yet done: Kafka broker, Postgres read models,
+multi-consumer partitioning.
+
+- [x] `SqliteEventStore` — ACID append (durable across restart), UNIQUE(stream, seq)
+      for per-stream ordering, global `id` for total order, stable `event_id`
+- [x] `IdempotentProjectionStore` — durable read model; dedupe by `event_id`
+      inside the apply transaction → exactly-once effect under at-least-once delivery
+- [x] `run_consumer` — resumes from a persisted offset; safe to re-run
+- [x] Tests prove durability across simulated restart, idempotency under
+      duplicate/replay, and ordering (11 new; 17 total green)
+- [ ] Swap SQLite log for Kafka; swap read model for PostgreSQL (deferred)
 
 ## Phase 2 — Resilience  ·  ~1 wknd
 **Goal:** Circuit breakers, retries, DLQ for poison messages

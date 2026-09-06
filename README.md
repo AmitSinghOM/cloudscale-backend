@@ -2,7 +2,11 @@
 
 **A production-shaped distributed backend demonstrating CQRS, event sourcing, async processing, and resilience patterns at scale.**
 
-> **Status: planned.** Part of the AI Platform Engineer blueprint. Not started — this is the planning scaffold. Build order: **AgentOS first**, then earn the right to start the next one by finishing the last.
+> **Status: Phase 0 done; Phase 1 durable-log tier realized (SQLite).** The
+> command/query split ships with an in-memory event log, and the durable event
+> log + idempotent consumer are built and tested on SQLite (stdlib-only). Kafka
+> and PostgreSQL remain deferred behind the store seam — see
+> [ROADMAP.md](./ROADMAP.md).
 
 ## Why this exists
 

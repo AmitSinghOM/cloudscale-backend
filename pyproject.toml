@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cloudscale-backend"
-version = "0.0.1"
-description = "Phase 0: CQRS command/query split with an in-memory event log."
+version = "0.1.0"
+description = "CQRS command/query split with a durable SQLite event log and idempotent consumer."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = []
