@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cloudscale-backend"
+version = "0.0.1"
+description = "Phase 0: CQRS command/query split with an in-memory event log."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools]
+packages = ["cqrs"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
