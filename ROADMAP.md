@@ -124,25 +124,32 @@ same durability + idempotency guarantees, provable locally and claim-safe
       read 0.01 ms)
 - [x] Tagged release `cloudscale-backend/v0.3.0`
 
-## Phase 4 — HTTP tier  ·  ~2 wknds  ·  📋 planned
+## Phase 4 — HTTP tier  ·  ~2 wknds  ·  🚧 started
 **Goal:** Expose the typed command/query paths over FastAPI; close the
 Milestone 1 network-scope gates
 
 The deps are already pinned (fastapi, uvicorn, pydantic-settings, pyjwt,
 opentelemetry-instrumentation-fastapi). Build order:
 
-- [ ] App skeleton (`cloudscale/entrypoints/http/`): FastAPI app factory,
-      pydantic-settings config, storage-tier metadata on startup/health
-      (reuse the non-production disclosure pattern)
-- [ ] Command endpoint: `POST /accounts/{id}/commands` through the typed
-      application layer (`NormalizedCommand` + `CommandUnitOfWork`) with the
-      client-supplied `command_id` as the idempotency key; equal-hash retries
+- [x] App skeleton (`cloudscale/entrypoints/http/`): FastAPI app factory
+      over injected collaborators, fail-closed pydantic-settings config
+      (no default JWT secret), storage-tier metadata on `/v1/health`
+- [x] Auth: JWT bearer (pyjwt, HS256) — expired / unsigned / wrong-issuer /
+      subject-less tokens all 401; query auth relaxable by explicit setting,
+      writes will always authenticate
+- [x] Query endpoint: `GET /v1/accounts/{id}/balance` via `QueryService` +
+      `StoreProjectionReader` (works over both storage tiers); 404 when
+      absent, 400 on domain-invalid ids, explicit `consistency: eventual`
+      field (projection-lag measurement still to come)
+- [ ] **Concrete `CommandUnitOfWork` adapter** — discovered gap: only a test
+      fake exists. Must implement the port contract (command-ID
+      serialization, equal-hash replay returns the original persisted
+      result, hash conflict → `command_id_conflict`, deterministic
+      rejections persisted without appending) on SQLite + Postgres. Blocks
+      the command endpoint.
+- [ ] Command endpoint: `POST /v1/accounts/{id}/commands` through
+      `CommandService` with client-supplied `command_id`; equal-hash retries
       return the original result, conflicting reuse returns 409
-- [ ] Query endpoint: `GET /accounts/{id}/balance` via `ProjectionReader`
-      (404 when absent); explicit eventual-consistency note in the response
-      model (projection lag field)
-- [ ] Auth: minimal JWT bearer (pyjwt) — no unauthenticated writes, ever;
-      query auth configurable
 - [ ] Wire Phase 2 resilience around the command path (the deferred item:
       breaker + retry now have a real remote downstream)
 - [ ] OTel FastAPI instrumentation reusing `adapters/telemetry.py`
