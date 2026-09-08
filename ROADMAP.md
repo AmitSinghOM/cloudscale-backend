@@ -86,10 +86,23 @@ same durability + idempotency guarantees, provable locally and claim-safe
       (no remote downstream exists on the command side yet; the primitives
       are ready)
 
-## Phase 3 — Load + observe  ·  ~1 wknd
+## Phase 3 — Load + observe  ·  ~1 wknd  ·  🚧 started
 **Goal:** Load test, capture p99 / throughput, trace the hot path, write up bottleneck+fix
 
-- [ ] (break into tasks when you start this phase)
+- [x] `scripts/load_and_observe.py` — stdlib load harness over the real
+      file-backed pipeline (commands → durable log → resilient consumer →
+      queries); p50/p95/p99 + throughput per segment; revision-bound JSON
+      report under `evidence/<sha>/phase-3-load/`; honest-scope statement
+      (single process/thread, local disk, no HTTP — baseline, not benchmark)
+- [x] Instrumented bottleneck candidate: the no-overdraft rule replays the
+      full stream per withdraw (O(n) hot path) — the harness samples latency
+      at increasing stream depth to quantify the degradation
+- [ ] Baseline run committed as evidence
+- [ ] Write up bottleneck + fix (expected fix: snapshot/cached balance for
+      the withdraw guard) and implement it, with before/after runs
+- [ ] Trace the hot path (OpenTelemetry spans over command → append →
+      consume → project) — deferred until the OTel deps are justified
+- [ ] Tagged release
 
 ## Definition of done (every phase)
 1. Tests pass, CI green.
