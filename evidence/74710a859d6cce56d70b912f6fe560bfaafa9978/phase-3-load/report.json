@@ -1,0 +1,76 @@
+{
+  "captured_at": "2026-09-08T08:36:01.721073+00:00",
+  "harness": "scripts/load_and_observe.py",
+  "honest_scope": "single process, single thread, local disk, no HTTP/network; local baseline only",
+  "host": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "python": "3.12.12"
+  },
+  "phase": 3,
+  "revision": "74710a859d6cce56d70b912f6fe560bfaafa9978",
+  "schema_version": 1,
+  "segments": {
+    "consumer_catchup": {
+      "duration_seconds": 1.123,
+      "events_applied": 12001,
+      "throughput_per_second": 10690.7
+    },
+    "hot_account_withdraws": {
+      "depth_samples": [
+        {
+          "latency_ms": 0.0844,
+          "stream_depth": 1
+        },
+        {
+          "latency_ms": 2.9616,
+          "stream_depth": 1001
+        },
+        {
+          "latency_ms": 5.6494,
+          "stream_depth": 2000
+        }
+      ],
+      "duration_seconds": 6.397,
+      "expected_behavior": "latency grows with stream depth: the no-overdraft rule replays the full stream per withdraw (O(n) hot path); bottleneck candidate for the Phase 3 write-up",
+      "latency_ms": {
+        "max": 20.1898,
+        "mean": 3.1964,
+        "p50": 3.1533,
+        "p95": 5.7491,
+        "p99": 7.767
+      },
+      "operations": 2000,
+      "throughput_per_second": 312.7
+    },
+    "mixed_commands": {
+      "duration_seconds": 1.433,
+      "latency_ms": {
+        "max": 6.1216,
+        "mean": 0.1424,
+        "p50": 0.1107,
+        "p95": 0.2634,
+        "p99": 0.491
+      },
+      "operations": 10000,
+      "throughput_per_second": 6979.7
+    },
+    "queries": {
+      "duration_seconds": 0.001,
+      "latency_ms": {
+        "max": 0.1123,
+        "mean": 0.0047,
+        "p50": 0.0041,
+        "p95": 0.0045,
+        "p99": 0.0088
+      },
+      "operations": 200,
+      "throughput_per_second": 199866.9
+    }
+  },
+  "workload": {
+    "accounts": 200,
+    "commands_per_account": 50,
+    "hot_withdraws": 2000,
+    "storage": "sqlite file (temp dir), WAL"
+  }
+}
