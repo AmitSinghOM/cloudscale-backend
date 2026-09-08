@@ -14,8 +14,10 @@
 > measured the pipeline (`scripts/load_and_observe.py`), found and fixed the
 > withdraw guard's O(n) replay (29.6× hot-path throughput; see
 > `docs/phase-3-bottleneck-withdraw-guard.md`), and traces the hot path with
-> OpenTelemetry (`--trace`). HTTP, Kafka, and PostgreSQL remain deferred
-> behind the ports — see [ROADMAP.md](./ROADMAP.md).
+> OpenTelemetry (`--trace`). The read/write tiers now also have a PostgreSQL
+> realization (`cloudscale/adapters/postgres/`, verified against live PG by
+> gated tests); Phase 4 (HTTP tier) is planned in the ROADMAP. HTTP and Kafka
+> remain deferred behind the ports — see [ROADMAP.md](./ROADMAP.md).
 
 ## Why this exists
 

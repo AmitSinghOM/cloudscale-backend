@@ -24,9 +24,6 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Protocol
 
-from cloudscale.adapters.sqlite_compat.dead_letter_store import (
-    DeadLetteringProjectionStore,
-)
 from cloudscale.resilience import (
     CircuitBreaker,
     CircuitOpenError,
@@ -43,6 +40,21 @@ class EventFeed(Protocol):
     """A durable, totally ordered log the consumer polls (``SqliteEventStore``)."""
 
     def read_all(self, after_id: int = 0, limit: int | None = None) -> list[dict]: ...
+
+
+class DeadLetteringProjection(Protocol):
+    """Structural contract the consumer needs from a projection store.
+
+    Satisfied by the SQLite ``DeadLetteringProjectionStore`` and the Postgres
+    tier alike: idempotent apply, a persisted offset, and exactly-once
+    dead-lettering that advances past the poison event.
+    """
+
+    def last_id(self) -> int: ...
+
+    def apply(self, event: dict) -> bool: ...
+
+    def dead_letter(self, event: dict, error: BaseException, attempts: int) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +74,7 @@ class ResilientConsumer:
     def __init__(
         self,
         store: EventFeed,
-        projection: DeadLetteringProjectionStore,
+        projection: DeadLetteringProjection,
         *,
         retry_policy: RetryPolicy | None = None,
         breaker: CircuitBreaker | None = None,
@@ -139,6 +151,7 @@ class ResilientConsumer:
 __all__ = [
     "ConsumerReport",
     "DEFAULT_RETRYABLE_ERRORS",
+    "DeadLetteringProjection",
     "EventFeed",
     "ResilientConsumer",
 ]

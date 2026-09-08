@@ -30,7 +30,20 @@ multi-consumer partitioning.
 - [x] Tests prove durability across simulated restart, idempotency under
       duplicate/replay, and ordering (11 new; 17 in the legacy suite, preserved
       exactly by the Milestone-1 gate below)
-- [ ] Swap SQLite log for Kafka; swap read model for PostgreSQL (deferred)
+- [x] PostgreSQL tier (2026-09-08): `cloudscale/adapters/postgres/` —
+      `PostgresEventStore` + `PostgresProjectionStore` implement the same
+      contracts behind the same seams (optimistic append, exactly-once apply,
+      DLQ + redrive), verified against live PostgreSQL 17.10 by PG-gated
+      tests (skip when no server; throwaway DB created and dropped per run).
+      Documented caveat: `read_all` id-order vs commit-order skew under
+      multi-writer; single-writer scope today, transactional outbox is the
+      multi-writer fix.
+- [ ] Kafka swap — **deferred by decision (2026-09-08)**, not by neglect:
+      this host has no Docker and no broker, and an untestable adapter would
+      violate the evidence rule that everything shipped is verified. The
+      consumer already speaks a transport-agnostic `EventFeed` protocol;
+      revisit when a broker (or Docker for testcontainers, already pinned in
+      dev deps) is available.
 
 ## Milestone 1 — Local correctness core (`cloudscale/` package)  ·  ✅ verified
 **Goal:** Production-shaped domain/application/adapters architecture with the
@@ -110,6 +123,36 @@ same durability + idempotency guarantees, provable locally and claim-safe
       append dominates post-fix: 0.12 of 0.16 ms mean per command, guard
       read 0.01 ms)
 - [x] Tagged release `cloudscale-backend/v0.3.0`
+
+## Phase 4 — HTTP tier  ·  ~2 wknds  ·  📋 planned
+**Goal:** Expose the typed command/query paths over FastAPI; close the
+Milestone 1 network-scope gates
+
+The deps are already pinned (fastapi, uvicorn, pydantic-settings, pyjwt,
+opentelemetry-instrumentation-fastapi). Build order:
+
+- [ ] App skeleton (`cloudscale/entrypoints/http/`): FastAPI app factory,
+      pydantic-settings config, storage-tier metadata on startup/health
+      (reuse the non-production disclosure pattern)
+- [ ] Command endpoint: `POST /accounts/{id}/commands` through the typed
+      application layer (`NormalizedCommand` + `CommandUnitOfWork`) with the
+      client-supplied `command_id` as the idempotency key; equal-hash retries
+      return the original result, conflicting reuse returns 409
+- [ ] Query endpoint: `GET /accounts/{id}/balance` via `ProjectionReader`
+      (404 when absent); explicit eventual-consistency note in the response
+      model (projection lag field)
+- [ ] Auth: minimal JWT bearer (pyjwt) — no unauthenticated writes, ever;
+      query auth configurable
+- [ ] Wire Phase 2 resilience around the command path (the deferred item:
+      breaker + retry now have a real remote downstream)
+- [ ] OTel FastAPI instrumentation reusing `adapters/telemetry.py`
+- [ ] Harness HTTP mode (`--http URL`): drive the Milestone 1 outstanding
+      gates — sustained 1,000 rps, command p99 ≤ 300 ms, query p99 ≤ 100 ms,
+      max projection lag ≤ 1 s — and record pass/fail into the evidence
+      payload consumed by `verify_milestone.py`
+- [ ] Consumer as a real process (uvicorn worker or sidecar loop) so
+      projection lag is measured, not simulated
+- [ ] DoD: suite green, evidence run, README status, tag v0.4.0
 
 ## Definition of done (every phase)
 1. Tests pass, CI green.
