@@ -44,6 +44,12 @@ class PostgresEventStore:
     def __init__(self, conninfo: str) -> None:
         self._conn = psycopg.connect(conninfo, row_factory=dict_row)
         with self._conn.transaction():
+            # Serialize concurrent schema creation across processes:
+            # simultaneous CREATE TABLE IF NOT EXISTS can fail on the
+            # pg_type unique index when server + consumer start together.
+            self._conn.execute(
+                "SELECT pg_advisory_xact_lock(hashtext('cloudscale_schema'))"
+            )
             self._conn.execute(_SCHEMA)
         self._lock = threading.Lock()
 

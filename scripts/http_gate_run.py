@@ -215,19 +215,35 @@ class _LagProber(threading.Thread):
 
 
 def run_gates(
-    duration_seconds: float, command_workers: int, query_workers: int
+    duration_seconds: float,
+    command_workers: int,
+    query_workers: int,
+    storage: str = "sqlite",
 ) -> dict:
+    if storage not in ("sqlite", "postgres"):
+        raise ValueError("storage must be 'sqlite' or 'postgres'")
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
     headers = {"Authorization": f"Bearer {_token()}"}
 
+    admin = None
+    database = None
+    admin_dsn = os.environ.get("CLOUDSCALE_TEST_PG", "postgresql://localhost/postgres")
     with tempfile.TemporaryDirectory(prefix="cloudscale-gate-") as workdir:
         env = dict(
             os.environ,
             CLOUDSCALE_JWT_SECRET=SECRET,
+            CLOUDSCALE_STORAGE=storage,
             CLOUDSCALE_LOG_DB=os.path.join(workdir, "log.db"),
             CLOUDSCALE_PROJECTION_DB=os.path.join(workdir, "projection.db"),
         )
+        if storage == "postgres":
+            import psycopg
+
+            database = f"cloudscale_gate_{uuid4().hex[:12]}"
+            admin = psycopg.connect(admin_dsn, autocommit=True)
+            admin.execute(f'CREATE DATABASE "{database}"')
+            env["CLOUDSCALE_PG_DSN"] = f"{admin_dsn.rsplit('/', 1)[0]}/{database}"
         server = subprocess.Popen(
             (
                 sys.executable,
@@ -283,6 +299,9 @@ def run_gates(
                     process.wait(timeout=10.0)
                 except subprocess.TimeoutExpired:
                     process.kill()
+            if admin is not None and database is not None:
+                admin.execute(f'DROP DATABASE "{database}" WITH (FORCE)')
+                admin.close()
 
     command_latencies = [value for worker in commands for value in worker.latencies_ms]
     query_latencies = [value for worker in queries for value in worker.latencies_ms]
@@ -333,7 +352,11 @@ def run_gates(
         "deployment": {
             "server": "uvicorn, 1 worker, 127.0.0.1 loopback",
             "consumer": "separate process (cloudscale.entrypoints.consumer_loop)",
-            "storage": "sqlite tier (temp dir)",
+            "storage": (
+                "postgresql 17 (throwaway db, local server)"
+                if storage == "postgres"
+                else "sqlite tier (temp dir)"
+            ),
             "auth": "JWT bearer on every request",
         },
         "workload": {
@@ -380,6 +403,13 @@ def _wait_for_health(base_url: str, timeout_seconds: float = 30.0) -> None:
 def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--duration", type=float, default=10.0)
+    parser.add_argument(
+        "--storage",
+        choices=("sqlite", "postgres"),
+        default="sqlite",
+        help="Storage tier for the deployment under test. 'postgres' "
+        "provisions and drops a throwaway database at CLOUDSCALE_TEST_PG.",
+    )
     parser.add_argument("--command-workers", type=int, default=4)
     parser.add_argument("--query-workers", type=int, default=8)
     parser.add_argument("--evidence-root", type=Path)
@@ -388,7 +418,9 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(arguments: Sequence[str] | None = None) -> int:
     args = _parse_args(arguments)
-    report = run_gates(args.duration, args.command_workers, args.query_workers)
+    report = run_gates(
+        args.duration, args.command_workers, args.query_workers, storage=args.storage
+    )
 
     evidence_directory = (
         args.evidence_root.resolve()
@@ -396,7 +428,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
         else REPOSITORY_ROOT / "evidence" / report["revision"] / "phase-4-http-gates"
     )
     evidence_directory.mkdir(parents=True, exist_ok=True)
-    report_path = evidence_directory / "report.json"
+    report_name = (
+        "report-postgres.json" if args.storage == "postgres" else "report.json"
+    )
+    report_path = evidence_directory / report_name
     report_path.write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
