@@ -97,9 +97,13 @@ same durability + idempotency guarantees, provable locally and claim-safe
 - [x] Instrumented bottleneck candidate: the no-overdraft rule replays the
       full stream per withdraw (O(n) hot path) — the harness samples latency
       at increasing stream depth to quantify the degradation
-- [ ] Baseline run committed as evidence
-- [ ] Write up bottleneck + fix (expected fix: snapshot/cached balance for
-      the withdraw guard) and implement it, with before/after runs
+- [x] Baseline run committed as evidence (74710a8: hot withdraws 313/s,
+      latency linear in depth)
+- [x] Write up bottleneck + fix and implement it, with before/after runs —
+      `docs/phase-3-bottleneck-withdraw-guard.md`: memoized fold +
+      incremental `read_after` catch-up; 313/s → 9,246/s (29.6×), withdraw
+      latency flat in stream depth, decision-identity to the replay
+      implementation proven by test
 - [ ] Trace the hot path (OpenTelemetry spans over command → append →
       consume → project) — deferred until the OTel deps are justified
 - [ ] Tagged release

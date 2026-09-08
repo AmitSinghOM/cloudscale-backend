@@ -1,0 +1,76 @@
+{
+  "captured_at": "2026-09-08T08:43:36.875471+00:00",
+  "harness": "scripts/load_and_observe.py",
+  "honest_scope": "single process, single thread, local disk, no HTTP/network; local baseline only",
+  "host": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "python": "3.12.12"
+  },
+  "phase": 3,
+  "revision": "d82039b4cb1b5d74ed48e1060726be59a76d37a2",
+  "schema_version": 1,
+  "segments": {
+    "consumer_catchup": {
+      "duration_seconds": 1.215,
+      "events_applied": 12001,
+      "throughput_per_second": 9876.5
+    },
+    "hot_account_withdraws": {
+      "depth_samples": [
+        {
+          "latency_ms": 0.0943,
+          "stream_depth": 1
+        },
+        {
+          "latency_ms": 0.1042,
+          "stream_depth": 1001
+        },
+        {
+          "latency_ms": 0.0803,
+          "stream_depth": 2000
+        }
+      ],
+      "duration_seconds": 0.216,
+      "expected_behavior": "latency grows with stream depth: the no-overdraft rule replays the full stream per withdraw (O(n) hot path); bottleneck candidate for the Phase 3 write-up",
+      "latency_ms": {
+        "max": 1.7437,
+        "mean": 0.1076,
+        "p50": 0.0906,
+        "p95": 0.1557,
+        "p99": 0.2682
+      },
+      "operations": 2000,
+      "throughput_per_second": 9246.1
+    },
+    "mixed_commands": {
+      "duration_seconds": 1.105,
+      "latency_ms": {
+        "max": 2.3411,
+        "mean": 0.1098,
+        "p50": 0.0929,
+        "p95": 0.1789,
+        "p99": 0.3804
+      },
+      "operations": 10000,
+      "throughput_per_second": 9051.2
+    },
+    "queries": {
+      "duration_seconds": 0.001,
+      "latency_ms": {
+        "max": 0.1433,
+        "mean": 0.0061,
+        "p50": 0.0041,
+        "p95": 0.0077,
+        "p99": 0.0677
+      },
+      "operations": 200,
+      "throughput_per_second": 154968.6
+    }
+  },
+  "workload": {
+    "accounts": 200,
+    "commands_per_account": 50,
+    "hot_withdraws": 2000,
+    "storage": "sqlite file (temp dir), WAL"
+  }
+}

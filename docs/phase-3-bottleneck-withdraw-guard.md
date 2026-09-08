@@ -1,6 +1,6 @@
 # Phase 3 bottleneck analysis — the withdraw guard's O(n) replay
 
-**Status:** fix designed · baseline measured · after-run pending
+**Status:** fixed and verified — 29.6× hot-path throughput, latency flat in depth
 **Baseline evidence:** `evidence/74710a859d6cce56d70b912f6fe560bfaafa9978/phase-3-load/report.json`
 **Harness:** `scripts/load_and_observe.py` (single process/thread, file-backed
 SQLite, no HTTP — local baseline, not a service benchmark)
@@ -91,11 +91,23 @@ since each accepted withdraw also deepens the stream.
 
 ## Result (after-run)
 
-_To be filled from the post-fix harness run._
+**After evidence:** `evidence/d82039b4cb1b5d74ed48e1060726be59a76d37a2/phase-3-load/report.json`
+(identical workload, same host, fix commit `d82039b`)
 
-| Segment / sample        | Before (74710a8) | After | Change |
-|-------------------------|-----------------:|------:|-------:|
-| hot withdraws throughput|          312.7/s |   TBD |    TBD |
-| hot withdraws p99       |         7.767 ms |   TBD |    TBD |
-| withdraw @depth 2,000   |         5.649 ms |   TBD |    TBD |
-| mixed commands p99      |         0.491 ms |   TBD |    TBD |
+| Segment / sample        | Before (74710a8) | After (d82039b) | Change |
+|-------------------------|-----------------:|----------------:|-------:|
+| hot withdraws throughput|          312.7/s |       9,246.1/s | **29.6×** |
+| hot withdraws p99       |         7.767 ms |        0.268 ms | **29×** |
+| withdraw @depth 2,000   |         5.649 ms |        0.080 ms | **70×** |
+| mixed commands p99      |         0.491 ms |        0.380 ms | 1.3× |
+
+Withdraw latency is now flat in stream depth (0.094 ms @1, 0.104 ms @1,001,
+0.080 ms @2,000) and the hot account sustains the same throughput as shallow
+streams (9,246/s vs 9,051/s mixed) — the O(n) term is gone, exactly as the
+design predicted. Mixed commands also improved ~30% because every third
+command in that segment is a withdraw.
+
+Correctness was held by construction and by test: decision-identity against
+the original replay implementation across randomized command sequences,
+external-writer catch-up, and the exact overdraft boundary
+(`tests/unit/test_withdraw_guard_fold.py`; suite 159 green).
