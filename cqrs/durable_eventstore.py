@@ -133,6 +133,22 @@ class SqliteEventStore:
             ).fetchall()
         return [self._row_to_event(r) for r in rows]
 
+    def read_after(self, stream: str, after_seq: int) -> List[dict]:
+        """Return events in ``stream`` with ``seq`` > ``after_seq``, in order.
+
+        ``read_after(stream, 0)`` is equivalent to ``read(stream)``. Backed by
+        the UNIQUE(stream, seq) index, so the suffix read costs O(delta).
+        """
+        if after_seq < 0:
+            raise ValueError("after_seq must be non-negative")
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT event_id, stream, seq, type, account_id, amount "
+                "FROM events WHERE stream = ? AND seq > ? ORDER BY seq ASC",
+                (stream, after_seq),
+            ).fetchall()
+        return [self._row_to_event(r) for r in rows]
+
     def read_all(self, after_id: int = 0, limit: Optional[int] = None) -> List[dict]:
         """Return events across all streams with ``id`` > ``after_id``.
 

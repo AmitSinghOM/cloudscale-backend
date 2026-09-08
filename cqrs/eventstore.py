@@ -46,3 +46,14 @@ class EventStore:
         """Return a copy of all events in ``stream`` in append order."""
         with self._lock:
             return [dict(e) for e in self._streams.get(stream, [])]
+
+    def read_after(self, stream: str, after_seq: int) -> List[dict]:
+        """Return events in ``stream`` with ``seq`` > ``after_seq``, in order.
+
+        ``read_after(stream, 0)`` is equivalent to ``read(stream)``. Events
+        are 1-based and contiguous, so the suffix is a plain slice.
+        """
+        if after_seq < 0:
+            raise ValueError("after_seq must be non-negative")
+        with self._lock:
+            return [dict(e) for e in self._streams.get(stream, [])[after_seq:]]
