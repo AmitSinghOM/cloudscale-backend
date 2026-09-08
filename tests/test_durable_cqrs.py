@@ -26,6 +26,7 @@ from cqrs import (
 # Durability
 # --------------------------------------------------------------------------
 
+
 def test_events_survive_a_simulated_restart():
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "events.db")
@@ -73,6 +74,7 @@ def test_projection_read_model_survives_restart():
 # Idempotency (at-least-once delivery -> exactly-once effect)
 # --------------------------------------------------------------------------
 
+
 def test_duplicate_delivery_does_not_double_count():
     store = SqliteEventStore(":memory:")
     handler = CommandHandler(store)
@@ -116,10 +118,10 @@ def test_crash_between_apply_and_offset_commit_is_safe():
     handler.handle({"type": "Deposit", "account_id": "a1", "amount": 100})
 
     proj = IdempotentProjectionStore(":memory:")
-    run_consumer(store, proj)          # first pass
+    run_consumer(store, proj)  # first pass
     handler.handle({"type": "Deposit", "account_id": "a1", "amount": 5})
-    run_consumer(store, proj)          # resume: only the new event mutates
-    run_consumer(store, proj)          # re-run over the same log: no effect
+    run_consumer(store, proj)  # resume: only the new event mutates
+    run_consumer(store, proj)  # re-run over the same log: no effect
 
     assert proj.balance("a1")["balance"] == 105
     assert proj.balance("a1")["version"] == 2
@@ -128,6 +130,7 @@ def test_crash_between_apply_and_offset_commit_is_safe():
 # --------------------------------------------------------------------------
 # Ordering
 # --------------------------------------------------------------------------
+
 
 def test_per_stream_seq_is_monotonic_and_one_based():
     store = SqliteEventStore(":memory:")
@@ -181,6 +184,7 @@ def test_read_all_after_id_pages_forward():
 # Seam: the command side is agnostic to which store it appends to
 # --------------------------------------------------------------------------
 
+
 def test_command_handler_works_against_durable_store():
     store = SqliteEventStore(":memory:")
     handler = CommandHandler(store)
@@ -198,12 +202,16 @@ def test_command_handler_works_against_durable_store():
 
 def test_duplicate_event_id_append_is_rejected():
     store = SqliteEventStore(":memory:")
-    store.append("account-a1", {"event_id": "fixed", "type": "Deposited",
-                                 "account_id": "a1", "amount": 1})
+    store.append(
+        "account-a1",
+        {"event_id": "fixed", "type": "Deposited", "account_id": "a1", "amount": 1},
+    )
     raised = False
     try:
-        store.append("account-a1", {"event_id": "fixed", "type": "Deposited",
-                                     "account_id": "a1", "amount": 1})
+        store.append(
+            "account-a1",
+            {"event_id": "fixed", "type": "Deposited", "account_id": "a1", "amount": 1},
+        )
     except ConcurrencyError:
         raised = True
     assert raised

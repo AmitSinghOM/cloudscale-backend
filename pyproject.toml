@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools==80.10.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,14 +7,75 @@ name = "cloudscale-backend"
 version = "0.1.0"
 description = "CQRS command/query split with a durable SQLite event log and idempotent consumer."
 readme = "README.md"
-requires-python = ">=3.9"
-dependencies = []
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "alembic==1.19.2",
+    "confluent-kafka==2.15.0",
+    "fastapi==0.141.1",
+    "httpx==0.28.1",
+    "opentelemetry-api==1.44.0",
+    "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
+    "opentelemetry-instrumentation-confluent-kafka==0.65b0",
+    "opentelemetry-instrumentation-fastapi==0.65b0",
+    "opentelemetry-instrumentation-psycopg==0.65b0",
+    "opentelemetry-sdk==1.44.0",
+    "prometheus-client==0.26.0",
+    "psycopg[binary,pool]==3.3.5",
+    "pydantic==2.13.5",
+    "pydantic-settings==2.15.0",
+    "pyjwt[crypto]==2.13.0",
+    "uvicorn[standard]==0.52.4",
+]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = [
+    "coverage==7.16.0",
+    "hypothesis==6.167.1",
+    "mypy==2.3.1",
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.6",
+    "testcontainers[kafka,postgres]==4.15.0",
+]
 
-[tool.setuptools]
-packages = ["cqrs"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cloudscale*", "cqrs*"]
+exclude = ["tests*"]
+namespaces = true
 
 [tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers", "-ra"]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+relative_files = true
+source = ["cloudscale", "cqrs"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+src = ["cloudscale", "cqrs", "tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.format]
+docstring-code-format = true
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.12"
+check_untyped_defs = true
+disallow_incomplete_defs = true
+no_implicit_optional = true
+show_error_codes = true
+warn_redundant_casts = true
+warn_unused_configs = true
+warn_unused_ignores = true

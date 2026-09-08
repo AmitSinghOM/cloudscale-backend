@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sqlite3
 import threading
-from typing import Dict, Iterable
+from typing import Any, Dict, Iterable
 
 
 _SCHEMA = """
@@ -179,7 +179,9 @@ class IdempotentProjectionStore:
         }
 
 
-def run_consumer(store, projection: IdempotentProjectionStore, batch: int = 100) -> int:
+def run_consumer(
+    store: Any, projection: IdempotentProjectionStore, batch: int = 100
+) -> int:
     """Poll ``store`` from the projection's offset and apply new events.
 
     ``store`` is any durable log exposing ``read_all(after_id, limit)`` (i.e.
