@@ -1,0 +1,77 @@
+{
+  "captured_at": "2026-09-08T10:25:44.411246+00:00",
+  "harness": "scripts/load_and_observe.py",
+  "honest_scope": "single process, single thread, local disk, no HTTP/network; local baseline only",
+  "host": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "python": "3.12.12"
+  },
+  "phase": 3,
+  "revision": "96f311135757daa6766bfd6e63ae8c2bc130fb7d",
+  "schema_version": 1,
+  "segments": {
+    "consumer_catchup": {
+      "duration_seconds": 31.792,
+      "events_applied": 12001,
+      "throughput_per_second": 377.5
+    },
+    "hot_account_withdraws": {
+      "depth_samples": [
+        {
+          "latency_ms": 0.4295,
+          "stream_depth": 1
+        },
+        {
+          "latency_ms": 0.4524,
+          "stream_depth": 1001
+        },
+        {
+          "latency_ms": 0.5638,
+          "stream_depth": 2000
+        }
+      ],
+      "duration_seconds": 1.167,
+      "expected_behavior": "latency should stay flat in stream depth since the withdraw guard memoizes its fold (perf fix d82039b); regression here means the O(n) replay came back",
+      "latency_ms": {
+        "max": 1.9795,
+        "mean": 0.5826,
+        "p50": 0.5536,
+        "p95": 0.8354,
+        "p99": 1.1968
+      },
+      "operations": 2000,
+      "throughput_per_second": 1713.3
+    },
+    "mixed_commands": {
+      "duration_seconds": 5.074,
+      "latency_ms": {
+        "max": 32.3347,
+        "mean": 0.5065,
+        "p50": 0.468,
+        "p95": 0.7244,
+        "p99": 1.0238
+      },
+      "operations": 10000,
+      "throughput_per_second": 1970.9
+    },
+    "queries": {
+      "duration_seconds": 0.132,
+      "latency_ms": {
+        "max": 24.2879,
+        "mean": 0.6549,
+        "p50": 0.3302,
+        "p95": 1.6203,
+        "p99": 5.567
+      },
+      "operations": 200,
+      "throughput_per_second": 1520.8
+    }
+  },
+  "workload": {
+    "accounts": 200,
+    "commands_per_account": 50,
+    "hot_withdraws": 2000,
+    "storage": "postgresql 17 (throwaway db, local server)",
+    "traced": false
+  }
+}
