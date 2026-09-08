@@ -3,14 +3,16 @@
 **A production-shaped distributed backend demonstrating CQRS, event sourcing, async processing, and resilience patterns at scale.**
 
 > **Status: Phase 0 done; Phase 1 durable-log tier realized (SQLite); Milestone 1
-> (local correctness) verified.** The original `cqrs/` command/query split ships
-> with an in-memory event log, and the durable event log + idempotent consumer
-> are built and tested on SQLite (stdlib-only). Milestone 1 added a typed
-> hexagonal `cloudscale/` package (domain / application / adapters) behind the
-> same guarantees, verified by a 122-test suite (17 legacy + 105 additions,
-> including 9 Hypothesis property suites) and a revision-bound evidence gate
-> (`scripts/verify_milestone.py`). HTTP, Kafka, and PostgreSQL remain deferred
-> behind the ports — see [ROADMAP.md](./ROADMAP.md).
+> (local correctness) verified; Phase 2 resilience core landed.** The original
+> `cqrs/` command/query split ships with an in-memory event log, and the
+> durable event log + idempotent consumer are built and tested on SQLite
+> (stdlib-only). Milestone 1 added a typed hexagonal `cloudscale/` package
+> (domain / application / adapters) behind the same guarantees, verified by a
+> test suite with 9 Hypothesis property suites and a revision-bound evidence
+> gate (`scripts/verify_milestone.py`). Phase 2 adds `cloudscale/resilience/`
+> (retry with backoff + circuit breaker) and a dead-letter queue wired into a
+> resilient consumer. HTTP, Kafka, and PostgreSQL remain deferred behind the
+> ports — see [ROADMAP.md](./ROADMAP.md).
 
 ## Why this exists
 
@@ -37,7 +39,9 @@ API (FastAPI) → Command side (writes → event log) → Kafka → Projections 
 cloudscale/            Milestone-1 hexagonal package
   domain/              Account aggregate, commands, event envelopes, results, errors
   application/         Typed ports (Protocols) + command/query services
+  resilience/          Pure retry + circuit-breaker primitives (stdlib-only)
   adapters/            SQLite adapters + compat shims over the legacy cqrs/ stores
+  processes/           Resilient consumer (retry + breaker + dead-letter queue)
 cqrs/                  Original Phase-0/1 implementation (kept green, 17 tests)
 tests/
   unit/ properties/    Domain units + 9 Hypothesis property suites (fixed seed)

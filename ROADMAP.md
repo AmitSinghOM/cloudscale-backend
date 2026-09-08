@@ -56,10 +56,29 @@ same durability + idempotency guarantees, provable locally and claim-safe
       revision-bound release evidence. Excluded scope: HTTP/network, Kafka
       delivery, PostgreSQL tier, authn/z, deployment/operability.
 
-## Phase 2 — Resilience  ·  ~1 wknd
+## Phase 2 — Resilience  ·  ~1 wknd  ·  🚧 core landed
 **Goal:** Circuit breakers, retries, DLQ for poison messages
 
-- [ ] (break into tasks when you start this phase)
+- [x] `cloudscale/resilience/` — pure, stdlib-only primitives:
+      `RetryPolicy` + `call_with_retry` (capped exponential backoff, full
+      jitter, injectable sleep/random) and `CircuitBreaker` (closed → open →
+      half-open single-probe, injectable clock; only designated *transient*
+      error types count as failures — a deterministic rejection proves the
+      downstream is healthy)
+- [x] `DeadLetteringProjectionStore` — durable `dead_letters` table in the
+      same SQLite DB; dead-lettering claims the `event_id` in
+      `processed_events`, records the letter, and advances the offset in one
+      transaction → poison events never wedge the log and replays are
+      absorbed as duplicates (same exactly-once mechanism as the happy path)
+- [x] `ResilientConsumer` (`cloudscale/processes/`) — breaker wraps each
+      apply attempt inside the retry loop; poison → DLQ on first attempt,
+      retry exhaustion → DLQ with attempt count, open circuit → halt with
+      offset untouched (no loss, no false dead-letter)
+- [x] Deterministic tests: 20 new (fake clocks, recorded sleeps, scripted
+      failures, end-to-end over the real SQLite log) — suite 142 green
+- [ ] DLQ redrive tooling (inspect + requeue parked events)
+- [ ] Wire breaker/retry around the command path (needs the HTTP tier)
+- [ ] Tagged release + README status update + demo
 
 ## Phase 3 — Load + observe  ·  ~1 wknd
 **Goal:** Load test, capture p99 / throughput, trace the hot path, write up bottleneck+fix
