@@ -2,7 +2,8 @@
 
 **A production-shaped distributed backend demonstrating CQRS, event sourcing, async processing, and resilience patterns at scale.**
 
-> **Status: Phases 0–3 done (v0.3.0); Milestone 1 (local correctness) verified.** The original
+> **Status: Phases 0–4 done (v0.4.0); Milestone 1 (local correctness) verified;
+> all four evaluable Milestone 1 network gates passing.** The original
 > `cqrs/` command/query split ships with an in-memory event log, and the
 > durable event log + idempotent consumer are built and tested on SQLite
 > (stdlib-only). Milestone 1 added a typed hexagonal `cloudscale/` package
@@ -16,7 +17,7 @@
 > `docs/phase-3-bottleneck-withdraw-guard.md`), and traces the hot path with
 > OpenTelemetry (`--trace`). The read/write tiers now also have a PostgreSQL
 > realization (`cloudscale/adapters/postgres/`, verified against live PG by
-> gated tests). Phase 4's HTTP tier is nearly complete: authenticated
+> gated tests). Phase 4 shipped the HTTP tier: authenticated
 > command/query endpoints over the typed application layer with an idempotent
 > unit of work on both tiers, breaker+retry on the command path, optional
 > OTel server spans, and a real-deployment gate run

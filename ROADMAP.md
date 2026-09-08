@@ -124,7 +124,7 @@ same durability + idempotency guarantees, provable locally and claim-safe
       read 0.01 ms)
 - [x] Tagged release `cloudscale-backend/v0.3.0`
 
-## Phase 4 — HTTP tier  ·  ~2 wknds  ·  🚧 started
+## Phase 4 — HTTP tier  ·  ~2 wknds  ·  ✅ done (v0.4.0)
 **Goal:** Expose the typed command/query paths over FastAPI; close the
 Milestone 1 network-scope gates
 
@@ -177,7 +177,8 @@ opentelemetry-instrumentation-fastapi). Build order:
       `evidence/<sha>/phase-4-http-gates/`.
 - [x] Consumer as a real process (`cloudscale/entrypoints/consumer_loop`),
       lag measured, not simulated
-- [ ] DoD: suite green, evidence run, README status, tag v0.4.0
+- [x] DoD: suite green (204), gate-run evidence recorded, README status
+      updated, tagged `cloudscale-backend/v0.4.0`
 
 ## Definition of done (every phase)
 1. Tests pass, CI green.
