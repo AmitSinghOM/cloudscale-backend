@@ -32,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Sequence
@@ -92,32 +93,92 @@ def _timed(operation) -> int:
     return time.perf_counter_ns() - started
 
 
-def run_load(
-    accounts: int,
-    commands_per_account: int,
-    hot_withdraws: int,
-    trace_hot_path: bool = False,
-) -> dict:
-    tracer = None
-    exporter = None
-    if trace_hot_path:
-        from cloudscale.adapters.telemetry import (
-            TracedDeadLetteringProjectionStore,
-            TracedSqliteEventStore,
-            configure_in_memory_tracing,
+@contextlib.contextmanager
+def _open_storage(storage: str, tracer):
+    """Yield ``(store, projection, description, retryable_errors)`` for a backend.
+
+    ``postgres`` provisions a throwaway database on the server at
+    ``CLOUDSCALE_TEST_PG`` (default ``postgresql://localhost/postgres``) and
+    DROPs it afterwards — nothing is left behind.
+    """
+    if storage == "postgres":
+        import psycopg
+
+        from cloudscale.adapters.postgres.event_store import PostgresEventStore
+        from cloudscale.adapters.postgres.projection_store import (
+            PostgresProjectionStore,
         )
 
-        tracer, exporter = configure_in_memory_tracing("cloudscale-load")
+        admin_dsn = os.environ.get(
+            "CLOUDSCALE_TEST_PG", "postgresql://localhost/postgres"
+        )
+        database = f"cloudscale_load_{uuid.uuid4().hex[:12]}"
+        admin = psycopg.connect(admin_dsn, autocommit=True)
+        admin.execute(f'CREATE DATABASE "{database}"')
+        dsn = f"{admin_dsn.rsplit('/', 1)[0]}/{database}"
+        store = PostgresEventStore(dsn)
+        projection = PostgresProjectionStore(dsn)
+        try:
+            yield (
+                store,
+                projection,
+                "postgresql 17 (throwaway db, local server)",
+                (psycopg.OperationalError,),
+            )
+        finally:
+            store.close()
+            projection.close()
+            admin.execute(f'DROP DATABASE "{database}" WITH (FORCE)')
+            admin.close()
+        return
 
     with tempfile.TemporaryDirectory(prefix="cloudscale-load-") as workdir:
         events_path = os.path.join(workdir, "events.db")
         projection_path = os.path.join(workdir, "projection.db")
         if tracer is not None:
+            from cloudscale.adapters.telemetry import (
+                TracedDeadLetteringProjectionStore,
+                TracedSqliteEventStore,
+            )
+
             store = TracedSqliteEventStore(events_path, tracer)
             projection = TracedDeadLetteringProjectionStore(projection_path, tracer)
         else:
             store = SqliteEventStore(events_path)
             projection = DeadLetteringProjectionStore(path=projection_path)
+        yield (
+            store,
+            projection,
+            "sqlite file (temp dir), WAL",
+            None,
+        )
+
+
+def run_load(
+    accounts: int,
+    commands_per_account: int,
+    hot_withdraws: int,
+    trace_hot_path: bool = False,
+    storage: str = "sqlite",
+) -> dict:
+    if storage not in ("sqlite", "postgres"):
+        raise ValueError("storage must be 'sqlite' or 'postgres'")
+    if trace_hot_path and storage != "sqlite":
+        raise ValueError("--trace currently supports only the sqlite backend")
+
+    tracer = None
+    exporter = None
+    if trace_hot_path:
+        from cloudscale.adapters.telemetry import configure_in_memory_tracing
+
+        tracer, exporter = configure_in_memory_tracing("cloudscale-load")
+
+    with _open_storage(storage, tracer) as (
+        store,
+        projection,
+        storage_description,
+        retryable_errors,
+    ):
         handler = CommandHandler(store)
 
         @contextlib.contextmanager
@@ -181,7 +242,10 @@ def run_load(
         # -- consumer catch-up ------------------------------------------------
         segment_started = time.perf_counter()
         with _segment_span("segment.consumer_catchup"):
-            report = ResilientConsumer(store, projection, batch=500).run()
+            consumer_kwargs: dict = {"batch": 500}
+            if retryable_errors is not None:
+                consumer_kwargs["retryable_errors"] = retryable_errors
+            report = ResilientConsumer(store, projection, **consumer_kwargs).run()
         consumer_duration = time.perf_counter() - segment_started
         total_events = accounts * commands_per_account + hot_withdraws + 1
         assert report.applied == total_events, (
@@ -213,7 +277,7 @@ def run_load(
             "accounts": accounts,
             "commands_per_account": commands_per_account,
             "hot_withdraws": hot_withdraws,
-            "storage": "sqlite file (temp dir), WAL",
+            "storage": storage_description,
             "traced": trace_hot_path,
         },
         "honest_scope": (
@@ -261,6 +325,14 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--commands-per-account", type=int, default=50)
     parser.add_argument("--hot-withdraws", type=int, default=2000)
     parser.add_argument(
+        "--storage",
+        choices=("sqlite", "postgres"),
+        default="sqlite",
+        help="Storage backend. 'postgres' provisions and drops a throwaway "
+        "database on the server at CLOUDSCALE_TEST_PG "
+        "(default postgresql://localhost/postgres).",
+    )
+    parser.add_argument(
         "--trace",
         action="store_true",
         help="Trace the hot path with OpenTelemetry (in-memory exporter); "
@@ -281,6 +353,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         args.commands_per_account,
         args.hot_withdraws,
         trace_hot_path=args.trace,
+        storage=args.storage,
     )
 
     evidence_directory = (
@@ -289,7 +362,12 @@ def main(arguments: Sequence[str] | None = None) -> int:
         else REPOSITORY_ROOT / "evidence" / report["revision"] / "phase-3-load"
     )
     evidence_directory.mkdir(parents=True, exist_ok=True)
-    report_name = "report-traced.json" if args.trace else "report.json"
+    if args.trace:
+        report_name = "report-traced.json"
+    elif args.storage == "postgres":
+        report_name = "report-postgres.json"
+    else:
+        report_name = "report.json"
     report_path = evidence_directory / report_name
     report_path.write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
