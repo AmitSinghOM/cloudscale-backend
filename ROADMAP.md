@@ -141,15 +141,23 @@ opentelemetry-instrumentation-fastapi). Build order:
       `StoreProjectionReader` (works over both storage tiers); 404 when
       absent, 400 on domain-invalid ids, explicit `consistency: eventual`
       field (projection-lag measurement still to come)
-- [ ] **Concrete `CommandUnitOfWork` adapter** — discovered gap: only a test
-      fake exists. Must implement the port contract (command-ID
-      serialization, equal-hash replay returns the original persisted
-      result, hash conflict → `command_id_conflict`, deterministic
-      rejections persisted without appending) on SQLite + Postgres. Blocks
-      the command endpoint.
-- [ ] Command endpoint: `POST /v1/accounts/{id}/commands` through
-      `CommandService` with client-supplied `command_id`; equal-hash retries
-      return the original result, conflicting reuse returns 409
+- [x] **Concrete `CommandUnitOfWork` adapter (SQLite)** —
+      `SqliteCommandUnitOfWork`: one BEGIN IMMEDIATE transaction covers
+      stored-result lookup, stream fold, expected-version gate, aggregate
+      `decide`, append, and result persistence. Equal-hash replay returns
+      the original persisted result byte-for-byte; hash conflict → 409
+      without overwriting the original; deterministic rejections persisted
+      without appending; mid-transaction failure rolls back everything.
+      Events land in the same `events` table the consumer polls; full
+      envelope identity retained in `event_envelopes`.
+- [ ] Postgres `CommandUnitOfWork` (same contract; PG-gated tests)
+- [x] Command endpoint: `POST /v1/accounts/{id}/commands` through
+      `CommandService` with client-supplied `command_id`; HTTP status taken
+      from the persisted transport-neutral result (201 / 409 replay-conflict
+      / 409 version / 422 funds / 400 domain); writes authenticate
+      unconditionally even when query auth is relaxed; end-to-end test
+      proves POST → unit of work → log → consumer → GET (including the
+      read-model trailing the log before the consumer runs)
 - [ ] Wire Phase 2 resilience around the command path (the deferred item:
       breaker + retry now have a real remote downstream)
 - [ ] OTel FastAPI instrumentation reusing `adapters/telemetry.py`
