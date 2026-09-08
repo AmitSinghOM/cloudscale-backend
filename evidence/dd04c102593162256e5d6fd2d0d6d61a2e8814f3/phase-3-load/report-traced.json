@@ -1,0 +1,131 @@
+{
+  "captured_at": "2026-09-08T09:10:10.818790+00:00",
+  "harness": "scripts/load_and_observe.py",
+  "honest_scope": "single process, single thread, local disk, no HTTP/network; local baseline only",
+  "host": {
+    "platform": "macOS-26.6.2-arm64-arm-64bit",
+    "python": "3.12.12"
+  },
+  "phase": 3,
+  "revision": "dd04c102593162256e5d6fd2d0d6d61a2e8814f3",
+  "schema_version": 1,
+  "segments": {
+    "consumer_catchup": {
+      "duration_seconds": 1.418,
+      "events_applied": 12001,
+      "throughput_per_second": 8461.7
+    },
+    "hot_account_withdraws": {
+      "depth_samples": [
+        {
+          "latency_ms": 0.1215,
+          "stream_depth": 1
+        },
+        {
+          "latency_ms": 0.1235,
+          "stream_depth": 1001
+        },
+        {
+          "latency_ms": 0.1353,
+          "stream_depth": 2000
+        }
+      ],
+      "duration_seconds": 0.313,
+      "expected_behavior": "latency should stay flat in stream depth since the withdraw guard memoizes its fold (perf fix d82039b); regression here means the O(n) replay came back",
+      "latency_ms": {
+        "max": 32.4749,
+        "mean": 0.1559,
+        "p50": 0.1207,
+        "p95": 0.194,
+        "p99": 0.5291
+      },
+      "operations": 2000,
+      "throughput_per_second": 6394.7
+    },
+    "mixed_commands": {
+      "duration_seconds": 1.8,
+      "latency_ms": {
+        "max": 27.9203,
+        "mean": 0.1766,
+        "p50": 0.1221,
+        "p95": 0.2585,
+        "p99": 0.8163
+      },
+      "operations": 10000,
+      "throughput_per_second": 5556.8
+    },
+    "queries": {
+      "duration_seconds": 0.001,
+      "latency_ms": {
+        "max": 0.0394,
+        "mean": 0.0047,
+        "p50": 0.004,
+        "p95": 0.0053,
+        "p99": 0.0317
+      },
+      "operations": 200,
+      "throughput_per_second": 197238.7
+    }
+  },
+  "trace": {
+    "exporter": "in-memory (SimpleSpanProcessor)",
+    "spans_by_name": {
+      "command.handle": {
+        "count": 12001,
+        "max_ms": 32.461,
+        "mean_ms": 0.1595,
+        "p95_ms": 0.222,
+        "total_ms": 1913.72
+      },
+      "eventstore.append": {
+        "count": 12001,
+        "max_ms": 27.823,
+        "mean_ms": 0.1196,
+        "p95_ms": 0.165,
+        "total_ms": 1435.183
+      },
+      "eventstore.read_after": {
+        "count": 5200,
+        "max_ms": 0.459,
+        "mean_ms": 0.0104,
+        "p95_ms": 0.016,
+        "total_ms": 54.216
+      },
+      "projection.apply": {
+        "count": 12001,
+        "max_ms": 54.336,
+        "mean_ms": 0.0996,
+        "p95_ms": 0.153,
+        "total_ms": 1194.725
+      },
+      "segment.consumer_catchup": {
+        "count": 1,
+        "max_ms": 1418.276,
+        "mean_ms": 1418.276,
+        "p95_ms": 1418.276,
+        "total_ms": 1418.276
+      },
+      "segment.hot_withdraws": {
+        "count": 1,
+        "max_ms": 312.748,
+        "mean_ms": 312.748,
+        "p95_ms": 312.748,
+        "total_ms": 312.748
+      },
+      "segment.mixed_commands": {
+        "count": 1,
+        "max_ms": 1799.564,
+        "mean_ms": 1799.564,
+        "p95_ms": 1799.564,
+        "total_ms": 1799.564
+      }
+    }
+  },
+  "workload": {
+    "accounts": 200,
+    "commands_per_account": 50,
+    "hot_withdraws": 2000,
+    "storage": "sqlite file (temp dir), WAL",
+    "traced": true
+  }
+}

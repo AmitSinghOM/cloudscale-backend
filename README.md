@@ -2,7 +2,7 @@
 
 **A production-shaped distributed backend demonstrating CQRS, event sourcing, async processing, and resilience patterns at scale.**
 
-> **Status: Phases 0–2 done (v0.2.0); Milestone 1 (local correctness) verified.** The original
+> **Status: Phases 0–3 done (v0.3.0); Milestone 1 (local correctness) verified.** The original
 > `cqrs/` command/query split ships with an in-memory event log, and the
 > durable event log + idempotent consumer are built and tested on SQLite
 > (stdlib-only). Milestone 1 added a typed hexagonal `cloudscale/` package
@@ -10,9 +10,12 @@
 > test suite with 9 Hypothesis property suites and a revision-bound evidence
 > gate (`scripts/verify_milestone.py`). Phase 2 adds `cloudscale/resilience/`
 > (retry with backoff + circuit breaker), a dead-letter queue wired into a
-> resilient consumer, and DLQ redrive tooling (`scripts/dlq.py`). HTTP, Kafka,
-> and PostgreSQL remain deferred behind the ports — see
-> [ROADMAP.md](./ROADMAP.md).
+> resilient consumer, and DLQ redrive tooling (`scripts/dlq.py`). Phase 3
+> measured the pipeline (`scripts/load_and_observe.py`), found and fixed the
+> withdraw guard's O(n) replay (29.6× hot-path throughput; see
+> `docs/phase-3-bottleneck-withdraw-guard.md`), and traces the hot path with
+> OpenTelemetry (`--trace`). HTTP, Kafka, and PostgreSQL remain deferred
+> behind the ports — see [ROADMAP.md](./ROADMAP.md).
 
 ## Why this exists
 

@@ -86,7 +86,7 @@ same durability + idempotency guarantees, provable locally and claim-safe
       (no remote downstream exists on the command side yet; the primitives
       are ready)
 
-## Phase 3 — Load + observe  ·  ~1 wknd  ·  🚧 started
+## Phase 3 — Load + observe  ·  ~1 wknd  ·  ✅ done (v0.3.0)
 **Goal:** Load test, capture p99 / throughput, trace the hot path, write up bottleneck+fix
 
 - [x] `scripts/load_and_observe.py` — stdlib load harness over the real
@@ -104,9 +104,12 @@ same durability + idempotency guarantees, provable locally and claim-safe
       incremental `read_after` catch-up; 313/s → 9,246/s (29.6×), withdraw
       latency flat in stream depth, decision-identity to the replay
       implementation proven by test
-- [ ] Trace the hot path (OpenTelemetry spans over command → append →
-      consume → project) — deferred until the OTel deps are justified
-- [ ] Tagged release
+- [x] Trace the hot path — OpenTelemetry spans over command → append →
+      consume → project (`cloudscale/adapters/telemetry.py`, harness
+      `--trace`, in-memory exporter; traced evidence shows the durable
+      append dominates post-fix: 0.12 of 0.16 ms mean per command, guard
+      read 0.01 ms)
+- [x] Tagged release `cloudscale-backend/v0.3.0`
 
 ## Definition of done (every phase)
 1. Tests pass, CI green.
