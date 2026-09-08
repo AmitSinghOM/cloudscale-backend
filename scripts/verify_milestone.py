@@ -128,6 +128,8 @@ def _working_tree_state() -> str:
             "--untracked-files=all",
             "--",
             str(REPOSITORY_ROOT),
+            # The gate's own evidence output must not mark the run dirty.
+            f":(exclude){REPOSITORY_ROOT / 'evidence'}",
         )
     except (OSError, subprocess.SubprocessError):
         return "unknown"
