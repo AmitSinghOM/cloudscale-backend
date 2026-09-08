@@ -56,7 +56,7 @@ same durability + idempotency guarantees, provable locally and claim-safe
       revision-bound release evidence. Excluded scope: HTTP/network, Kafka
       delivery, PostgreSQL tier, authn/z, deployment/operability.
 
-## Phase 2 — Resilience  ·  ~1 wknd  ·  🚧 core landed
+## Phase 2 — Resilience  ·  ~1 wknd  ·  ✅ done (v0.2.0)
 **Goal:** Circuit breakers, retries, DLQ for poison messages
 
 - [x] `cloudscale/resilience/` — pure, stdlib-only primitives:
@@ -76,9 +76,15 @@ same durability + idempotency guarantees, provable locally and claim-safe
       offset untouched (no loss, no false dead-letter)
 - [x] Deterministic tests: 20 new (fake clocks, recorded sleeps, scripted
       failures, end-to-end over the real SQLite log) — suite 142 green
-- [ ] DLQ redrive tooling (inspect + requeue parked events)
-- [ ] Wire breaker/retry around the command path (needs the HTTP tier)
-- [ ] Tagged release + README status update + demo
+- [x] DLQ redrive tooling — `redrive`/`redrive_all` on the store (re-apply +
+      letter removal in one transaction; failed redrive re-parks with an
+      incremented attempt count; `processed_events` claim kept so replays
+      still dedupe) + `scripts/dlq.py` CLI (list / show / redrive, exit codes
+      for automation)
+- [x] Tagged release `cloudscale-backend/v0.2.0` + README status update
+- [ ] Wire breaker/retry around the command path — deferred to the HTTP tier
+      (no remote downstream exists on the command side yet; the primitives
+      are ready)
 
 ## Phase 3 — Load + observe  ·  ~1 wknd
 **Goal:** Load test, capture p99 / throughput, trace the hot path, write up bottleneck+fix

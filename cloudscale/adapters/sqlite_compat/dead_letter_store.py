@@ -12,10 +12,12 @@ the same exactly-once mechanism the happy path uses.
 
 from __future__ import annotations
 
+import enum
 import json
 import sqlite3
 from datetime import UTC, datetime
 
+from cloudscale.adapters.compat import adapt_legacy_event
 from cloudscale.adapters.sqlite_compat.projection_store import (
     IdempotentProjectionStore,
 )
@@ -31,6 +33,14 @@ CREATE TABLE IF NOT EXISTS dead_letters (
     dead_lettered_at TEXT NOT NULL
 );
 """
+
+
+class RedriveOutcome(enum.Enum):
+    """Result of one redrive attempt."""
+
+    APPLIED = "applied"
+    NOT_FOUND = "not_found"
+    FAILED_AGAIN = "failed_again"
 
 
 class DeadLetteringProjectionStore(IdempotentProjectionStore):
@@ -112,6 +122,56 @@ class DeadLetteringProjectionStore(IdempotentProjectionStore):
             ).fetchone()
         return int(row["n"])
 
+    def redrive(self, event_id: str) -> RedriveOutcome:
+        """Re-apply one parked event and remove its dead letter, exactly once.
+
+        The re-validation, the balance mutation, and the dead-letter removal
+        commit in ONE transaction, so a crash mid-redrive leaves the letter
+        parked and the read model untouched — never a half-applied event and
+        never a lost one. The ``processed_events`` claim from dead-lettering
+        time is kept, so log replays keep deduplicating the event afterwards.
+
+        A redrive that fails again re-parks the letter with an incremented
+        attempt count and the fresh error, and returns ``FAILED_AGAIN``.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT payload FROM dead_letters WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+            if row is None:
+                return RedriveOutcome.NOT_FOUND
+
+            event = json.loads(row["payload"])
+            try:
+                # Same validation gate the consumer's apply path uses.
+                self._apply_to_balance(adapt_legacy_event(event))
+                self._conn.execute(
+                    "DELETE FROM dead_letters WHERE event_id = ?", (event_id,)
+                )
+                self._conn.commit()
+                return RedriveOutcome.APPLIED
+            except Exception as error:
+                self._conn.rollback()
+                self._conn.execute(
+                    "UPDATE dead_letters SET attempts = attempts + 1, "
+                    "error_type = ?, error_message = ?, dead_lettered_at = ? "
+                    "WHERE event_id = ?",
+                    (
+                        type(error).__name__,
+                        str(error),
+                        datetime.now(UTC).isoformat(),
+                        event_id,
+                    ),
+                )
+                self._conn.commit()
+                return RedriveOutcome.FAILED_AGAIN
+
+    def redrive_all(self) -> dict[str, RedriveOutcome]:
+        """Redrive every parked event, oldest first; return per-event outcomes."""
+        event_ids = [entry["event_id"] for entry in self.dead_letters()]
+        return {event_id: self.redrive(event_id) for event_id in event_ids}
+
     def _advance_offset(self, log_id: int) -> None:
         """Advance the offset monotonically; caller holds the lock and commits."""
         self._conn.execute(
@@ -120,4 +180,4 @@ class DeadLetteringProjectionStore(IdempotentProjectionStore):
         )
 
 
-__all__ = ["DeadLetteringProjectionStore"]
+__all__ = ["DeadLetteringProjectionStore", "RedriveOutcome"]

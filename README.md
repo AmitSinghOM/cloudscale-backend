@@ -2,17 +2,17 @@
 
 **A production-shaped distributed backend demonstrating CQRS, event sourcing, async processing, and resilience patterns at scale.**
 
-> **Status: Phase 0 done; Phase 1 durable-log tier realized (SQLite); Milestone 1
-> (local correctness) verified; Phase 2 resilience core landed.** The original
+> **Status: Phases 0–2 done (v0.2.0); Milestone 1 (local correctness) verified.** The original
 > `cqrs/` command/query split ships with an in-memory event log, and the
 > durable event log + idempotent consumer are built and tested on SQLite
 > (stdlib-only). Milestone 1 added a typed hexagonal `cloudscale/` package
 > (domain / application / adapters) behind the same guarantees, verified by a
 > test suite with 9 Hypothesis property suites and a revision-bound evidence
 > gate (`scripts/verify_milestone.py`). Phase 2 adds `cloudscale/resilience/`
-> (retry with backoff + circuit breaker) and a dead-letter queue wired into a
-> resilient consumer. HTTP, Kafka, and PostgreSQL remain deferred behind the
-> ports — see [ROADMAP.md](./ROADMAP.md).
+> (retry with backoff + circuit breaker), a dead-letter queue wired into a
+> resilient consumer, and DLQ redrive tooling (`scripts/dlq.py`). HTTP, Kafka,
+> and PostgreSQL remain deferred behind the ports — see
+> [ROADMAP.md](./ROADMAP.md).
 
 ## Why this exists
 
