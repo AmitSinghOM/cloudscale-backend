@@ -13,7 +13,6 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 import jwt
-import pytest
 from fastapi.testclient import TestClient
 
 from cloudscale.adapters.projection_readers import StoreProjectionReader
