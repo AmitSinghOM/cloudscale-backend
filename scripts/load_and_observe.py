@@ -23,6 +23,7 @@ no network. Numbers are a local baseline, not a service benchmark.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import platform
@@ -91,58 +92,96 @@ def _timed(operation) -> int:
     return time.perf_counter_ns() - started
 
 
-def run_load(accounts: int, commands_per_account: int, hot_withdraws: int) -> dict:
-    with tempfile.TemporaryDirectory(prefix="cloudscale-load-") as workdir:
-        store = SqliteEventStore(os.path.join(workdir, "events.db"))
-        projection = DeadLetteringProjectionStore(
-            path=os.path.join(workdir, "projection.db")
+def run_load(
+    accounts: int,
+    commands_per_account: int,
+    hot_withdraws: int,
+    trace_hot_path: bool = False,
+) -> dict:
+    tracer = None
+    exporter = None
+    if trace_hot_path:
+        from cloudscale.adapters.telemetry import (
+            TracedDeadLetteringProjectionStore,
+            TracedSqliteEventStore,
+            configure_in_memory_tracing,
         )
+
+        tracer, exporter = configure_in_memory_tracing("cloudscale-load")
+
+    with tempfile.TemporaryDirectory(prefix="cloudscale-load-") as workdir:
+        events_path = os.path.join(workdir, "events.db")
+        projection_path = os.path.join(workdir, "projection.db")
+        if tracer is not None:
+            store = TracedSqliteEventStore(events_path, tracer)
+            projection = TracedDeadLetteringProjectionStore(projection_path, tracer)
+        else:
+            store = SqliteEventStore(events_path)
+            projection = DeadLetteringProjectionStore(path=projection_path)
         handler = CommandHandler(store)
+
+        @contextlib.contextmanager
+        def _segment_span(name: str):
+            if tracer is None:
+                yield
+            else:
+                with tracer.start_as_current_span(name):
+                    yield
+
+        def _handle_command(command: dict) -> None:
+            if tracer is None:
+                handler.handle(command)
+            else:
+                with tracer.start_as_current_span("command.handle"):
+                    handler.handle(command)
 
         # -- segment 1: mixed commands over shallow streams ------------------
         mixed_latencies: list[int] = []
         segment_started = time.perf_counter()
-        for account in range(accounts):
-            account_id = f"acct-{account}"
-            for step in range(commands_per_account):
-                if step % 3 == 2:
-                    command = {
-                        "type": "Withdraw",
-                        "account_id": account_id,
-                        "amount": 1,
-                    }
-                else:
-                    command = {
-                        "type": "Deposit",
-                        "account_id": account_id,
-                        "amount": 10,
-                    }
-                mixed_latencies.append(_timed(lambda: handler.handle(command)))
+        with _segment_span("segment.mixed_commands"):
+            for account in range(accounts):
+                account_id = f"acct-{account}"
+                for step in range(commands_per_account):
+                    if step % 3 == 2:
+                        command = {
+                            "type": "Withdraw",
+                            "account_id": account_id,
+                            "amount": 1,
+                        }
+                    else:
+                        command = {
+                            "type": "Deposit",
+                            "account_id": account_id,
+                            "amount": 10,
+                        }
+                    mixed_latencies.append(_timed(lambda: _handle_command(command)))
         mixed_duration = time.perf_counter() - segment_started
 
         # -- segment 2: hot account, stream depth grows per withdraw ---------
-        handler.handle(
+        _handle_command(
             {"type": "Deposit", "account_id": "hot", "amount": hot_withdraws + 1}
         )
         hot_latencies: list[int] = []
         depth_samples: list[dict] = []
         segment_started = time.perf_counter()
-        for step in range(hot_withdraws):
-            elapsed = _timed(
-                lambda: handler.handle(
-                    {"type": "Withdraw", "account_id": "hot", "amount": 1}
+        with _segment_span("segment.hot_withdraws"):
+            for step in range(hot_withdraws):
+                elapsed = _timed(
+                    lambda: _handle_command(
+                        {"type": "Withdraw", "account_id": "hot", "amount": 1}
+                    )
                 )
-            )
-            hot_latencies.append(elapsed)
-            if step in (0, hot_withdraws // 2, hot_withdraws - 1):
-                depth_samples.append(
-                    {"stream_depth": step + 1, "latency_ms": elapsed / 1_000_000}
-                )
+                hot_latencies.append(elapsed)
+                if step in (0, hot_withdraws // 2, hot_withdraws - 1):
+                    depth_samples.append(
+                        {"stream_depth": step + 1, "latency_ms": elapsed / 1_000_000}
+                    )
         hot_duration = time.perf_counter() - segment_started
 
         # -- consumer catch-up ------------------------------------------------
         segment_started = time.perf_counter()
-        report = ResilientConsumer(store, projection, batch=500).run()
+        with _segment_span("segment.consumer_catchup"):
+            report = ResilientConsumer(store, projection, batch=500).run()
         consumer_duration = time.perf_counter() - segment_started
         total_events = accounts * commands_per_account + hot_withdraws + 1
         assert report.applied == total_events, (
@@ -160,7 +199,7 @@ def run_load(accounts: int, commands_per_account: int, hot_withdraws: int) -> di
         projection.close()
         store.close()
 
-    return {
+    result = {
         "schema_version": 1,
         "phase": 3,
         "harness": "scripts/load_and_observe.py",
@@ -175,6 +214,7 @@ def run_load(accounts: int, commands_per_account: int, hot_withdraws: int) -> di
             "commands_per_account": commands_per_account,
             "hot_withdraws": hot_withdraws,
             "storage": "sqlite file (temp dir), WAL",
+            "traced": trace_hot_path,
         },
         "honest_scope": (
             "single process, single thread, local disk, no HTTP/network; "
@@ -192,9 +232,9 @@ def run_load(accounts: int, commands_per_account: int, hot_withdraws: int) -> di
                     for sample in depth_samples
                 ],
                 "expected_behavior": (
-                    "latency grows with stream depth: the no-overdraft rule "
-                    "replays the full stream per withdraw (O(n) hot path); "
-                    "bottleneck candidate for the Phase 3 write-up"
+                    "latency should stay flat in stream depth since the "
+                    "withdraw guard memoizes its fold (perf fix d82039b); "
+                    "regression here means the O(n) replay came back"
                 ),
             },
             "consumer_catchup": {
@@ -205,6 +245,14 @@ def run_load(accounts: int, commands_per_account: int, hot_withdraws: int) -> di
             "queries": _summarize(query_latencies, query_duration),
         },
     }
+    if exporter is not None:
+        from cloudscale.adapters.telemetry import summarize_spans
+
+        result["trace"] = {
+            "exporter": "in-memory (SimpleSpanProcessor)",
+            "spans_by_name": summarize_spans(exporter),
+        }
+    return result
 
 
 def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
@@ -212,6 +260,12 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--accounts", type=int, default=200)
     parser.add_argument("--commands-per-account", type=int, default=50)
     parser.add_argument("--hot-withdraws", type=int, default=2000)
+    parser.add_argument(
+        "--trace",
+        action="store_true",
+        help="Trace the hot path with OpenTelemetry (in-memory exporter); "
+        "adds overhead, so traced numbers are not comparable to untraced runs.",
+    )
     parser.add_argument(
         "--evidence-root",
         type=Path,
@@ -222,7 +276,12 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(arguments: Sequence[str] | None = None) -> int:
     args = _parse_args(arguments)
-    report = run_load(args.accounts, args.commands_per_account, args.hot_withdraws)
+    report = run_load(
+        args.accounts,
+        args.commands_per_account,
+        args.hot_withdraws,
+        trace_hot_path=args.trace,
+    )
 
     evidence_directory = (
         args.evidence_root.resolve()
@@ -230,7 +289,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
         else REPOSITORY_ROOT / "evidence" / report["revision"] / "phase-3-load"
     )
     evidence_directory.mkdir(parents=True, exist_ok=True)
-    report_path = evidence_directory / "report.json"
+    report_name = "report-traced.json" if args.trace else "report.json"
+    report_path = evidence_directory / report_name
     report_path.write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -251,6 +311,13 @@ def main(arguments: Sequence[str] | None = None) -> int:
     )
     for sample in segments["hot_account_withdraws"]["depth_samples"]:
         print(f"hot withdraw @depth {sample['stream_depth']}: {sample['latency_ms']}ms")
+    if "trace" in report:
+        print("spans (count, mean ms, p95 ms):")
+        for name, stats in report["trace"]["spans_by_name"].items():
+            print(
+                f"  {name:<28} {stats['count']:>6}  "
+                f"{stats['mean_ms']:>8}  {stats['p95_ms']:>8}"
+            )
     try:
         shown_path = report_path.relative_to(REPOSITORY_ROOT)
     except ValueError:
