@@ -150,7 +150,9 @@ opentelemetry-instrumentation-fastapi). Build order:
       without appending; mid-transaction failure rolls back everything.
       Events land in the same `events` table the consumer polls; full
       envelope identity retained in `event_envelopes`.
-- [ ] Postgres `CommandUnitOfWork` (same contract; PG-gated tests)
+- [x] Postgres `CommandUnitOfWork` — same contract, cross-process races
+      arbitrated by UNIQUE constraints + bounded retry; PG-gated tests
+      include two real cross-instance races (same-version, same-command-id)
 - [x] Command endpoint: `POST /v1/accounts/{id}/commands` through
       `CommandService` with client-supplied `command_id`; HTTP status taken
       from the persisted transport-neutral result (201 / 409 replay-conflict
@@ -158,15 +160,23 @@ opentelemetry-instrumentation-fastapi). Build order:
       unconditionally even when query auth is relaxed; end-to-end test
       proves POST → unit of work → log → consumer → GET (including the
       read-model trailing the log before the consumer runs)
-- [ ] Wire Phase 2 resilience around the command path (the deferred item:
-      breaker + retry now have a real remote downstream)
-- [ ] OTel FastAPI instrumentation reusing `adapters/telemetry.py`
-- [ ] Harness HTTP mode (`--http URL`): drive the Milestone 1 outstanding
-      gates — sustained 1,000 rps, command p99 ≤ 300 ms, query p99 ≤ 100 ms,
-      max projection lag ≤ 1 s — and record pass/fail into the evidence
-      payload consumed by `verify_milestone.py`
-- [ ] Consumer as a real process (uvicorn worker or sidecar loop) so
-      projection lag is measured, not simulated
+- [x] Wire Phase 2 resilience around the command path — breaker (transient
+      errors only; deterministic rejections never trip it) + retry behind
+      the endpoint; open circuit / exhausted budget → 503 + Retry-After,
+      safe to retry with the same command_id
+- [x] OTel FastAPI instrumentation via optional ``tracer_provider`` on
+      ``create_app`` (``configure_in_memory_provider`` in the telemetry
+      adapter)
+- [x] HTTP gate run (`scripts/http_gate_run.py`): real uvicorn + real
+      consumer process + authenticated load + projection-lag probes.
+      **All four evaluable Milestone 1 gates PASS** on the SQLite tier
+      (10 s window, localhost): 1,431 rps sustained (gate 1,000), command
+      p99 66 ms (gate 300), query p99 13 ms (gate 100), max projection lag
+      0.103 s (gate 1 s). The 30-day availability gate is recorded as
+      not_evaluated — a bench run cannot honestly claim it. Evidence under
+      `evidence/<sha>/phase-4-http-gates/`.
+- [x] Consumer as a real process (`cloudscale/entrypoints/consumer_loop`),
+      lag measured, not simulated
 - [ ] DoD: suite green, evidence run, README status, tag v0.4.0
 
 ## Definition of done (every phase)

@@ -16,8 +16,15 @@
 > `docs/phase-3-bottleneck-withdraw-guard.md`), and traces the hot path with
 > OpenTelemetry (`--trace`). The read/write tiers now also have a PostgreSQL
 > realization (`cloudscale/adapters/postgres/`, verified against live PG by
-> gated tests); Phase 4 (HTTP tier) is planned in the ROADMAP. HTTP and Kafka
-> remain deferred behind the ports — see [ROADMAP.md](./ROADMAP.md).
+> gated tests). Phase 4's HTTP tier is nearly complete: authenticated
+> command/query endpoints over the typed application layer with an idempotent
+> unit of work on both tiers, breaker+retry on the command path, optional
+> OTel server spans, and a real-deployment gate run
+> (`scripts/http_gate_run.py`) in which **all four evaluable Milestone 1
+> network gates pass** on the SQLite tier (1,431 rps sustained, command p99
+> 66 ms, query p99 13 ms, projection lag ≤ 0.103 s; 30-day availability
+> honestly not_evaluated). Kafka remains deferred behind the ports — see
+> [ROADMAP.md](./ROADMAP.md).
 
 ## Why this exists
 

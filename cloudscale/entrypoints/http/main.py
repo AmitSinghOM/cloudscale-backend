@@ -32,7 +32,9 @@ from cloudscale.entrypoints.http.settings import HttpSettings
 def build_app() -> FastAPI:
     log_db = os.environ["CLOUDSCALE_LOG_DB"]
     projection_db = os.environ["CLOUDSCALE_PROJECTION_DB"]
-    settings = HttpSettings()
+    # jwt_secret arrives via CLOUDSCALE_JWT_SECRET; pydantic-settings raises
+    # at startup when absent (fail-closed by design).
+    settings = HttpSettings()  # type: ignore[call-arg]
     unit_of_work = SqliteCommandUnitOfWork(log_db)
     projection = DeadLetteringProjectionStore(path=projection_db)
     return create_app(
