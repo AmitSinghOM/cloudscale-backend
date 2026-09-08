@@ -40,10 +40,18 @@ def configure_in_memory_tracing(
     The provider is local to the caller (not installed globally), so tests
     and harness runs cannot leak spans into each other.
     """
+    provider, exporter = configure_in_memory_provider(service_name)
+    return provider.get_tracer(service_name), exporter
+
+
+def configure_in_memory_provider(
+    service_name: str,
+) -> tuple[TracerProvider, InMemorySpanExporter]:
+    """Return a local TracerProvider + exporter (for framework instrumentation)."""
     exporter = InMemorySpanExporter()
     provider = TracerProvider(resource=Resource.create({"service.name": service_name}))
     provider.add_span_processor(SimpleSpanProcessor(exporter))
-    return provider.get_tracer(service_name), exporter
+    return provider, exporter
 
 
 class TracedSqliteEventStore(SqliteEventStore):
@@ -110,6 +118,7 @@ def summarize_spans(exporter: InMemorySpanExporter) -> dict:
 __all__ = [
     "TracedDeadLetteringProjectionStore",
     "TracedSqliteEventStore",
+    "configure_in_memory_provider",
     "configure_in_memory_tracing",
     "summarize_spans",
 ]

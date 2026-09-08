@@ -8,7 +8,9 @@ from the persisted, transport-neutral ``CommandResult``.
 
 from __future__ import annotations
 
-from typing import Literal
+import sqlite3
+from functools import partial
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -22,6 +24,15 @@ from cloudscale.domain.errors import DomainError
 from cloudscale.domain.results import CommandResult
 from cloudscale.entrypoints.http.auth import Principal, authenticate
 from cloudscale.entrypoints.http.settings import HttpSettings
+from cloudscale.resilience import (
+    CircuitBreaker,
+    CircuitOpenError,
+    RetryPolicy,
+    call_with_retry,
+)
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import TracerProvider
 
 API_VERSION = "v1"
 
@@ -83,10 +94,30 @@ def create_app(
     command_service: CommandService,
     query_service: QueryService,
     storage_metadata: dict[str, object],
+    transient_errors: tuple[type[BaseException], ...] = (sqlite3.OperationalError,),
+    retry_policy: RetryPolicy | None = None,
+    breaker: CircuitBreaker | None = None,
+    tracer_provider: TracerProvider | None = None,
 ) -> FastAPI:
-    """Build the HTTP app over explicit, injected collaborators."""
+    """Build the HTTP app over explicit, injected collaborators.
+
+    The command path runs under Phase 2 resilience: each attempt is guarded
+    by a circuit breaker that counts only ``transient_errors`` as failures
+    (a deterministic rejection proves the downstream processed the call), and
+    transient failures are retried under ``retry_policy``. An open circuit or
+    an exhausted retry budget maps to 503 with ``Retry-After`` — the caller
+    may safely retry with the SAME command_id thanks to the idempotent unit
+    of work.
+    """
+    command_retry = retry_policy or RetryPolicy(max_attempts=3)
+    command_breaker = breaker or CircuitBreaker(counted_errors=transient_errors)
     app = FastAPI(title="cloudscale-backend", version=API_VERSION)
     app.state.settings = settings
+
+    if tracer_provider is not None:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+        FastAPIInstrumentor.instrument_app(app, tracer_provider=tracer_provider)
 
     if settings.query_auth_required:
         query_auth = Depends(authenticate)
@@ -111,12 +142,34 @@ def create_app(
             )
         except DomainError as error:
             raise HTTPException(status_code=400, detail=error.code) from error
-        result = command_service.execute(
-            command,
-            command_id=request.command_id,
-            issuer=principal.issuer,
-            subject=principal.subject,
-        )
+
+        def _attempt() -> CommandResult:
+            return command_breaker.call(
+                partial(
+                    command_service.execute,
+                    command,
+                    command_id=request.command_id,
+                    issuer=principal.issuer,
+                    subject=principal.subject,
+                )
+            )
+
+        try:
+            result = call_with_retry(
+                _attempt, command_retry, retryable_errors=transient_errors
+            )
+        except CircuitOpenError as error:
+            raise HTTPException(
+                status_code=503,
+                detail="command path unavailable (circuit open)",
+                headers={"Retry-After": str(max(1, int(error.retry_after_seconds)))},
+            ) from error
+        except transient_errors as error:
+            raise HTTPException(
+                status_code=503,
+                detail="command path unavailable (transient storage failure)",
+                headers={"Retry-After": "1"},
+            ) from error
         return _command_response(result)
 
     @app.get(
