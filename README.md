@@ -2,11 +2,15 @@
 
 **A production-shaped distributed backend demonstrating CQRS, event sourcing, async processing, and resilience patterns at scale.**
 
-> **Status: Phase 0 done; Phase 1 durable-log tier realized (SQLite).** The
-> command/query split ships with an in-memory event log, and the durable event
-> log + idempotent consumer are built and tested on SQLite (stdlib-only). Kafka
-> and PostgreSQL remain deferred behind the store seam — see
-> [ROADMAP.md](./ROADMAP.md).
+> **Status: Phase 0 done; Phase 1 durable-log tier realized (SQLite); Milestone 1
+> (local correctness) verified.** The original `cqrs/` command/query split ships
+> with an in-memory event log, and the durable event log + idempotent consumer
+> are built and tested on SQLite (stdlib-only). Milestone 1 added a typed
+> hexagonal `cloudscale/` package (domain / application / adapters) behind the
+> same guarantees, verified by a 122-test suite (17 legacy + 105 additions,
+> including 9 Hypothesis property suites) and a revision-bound evidence gate
+> (`scripts/verify_milestone.py`). HTTP, Kafka, and PostgreSQL remain deferred
+> behind the ports — see [ROADMAP.md](./ROADMAP.md).
 
 ## Why this exists
 
@@ -26,6 +30,35 @@ API (FastAPI) → Command side (writes → event log) → Kafka → Projections 
 - Circuit breakers around downstream calls
 - Dead-letter queue for poison messages
 - Idempotent consumers + OpenTelemetry tracing
+
+## Repository layout
+
+```
+cloudscale/            Milestone-1 hexagonal package
+  domain/              Account aggregate, commands, event envelopes, results, errors
+  application/         Typed ports (Protocols) + command/query services
+  adapters/            SQLite adapters + compat shims over the legacy cqrs/ stores
+cqrs/                  Original Phase-0/1 implementation (kept green, 17 tests)
+tests/
+  unit/ properties/    Domain units + 9 Hypothesis property suites (fixed seed)
+  architecture/        Dependency-boundary enforcement (domain imports nothing outward)
+  compat/ failure/     Legacy-API compatibility + process/failpoint harness self-test
+  milestones/          Milestone-1 contract (scope, gates, claim-safety)
+scripts/verify_milestone.py   Deterministic gate; writes evidence/<git-sha>/milestone-1/
+```
+
+## Verifying
+
+```
+make install-dev   # hash-pinned lockfile into .venv (Python 3.12)
+make check         # ruff format-check + lint, mypy, pytest (122 tests)
+.venv/bin/python scripts/verify_milestone.py 1   # revision-bound evidence gate
+```
+
+Milestone 1 is deliberately **local-only**: HTTP/network behavior, Kafka
+delivery, the PostgreSQL production tier, auth, and load/availability gates
+are excluded scope and recorded as outstanding gates in the evidence payload —
+no production-readiness claim is made or permitted by the contract tests.
 
 ## Tech stack
 
