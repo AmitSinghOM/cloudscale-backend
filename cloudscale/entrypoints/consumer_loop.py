@@ -36,14 +36,10 @@ class _ClosableProjection(DeadLetteringProjection, Protocol):
     def close(self) -> None: ...
 
 
-def main() -> int:
-    storage = os.environ.get("CLOUDSCALE_STORAGE", "sqlite")
-    poll_interval = float(
-        os.environ.get("CLOUDSCALE_CONSUMER_POLL_SECONDS", _POLL_INTERVAL_SECONDS)
-    )
-
-    feed: _ClosableFeed
-    projection: _ClosableProjection
+def build_storage(
+    storage: str,
+) -> tuple[_ClosableFeed, _ClosableProjection, tuple[type[BaseException], ...]]:
+    """Return ``(feed, projection, retryable_errors)`` for a storage tier."""
     if storage == "postgres":
         import psycopg
 
@@ -53,10 +49,12 @@ def main() -> int:
         )
 
         dsn = os.environ["CLOUDSCALE_PG_DSN"]
-        feed = PostgresEventStore(dsn)
-        projection = PostgresProjectionStore(dsn)
-        retryable: tuple[type[BaseException], ...] = (psycopg.OperationalError,)
-    elif storage == "sqlite":
+        return (
+            PostgresEventStore(dsn),
+            PostgresProjectionStore(dsn),
+            (psycopg.OperationalError,),
+        )
+    if storage == "sqlite":
         import sqlite3
 
         from cloudscale.adapters.sqlite_compat.dead_letter_store import (
@@ -64,13 +62,20 @@ def main() -> int:
         )
         from cqrs import SqliteEventStore
 
-        feed = SqliteEventStore(os.environ["CLOUDSCALE_LOG_DB"])
-        projection = DeadLetteringProjectionStore(
-            path=os.environ["CLOUDSCALE_PROJECTION_DB"]
+        return (
+            SqliteEventStore(os.environ["CLOUDSCALE_LOG_DB"]),
+            DeadLetteringProjectionStore(path=os.environ["CLOUDSCALE_PROJECTION_DB"]),
+            (sqlite3.OperationalError,),
         )
-        retryable = (sqlite3.OperationalError,)
-    else:
-        raise ValueError(f"unsupported CLOUDSCALE_STORAGE: {storage!r}")
+    raise ValueError(f"unsupported CLOUDSCALE_STORAGE: {storage!r}")
+
+
+def main() -> int:
+    storage = os.environ.get("CLOUDSCALE_STORAGE", "sqlite")
+    poll_interval = float(
+        os.environ.get("CLOUDSCALE_CONSUMER_POLL_SECONDS", _POLL_INTERVAL_SECONDS)
+    )
+    feed, projection, retryable = build_storage(storage)
 
     running = True
 
