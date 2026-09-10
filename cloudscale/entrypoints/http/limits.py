@@ -14,9 +14,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
-from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
-from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
 
 
 class RateLimiter:
@@ -68,31 +66,63 @@ class RateLimiter:
             del self._buckets[key]
 
 
-class BodySizeLimitMiddleware(BaseHTTPMiddleware):
-    """Reject requests whose declared or streamed body exceeds ``max_bytes``."""
+class BodySizeLimitMiddleware:
+    """Reject requests whose declared or streamed body exceeds ``max_bytes``.
+
+    Pure ASGI (no ``BaseHTTPMiddleware`` re-streaming cost): a declared
+    Content-Length over the cap is rejected before any body byte is read; an
+    undeclared (chunked) body is counted as it streams and cut off with 413
+    the moment it passes the cap.
+    """
 
     def __init__(self, app: Any, max_bytes: int) -> None:
-        super().__init__(app)
+        self._app = app
         self._max_bytes = max_bytes
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
-        declared = request.headers.get("content-length")
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+
+        declared = None
+        for name, value in scope.get("headers", ()):
+            if name == b"content-length":
+                declared = value
+                break
         if declared is not None:
             try:
-                if int(declared) > self._max_bytes:
-                    return _too_large(self._max_bytes)
+                too_large = int(declared) > self._max_bytes
             except ValueError:
-                return JSONResponse(
+                response = JSONResponse(
                     status_code=400, content={"detail": "invalid Content-Length"}
                 )
-        elif request.method in ("POST", "PUT", "PATCH"):
-            # Chunked body with no declared length: read up to the cap.
-            body = await request.body()
-            if len(body) > self._max_bytes:
-                return _too_large(self._max_bytes)
-        return await call_next(request)
+                await response(scope, receive, send)
+                return
+            if too_large:
+                await _too_large(self._max_bytes)(scope, receive, send)
+                return
+            await self._app(scope, receive, send)
+            return
+
+        seen = 0
+
+        async def counting_receive() -> dict:
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > self._max_bytes:
+                    raise _BodyTooLarge()
+            return message
+
+        try:
+            await self._app(scope, counting_receive, send)
+        except _BodyTooLarge:
+            await _too_large(self._max_bytes)(scope, receive, send)
+
+
+class _BodyTooLarge(Exception):
+    """Internal signal: a streamed body exceeded the cap."""
 
 
 def _too_large(max_bytes: int) -> JSONResponse:
