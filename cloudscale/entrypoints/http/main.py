@@ -27,10 +27,12 @@ from cloudscale.adapters.projection_readers import StoreProjectionReader
 from cloudscale.application.command_service import CommandService
 from cloudscale.application.query_service import QueryService
 from cloudscale.entrypoints.http.app import create_app
+from cloudscale.entrypoints.http.observability import configure_logging
 from cloudscale.entrypoints.http.settings import HttpSettings
 
 
 def build_app() -> FastAPI:
+    configure_logging()
     storage = os.environ.get("CLOUDSCALE_STORAGE", "sqlite")
     # jwt_secret arrives via CLOUDSCALE_JWT_SECRET; pydantic-settings raises
     # at startup when absent (fail-closed by design).
@@ -55,6 +57,7 @@ def build_app() -> FastAPI:
             query_service=QueryService(StoreProjectionReader(pg_projection)),
             storage_metadata=pg_projection.metadata,
             transient_errors=(psycopg.OperationalError,),
+            closeables=(pg_unit_of_work, pg_projection),
         )
 
     if storage != "sqlite":
@@ -76,6 +79,7 @@ def build_app() -> FastAPI:
         command_service=CommandService(unit_of_work),
         query_service=QueryService(StoreProjectionReader(projection)),
         storage_metadata=projection.metadata,
+        closeables=(unit_of_work, projection),
     )
 
 

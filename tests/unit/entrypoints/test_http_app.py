@@ -39,6 +39,8 @@ def _token(
     issuer: str = "cloudscale",
     subject: str | None = "user-1",
     expires_in: int = 300,
+    scope: str | None = "accounts:admin",
+    accounts: list[str] | None = None,
 ) -> str:
     claims: dict = {
         "iss": issuer,
@@ -46,6 +48,10 @@ def _token(
     }
     if subject is not None:
         claims["sub"] = subject
+    if scope is not None:
+        claims["scope"] = scope
+    if accounts is not None:
+        claims["accounts"] = accounts
     return jwt.encode(claims, secret, algorithm="HS256")
 
 

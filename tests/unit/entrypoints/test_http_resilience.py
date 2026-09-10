@@ -37,6 +37,7 @@ def _token() -> dict:
         {
             "iss": "cloudscale",
             "sub": "user-1",
+            "scope": "accounts:admin",
             "exp": datetime.now(UTC) + timedelta(minutes=5),
         },
         SECRET,
