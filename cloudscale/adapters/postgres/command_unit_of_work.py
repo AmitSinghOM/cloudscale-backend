@@ -1,7 +1,10 @@
 """Concrete ``CommandUnitOfWork`` on PostgreSQL — same contract as SQLite.
 
-Single-connection instances serialize in-process with a lock; ACROSS
-processes the database's UNIQUE constraints arbitrate instead of any lock:
+The decision logic lives in ``application.command_execution`` (shared with
+the SQLite adapter); this class supplies the four storage operations, the
+transaction, and the cross-process race handling. Single-connection
+instances serialize in-process with a lock; ACROSS processes the database's
+UNIQUE constraints arbitrate instead of any lock:
 
 - Two writers racing the same stream version both pass the pre-append fold,
   and UNIQUE(stream, seq) rejects the loser. The loser's transaction rolls
@@ -10,10 +13,6 @@ processes the database's UNIQUE constraints arbitrate instead of any lock:
 - Two writers racing the same ``command_id`` collide on the
   ``command_results`` PRIMARY KEY; the loser's retry finds the winner's
   stored result and applies the normal replay/conflict semantics.
-
-Everything else — equal-hash replay identity, conflict-not-persisted,
-rejections-persisted-without-append, envelope retention — mirrors
-``SqliteCommandUnitOfWork``.
 """
 
 from __future__ import annotations
@@ -27,11 +26,11 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.rows import dict_row
 
+from cloudscale.application.command_execution import execute_command_decision
 from cloudscale.application.ports import NormalizedCommand
-from cloudscale.domain.account import AccountState, decide, fold
-from cloudscale.domain.errors import DomainError, InsufficientFundsError
-from cloudscale.domain.events import Deposited, EventEnvelope, Withdrawn
-from cloudscale.domain.results import CommandOutcome, CommandResult
+from cloudscale.domain.account import AccountState, fold
+from cloudscale.domain.events import AccountEvent, Deposited, EventEnvelope, Withdrawn
+from cloudscale.domain.results import CommandResult
 
 # Same events DDL as PostgresEventStore so both writers interoperate.
 _SCHEMA = """
@@ -81,7 +80,13 @@ class PostgresCommandUnitOfWork:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         event_id_factory: Callable[[], UUID] = uuid4,
     ) -> None:
-        self._conn = psycopg.connect(conninfo, row_factory=dict_row)
+        # Autocommit connection: psycopg3's recommended pattern. Without it, a
+        # bare read opens an implicit transaction and a later
+        # conn.transaction() block silently degrades to a SAVEPOINT that
+        # never commits (writes lost on close). With autocommit=True every
+        # transaction() block is a REAL transaction and single statements
+        # commit immediately.
+        self._conn = psycopg.connect(conninfo, row_factory=dict_row, autocommit=True)
         with self._conn.transaction():
             # Serialize concurrent schema creation across processes:
             # simultaneous CREATE TABLE IF NOT EXISTS can fail on the
@@ -102,7 +107,12 @@ class PostgresCommandUnitOfWork:
             for attempt in range(1, _MAX_RACE_RETRIES + 2):
                 try:
                     with self._conn.transaction():
-                        return self._execute_in_transaction(request)
+                        return execute_command_decision(
+                            self,
+                            request,
+                            clock=self._clock,
+                            event_id_factory=self._event_id_factory,
+                        )
                 except psycopg.errors.UniqueViolation:
                     # Cross-process race lost: either another writer took our
                     # stream seq or persisted our command_id first. The next
@@ -111,86 +121,9 @@ class PostgresCommandUnitOfWork:
                         raise
         raise AssertionError("unreachable")  # pragma: no cover
 
-    # -- internals -------------------------------------------------------------
+    # -- CommandDecisionStorage ------------------------------------------------
 
-    def _execute_in_transaction(self, request: NormalizedCommand) -> CommandResult:
-        stored = self._stored_result(request.command_id)
-        if stored is not None:
-            if stored.request_hash == request.request_hash:
-                return stored
-            return self._rejection(
-                request,
-                CommandOutcome.COMMAND_ID_CONFLICT,
-                error_code="command_id_conflict",
-                http_status=409,
-                current_version=self._fold_stream(request.command.account_id).version,
-            )
-
-        state = self._fold_stream(request.command.account_id)
-
-        if request.command.expected_version != state.version:
-            return self._persist(
-                self._rejection(
-                    request,
-                    CommandOutcome.VERSION_CONFLICT,
-                    error_code="version_conflict",
-                    http_status=409,
-                    current_version=state.version,
-                )
-            )
-
-        try:
-            event = decide(state, request.command)
-        except InsufficientFundsError as error:
-            return self._persist(
-                self._rejection(
-                    request,
-                    CommandOutcome.INSUFFICIENT_FUNDS,
-                    error_code=error.code,
-                    http_status=422,
-                    current_version=state.version,
-                )
-            )
-        except DomainError as error:
-            return self._persist(
-                self._rejection(
-                    request,
-                    CommandOutcome.DOMAIN_REJECTED,
-                    error_code=error.code,
-                    http_status=400,
-                    current_version=state.version,
-                )
-            )
-
-        occurred_at = self._clock()
-        envelope = EventEnvelope.from_domain_event(
-            event,
-            event_id=self._event_id_factory(),
-            stream_version=state.version + 1,
-            occurred_at=occurred_at,
-            correlation_id=request.correlation_id,
-            causation_id=request.command_id,
-            command_id=request.command_id,
-        )
-        self._append(envelope, event)
-        return self._persist(
-            CommandResult(
-                command_id=request.command_id,
-                request_hash=request.request_hash,
-                outcome=CommandOutcome.ACCEPTED,
-                account_id=request.command.account_id,
-                expected_version=request.command.expected_version,
-                current_version=state.version,
-                committed_version=envelope.stream_version,
-                event_id=envelope.event_id,
-                correlation_id=request.correlation_id,
-                error_code=None,
-                http_status=201,
-                created_at=occurred_at,
-            )
-        )
-
-    def _stored_result(self, command_id: UUID) -> CommandResult | None:
+    def stored_result(self, command_id: UUID) -> CommandResult | None:
         row = self._conn.execute(
             "SELECT result_json FROM command_results WHERE command_id = %s",
             (str(command_id),),
@@ -199,7 +132,7 @@ class PostgresCommandUnitOfWork:
             return None
         return CommandResult.from_dict(json.loads(row["result_json"]))
 
-    def _fold_stream(self, account_id: str) -> AccountState:
+    def fold_stream(self, account_id: str) -> AccountState:
         rows = self._conn.execute(
             "SELECT type, account_id, amount FROM events "
             "WHERE stream = %s ORDER BY seq ASC",
@@ -219,7 +152,7 @@ class PostgresCommandUnitOfWork:
                 raise ValueError(f"unsupported event type in stream: {row['type']!r}")
         return fold(events)
 
-    def _append(self, envelope: EventEnvelope, event: Deposited | Withdrawn) -> None:
+    def append_event(self, envelope: EventEnvelope, event: AccountEvent) -> None:
         self._conn.execute(
             "INSERT INTO events (event_id, stream, seq, type, account_id, amount) "
             "VALUES (%s, %s, %s, %s, %s, %s)",
@@ -249,36 +182,11 @@ class PostgresCommandUnitOfWork:
             ),
         )
 
-    def _persist(self, result: CommandResult) -> CommandResult:
+    def persist_result(self, result: CommandResult) -> None:
         self._conn.execute(
             "INSERT INTO command_results (command_id, request_hash, result_json) "
             "VALUES (%s, %s, %s)",
             (str(result.command_id), result.request_hash, result.to_json()),
-        )
-        return result
-
-    def _rejection(
-        self,
-        request: NormalizedCommand,
-        outcome: CommandOutcome,
-        *,
-        error_code: str,
-        http_status: int,
-        current_version: int,
-    ) -> CommandResult:
-        return CommandResult(
-            command_id=request.command_id,
-            request_hash=request.request_hash,
-            outcome=outcome,
-            account_id=request.command.account_id,
-            expected_version=request.command.expected_version,
-            current_version=current_version,
-            committed_version=None,
-            event_id=None,
-            correlation_id=request.correlation_id,
-            error_code=error_code,
-            http_status=http_status,
-            created_at=self._clock(),
         )
 
 

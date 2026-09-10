@@ -180,6 +180,45 @@ def test_dead_letter_and_redrive_roundtrip(
         projection.close()
 
 
+def test_writes_are_visible_to_a_second_connection_after_reads(
+    throwaway_dsn: str, stream: str, consumer_name: str
+) -> None:
+    """Regression lock for the psycopg3 savepoint trap.
+
+    A bare read before ``conn.transaction()`` on a non-autocommit connection
+    silently downgrades the block to a savepoint that never commits — the
+    writer's own connection sees the data, every other connection never does.
+    This test performs a read FIRST (the consumer loop's exact sequence:
+    ``last_id()`` then ``apply()``), then asserts the write through a
+    SEPARATE connection while the writer is still open.
+    """
+    writer = PostgresProjectionStore(throwaway_dsn, consumer=consumer_name)
+    observer = PostgresProjectionStore(throwaway_dsn, consumer=consumer_name)
+    try:
+        assert writer.last_id() == 0  # bare read first — arms the trap
+        event = _deposit(stream, 55)
+        event["id"] = 9
+        assert writer.apply(event) is True
+
+        # The OTHER connection must see it immediately, writer still open.
+        assert observer.balance(stream)["balance"] == 55
+        assert observer.last_id() == 9
+
+        # Same discipline on the event store: read first, then append.
+        store_writer = PostgresEventStore(throwaway_dsn)
+        store_observer = PostgresEventStore(throwaway_dsn)
+        try:
+            assert store_writer.read(stream) == []  # bare read first
+            store_writer.append(stream, _deposit(stream, 1))
+            assert len(store_observer.read(stream)) == 1
+        finally:
+            store_writer.close()
+            store_observer.close()
+    finally:
+        writer.close()
+        observer.close()
+
+
 def test_resilient_consumer_end_to_end_on_postgres(
     throwaway_dsn: str, consumer_name: str
 ) -> None:

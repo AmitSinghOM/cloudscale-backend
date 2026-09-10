@@ -43,7 +43,9 @@ if str(REPOSITORY_ROOT) not in sys.path:
 import httpx  # noqa: E402
 import jwt  # noqa: E402
 
-SECRET = "http-gate-run-secret-0123456789abcdef-0123456789abcdef"
+# Bench-only credential: generated tokens live only for one localhost
+# gate run against a throwaway deployment. Not a real secret.
+BENCH_ONLY_SECRET = "http-gate-run-secret-0123456789abcdef-0123456789abcdef"
 
 GATE_RPS = 1000.0
 GATE_COMMAND_P99_MS = 300.0
@@ -81,7 +83,7 @@ def _token() -> str:
             "sub": "gate-runner",
             "exp": datetime.now(UTC) + timedelta(hours=1),
         },
-        SECRET,
+        BENCH_ONLY_SECRET,
         algorithm="HS256",
     )
 
@@ -232,41 +234,46 @@ def run_gates(
     with tempfile.TemporaryDirectory(prefix="cloudscale-gate-") as workdir:
         env = dict(
             os.environ,
-            CLOUDSCALE_JWT_SECRET=SECRET,
+            CLOUDSCALE_JWT_SECRET=BENCH_ONLY_SECRET,
             CLOUDSCALE_STORAGE=storage,
             CLOUDSCALE_LOG_DB=os.path.join(workdir, "log.db"),
             CLOUDSCALE_PROJECTION_DB=os.path.join(workdir, "projection.db"),
         )
-        if storage == "postgres":
-            import psycopg
-
-            database = f"cloudscale_gate_{uuid4().hex[:12]}"
-            admin = psycopg.connect(admin_dsn, autocommit=True)
-            admin.execute(f'CREATE DATABASE "{database}"')
-            env["CLOUDSCALE_PG_DSN"] = f"{admin_dsn.rsplit('/', 1)[0]}/{database}"
-        server = subprocess.Popen(
-            (
-                sys.executable,
-                "-m",
-                "uvicorn",
-                "--factory",
-                "cloudscale.entrypoints.http.main:build_app",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                "--log-level",
-                "warning",
-            ),
-            cwd=REPOSITORY_ROOT,
-            env=env,
-        )
-        consumer = subprocess.Popen(
-            (sys.executable, "-m", "cloudscale.entrypoints.consumer_loop"),
-            cwd=REPOSITORY_ROOT,
-            env=env,
-        )
+        # One try/finally covers throwaway-DB creation AND process spawns, so
+        # a failure at any point tears down whatever already exists.
+        processes: list[subprocess.Popen] = []
         try:
+            if storage == "postgres":
+                import psycopg
+
+                database = f"cloudscale_gate_{uuid4().hex[:12]}"
+                admin = psycopg.connect(admin_dsn, autocommit=True)
+                admin.execute(f'CREATE DATABASE "{database}"')
+                env["CLOUDSCALE_PG_DSN"] = f"{admin_dsn.rsplit('/', 1)[0]}/{database}"
+            server = subprocess.Popen(
+                (
+                    sys.executable,
+                    "-m",
+                    "uvicorn",
+                    "--factory",
+                    "cloudscale.entrypoints.http.main:build_app",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--log-level",
+                    "warning",
+                ),
+                cwd=REPOSITORY_ROOT,
+                env=env,
+            )
+            processes.append(server)
+            consumer = subprocess.Popen(
+                (sys.executable, "-m", "cloudscale.entrypoints.consumer_loop"),
+                cwd=REPOSITORY_ROOT,
+                env=env,
+            )
+            processes.append(consumer)
             _wait_for_health(base_url)
 
             stop = threading.Event()
@@ -292,16 +299,20 @@ def run_gates(
                 worker.join(timeout=15.0)
             measured_duration = time.perf_counter() - measured_started
         finally:
-            for process in (consumer, server):
+            for process in reversed(processes):
                 process.terminate()
-            for process in (consumer, server):
+            for process in reversed(processes):
                 try:
                     process.wait(timeout=10.0)
                 except subprocess.TimeoutExpired:
                     process.kill()
             if admin is not None and database is not None:
-                admin.execute(f'DROP DATABASE "{database}" WITH (FORCE)')
-                admin.close()
+                # Cleanup must never mask the run's real error: IF EXISTS
+                # covers a CREATE that failed midway, and close() always runs.
+                try:
+                    admin.execute(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
+                finally:
+                    admin.close()
 
     command_latencies = [value for worker in commands for value in worker.latencies_ms]
     query_latencies = [value for worker in queries for value in worker.latencies_ms]
