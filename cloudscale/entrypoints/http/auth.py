@@ -1,9 +1,18 @@
-"""JWT bearer authentication for the HTTP tier.
+"""JWT bearer authentication and account authorization for the HTTP tier.
 
-Minimal by design (HS256 shared secret) but strict: expired, unsigned,
-wrongly signed, wrong-issuer, and subject-less tokens are all rejected with
-401. The verified principal carries the ``issuer``/``subject`` pair the
-command normalization layer hashes into idempotency identity.
+Authentication is minimal by design (HS256 shared secret) but strict:
+expired, unsigned, wrongly signed, wrong-issuer, wrong-audience, and
+subject-less tokens are all rejected with a single fixed 401 message (no
+token-parser fingerprinting).
+
+Authorization is claims-based. A token grants access to exactly the
+accounts it names:
+
+- ``accounts``: list of account ids the subject may command and read;
+- ``scope``: space-separated scopes; ``accounts:admin`` grants all accounts.
+
+Anything else is 403. A durable ownership registry (accounts created by and
+bound to a subject) is the next step — see ROADMAP Phase 5.
 """
 
 from __future__ import annotations
@@ -15,13 +24,21 @@ from fastapi import Depends, HTTPException, Request
 
 from cloudscale.entrypoints.http.settings import HttpSettings
 
+ADMIN_SCOPE = "accounts:admin"
+_INVALID_TOKEN = "invalid or expired bearer token"
+
 
 @dataclass(frozen=True, slots=True)
 class Principal:
-    """Verified caller identity."""
+    """Verified caller identity and the accounts it may act on."""
 
     issuer: str
     subject: str
+    account_ids: frozenset[str]
+    scopes: frozenset[str]
+
+    def may_access(self, account_id: str) -> bool:
+        return ADMIN_SCOPE in self.scopes or account_id in self.account_ids
 
 
 def _unauthorized(detail: str) -> HTTPException:
@@ -39,6 +56,16 @@ def _get_settings(request: Request) -> HttpSettings:
     return settings
 
 
+def _string_list(value: object, claim: str) -> frozenset[str]:
+    if value is None:
+        return frozenset()
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item for item in value
+    ):
+        raise _unauthorized(f"token claim {claim!r} must be a list of strings")
+    return frozenset(value)
+
+
 def authenticate(
     request: Request, settings: HttpSettings = Depends(_get_settings)
 ) -> Principal:
@@ -47,20 +74,43 @@ def authenticate(
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
         raise _unauthorized("missing bearer token")
+    required = ["sub", "exp", "iss"]
+    decode_kwargs: dict = {}
+    if settings.jwt_audience is not None:
+        required.append("aud")
+        decode_kwargs["audience"] = settings.jwt_audience
     try:
         claims = jwt.decode(
             token.strip(),
             settings.jwt_secret,
             algorithms=[settings.jwt_algorithm],
             issuer=settings.jwt_issuer,
-            options={"require": ["sub", "exp", "iss"]},
+            options={"require": required},
+            **decode_kwargs,
         )
     except jwt.InvalidTokenError as error:
-        raise _unauthorized(f"invalid token: {type(error).__name__}") from error
+        # One fixed message: never echo the parser's exception class.
+        raise _unauthorized(_INVALID_TOKEN) from error
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject:
-        raise _unauthorized("token subject must be a non-empty string")
-    return Principal(issuer=str(claims["iss"]), subject=subject)
+        raise _unauthorized(_INVALID_TOKEN)
+    scope_value = claims.get("scope", "")
+    if not isinstance(scope_value, str):
+        raise _unauthorized("token claim 'scope' must be a string")
+    return Principal(
+        issuer=str(claims["iss"]),
+        subject=subject,
+        account_ids=_string_list(claims.get("accounts"), "accounts"),
+        scopes=frozenset(scope_value.split()),
+    )
 
 
-__all__ = ["Principal", "authenticate"]
+def authorize_account(principal: Principal, account_id: str) -> None:
+    """Raise 403 unless ``principal`` may act on ``account_id``."""
+    if not principal.may_access(account_id):
+        raise HTTPException(
+            status_code=403, detail="principal is not authorized for this account"
+        )
+
+
+__all__ = ["ADMIN_SCOPE", "Principal", "authenticate", "authorize_account"]

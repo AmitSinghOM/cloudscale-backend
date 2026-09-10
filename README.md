@@ -31,20 +31,32 @@
 
 A reference backend that does the unglamorous things right: separates reads from writes, sources state from events, isolates failures with circuit breakers, and never silently drops work. The point is to *operate* it under load and show the numbers.
 
-## Architecture (planned)
+## Architecture (as built)
 
 ```
-API (FastAPI) → Command side (writes → event log) → Kafka → Projections (read models) ; Query side reads projections
+Client ──JWT──▶ FastAPI (authn · claims-based authz · rate limit · audit log · metrics)
+                  │ POST /v1/accounts/{id}/commands          GET /v1/accounts/{id}/balance
+                  ▼                                                     ▲
+        CommandService ─▶ CommandUnitOfWork (idempotent, atomic)       QueryService
+                  │  decide → append event → persist result             │
+                  ▼                                                     │
+          Durable event log ──▶ ResilientConsumer (retry · breaker · DLQ) ──▶ Projection
+          (SQLite | PostgreSQL)     separate process                        (SQLite | PostgreSQL)
 ```
+
+Kafka as the log transport is **deferred by decision** (no broker available to
+verify against); the consumer speaks a transport-agnostic `EventFeed` protocol,
+so the swap is wiring, not redesign.
 
 ## Components
 
-- CQRS: separate command and query paths
-- Event sourcing with Kafka as the log
-- Read-model projections in PostgreSQL
-- Circuit breakers around downstream calls
-- Dead-letter queue for poison messages
-- Idempotent consumers + OpenTelemetry tracing
+- CQRS: separate command and query paths through a typed application layer
+- Event sourcing on a durable, totally ordered log (SQLite and PostgreSQL realizations)
+- Read-model projections with exactly-once effect under at-least-once delivery
+- Circuit breakers + bounded retry on the command path and in the consumer
+- Dead-letter queue with redrive tooling for poison messages
+- JWT authentication, claims-based account authorization, per-subject rate limiting
+- Structured JSON logs, append-only command audit log, Prometheus metrics, OpenTelemetry tracing
 
 ## Repository layout
 

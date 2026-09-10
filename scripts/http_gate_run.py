@@ -81,6 +81,7 @@ def _token() -> str:
         {
             "iss": "cloudscale",
             "sub": "gate-runner",
+            "scope": "accounts:admin",
             "exp": datetime.now(UTC) + timedelta(hours=1),
         },
         BENCH_ONLY_SECRET,
@@ -236,6 +237,9 @@ def run_gates(
             os.environ,
             CLOUDSCALE_JWT_SECRET=BENCH_ONLY_SECRET,
             CLOUDSCALE_STORAGE=storage,
+            # Bench-only: the per-subject limiter would throttle a single
+            # load-generating subject; disabling it is recorded in the report.
+            CLOUDSCALE_RATE_LIMIT_PER_MINUTE="0",
             CLOUDSCALE_LOG_DB=os.path.join(workdir, "log.db"),
             CLOUDSCALE_PROJECTION_DB=os.path.join(workdir, "projection.db"),
         )
@@ -368,7 +372,8 @@ def run_gates(
                 if storage == "postgres"
                 else "sqlite tier (temp dir)"
             ),
-            "auth": "JWT bearer on every request",
+            "auth": "JWT bearer on every request (accounts:admin scope)",
+            "rate_limit": "disabled for bench (CLOUDSCALE_RATE_LIMIT_PER_MINUTE=0)",
         },
         "workload": {
             "duration_seconds": round(measured_duration, 2),

@@ -180,6 +180,54 @@ opentelemetry-instrumentation-fastapi). Build order:
 - [x] DoD: suite green (204), gate-run evidence recorded, README status
       updated, tagged `cloudscale-backend/v0.4.0`
 
+## Phase 5 — Production readiness  ·  ~4–6 wknds  ·  🚧 started
+**Goal:** Close the CTO / staff-security review gaps so the service can carry
+customer traffic. Source: the 2026-09-10 review (six blocking findings).
+
+### Done (2026-09-10)
+- [x] **Authorization** (CRITICAL #1): claims-based, default-deny — `accounts`
+      claim names permitted accounts, `accounts:admin` scope grants all;
+      403 otherwise, on commands and queries alike
+- [x] **Observability** (CRITICAL #2): JSON-lines structured logs, request log
+      with latency + subject, append-only audit record per command decision
+      (never the token), Prometheus registry at `/metrics`
+- [x] **Abuse controls** (HIGH #3): per-subject token-bucket rate limit
+      (429 + Retry-After), body-size cap (413), CORS closed by default
+- [x] **Delivery** (HIGH #6, part): multi-stage non-root Dockerfile with
+      hash-pinned install and health check; GitHub Actions CI running the
+      full gate against a PostgreSQL service container (asserts the PG tests
+      did not skip) and building the image with a fail-closed startup smoke
+- [x] Hardening: fixed 401 message, optional `aud` enforcement,
+      `extra="forbid"` on command requests, lifespan closes storage,
+      README architecture reflects what is built
+
+### Remaining, in priority order
+- [ ] **Account ownership registry** — authorization today trusts the token
+      issuer to name accounts. Add `POST /v1/accounts` that creates an
+      account bound to the caller's subject (persisted alongside the log),
+      and authorize against that record; keep claims as the admin/service
+      path. Closes the gap between "token says so" and "the system knows".
+- [ ] **Connection pooling + transactional outbox** (HIGH #4) — replace the
+      single-connection-behind-a-lock adapters with `psycopg_pool`
+      (the unit-of-work storage protocol needs a per-call connection handle),
+      then drain the log through an outbox in commit order so the documented
+      multi-writer `read_all` id-skew stops being a caveat. Unlocks multiple
+      uvicorn workers and horizontal scale.
+- [ ] **Shared rate limiter** — the in-process bucket bounds one replica;
+      move to a shared store (PostgreSQL or Redis) once there are replicas.
+- [ ] **Identity** (HIGH #5) — OIDC/JWKS verification (RS256/ES256,
+      key rotation) as an alternative to the HS256 shared secret; short
+      token lifetimes plus a revocation list for the admin scope.
+- [ ] **Migrations** (HIGH #6, rest) — Alembic-managed schema instead of
+      `CREATE TABLE IF NOT EXISTS` at startup; documented backup/restore.
+- [ ] **Consumer HA** — leader election or partitioned ownership so the
+      projection consumer is not a single point of failure; export lag as a
+      metric and alert on it. Prerequisite for honestly evaluating the
+      Milestone 1 availability gate.
+- [ ] **Runbooks + SLOs** — on-call docs for DLQ redrive, circuit-open
+      recovery, consumer restart; SLOs derived from the gate-run numbers.
+- [ ] Tagged release v0.5.0 with a fresh dual-tier gate run
+
 ## Definition of done (every phase)
 1. Tests pass, CI green.
 2. README status updated.

@@ -1,0 +1,75 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: format · lint · types · tests (SQLite + PostgreSQL)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: cloudscale
+          POSTGRES_PASSWORD: cloudscale
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cloudscale"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      # PG-gated tests skip without this; CI must NOT skip them.
+      CLOUDSCALE_TEST_PG: postgresql://cloudscale:cloudscale@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install (hash-pinned)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --require-hashes -r requirements-dev.lock
+      - name: Gate
+        run: make check
+      - name: Assert PostgreSQL tests actually ran
+        run: |
+          .venv/bin/python -m pytest tests/unit/adapters/test_postgres_tier.py \
+            tests/unit/adapters/test_postgres_command_uow.py -q -rs 2>&1 | tee pg.log
+          ! grep -q "SKIPPED" pg.log
+
+  image:
+    name: container image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: cloudscale-backend:ci
+      - name: Smoke (app factory constructs, fails closed without secret)
+        run: |
+          set -e
+          # Must refuse to start without a JWT secret.
+          if docker run --rm -e CLOUDSCALE_STORAGE=sqlite -e CLOUDSCALE_LOG_DB=/tmp/l.db \
+               -e CLOUDSCALE_PROJECTION_DB=/tmp/p.db cloudscale-backend:ci \
+               python -c "from cloudscale.entrypoints.http.main import build_app; build_app()"; then
+            echo "expected startup to fail without CLOUDSCALE_JWT_SECRET"; exit 1
+          fi
+          # Must construct with one.
+          docker run --rm -e CLOUDSCALE_STORAGE=sqlite -e CLOUDSCALE_LOG_DB=/tmp/l.db \
+            -e CLOUDSCALE_PROJECTION_DB=/tmp/p.db \
+            -e CLOUDSCALE_JWT_SECRET=ci-only-secret-0123456789abcdef-0123456789abcdef \
+            cloudscale-backend:ci \
+            python -c "from cloudscale.entrypoints.http.main import build_app; build_app(); print('ok')"
