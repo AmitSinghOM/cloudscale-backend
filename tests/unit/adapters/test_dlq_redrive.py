@@ -81,6 +81,29 @@ def test_failed_redrive_reparks_with_incremented_attempts_and_fresh_error() -> N
     assert store.balance("acct-1")["balance"] == 0
 
 
+def test_infrastructure_failure_during_redrive_propagates_and_leaves_letter_intact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A locked/unavailable DB is not the payload's fault: no 'failed again'."""
+    import sqlite3
+
+    store = DeadLetteringProjectionStore(path=":memory:")
+    _park(store, "evt-1", 1, amount=25)
+    before = store.dead_letters()[0]
+
+    def _locked(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "_apply_to_balance", _locked)
+    with pytest.raises(sqlite3.OperationalError):
+        store.redrive("evt-1")
+
+    after = store.dead_letters()[0]
+    assert after["attempts"] == before["attempts"]  # not incremented
+    assert after["error_message"] == "original failure"  # not overwritten
+    assert store.balance("acct-1")["balance"] == 0
+
+
 def test_redrive_all_processes_every_letter_and_reports_each_outcome() -> None:
     store = DeadLetteringProjectionStore(path=":memory:")
     _park(store, "evt-ok-1", 1, amount=10)

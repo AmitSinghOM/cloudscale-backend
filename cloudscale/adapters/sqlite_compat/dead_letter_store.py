@@ -151,6 +151,12 @@ class DeadLetteringProjectionStore(IdempotentProjectionStore):
                 )
                 self._conn.commit()
                 return RedriveOutcome.APPLIED
+            except sqlite3.OperationalError:
+                # Infrastructure failure (locked/unavailable DB), not the
+                # payload's fault: leave the letter untouched and propagate
+                # rather than recording a misleading "failed again".
+                self._conn.rollback()
+                raise
             except Exception as error:
                 self._conn.rollback()
                 self._conn.execute(

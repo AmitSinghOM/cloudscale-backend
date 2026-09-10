@@ -226,6 +226,11 @@ class PostgresProjectionStore:
                         "DELETE FROM dead_letters WHERE event_id = %s", (event_id,)
                     )
                 return RedriveOutcome.APPLIED
+            except psycopg.OperationalError:
+                # Infrastructure failure (connection lost), not the payload's
+                # fault: the transaction block already rolled back; leave the
+                # letter untouched and propagate.
+                raise
             except Exception as error:
                 with self._conn.transaction():
                     self._conn.execute(

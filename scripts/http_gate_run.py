@@ -307,8 +307,12 @@ def run_gates(
                 except subprocess.TimeoutExpired:
                     process.kill()
             if admin is not None and database is not None:
-                admin.execute(f'DROP DATABASE "{database}" WITH (FORCE)')
-                admin.close()
+                # Cleanup must never mask the run's real error: IF EXISTS
+                # covers a CREATE that failed midway, and close() always runs.
+                try:
+                    admin.execute(f'DROP DATABASE IF EXISTS "{database}" WITH (FORCE)')
+                finally:
+                    admin.close()
 
     command_latencies = [value for worker in commands for value in worker.latencies_ms]
     query_latencies = [value for worker in queries for value in worker.latencies_ms]
