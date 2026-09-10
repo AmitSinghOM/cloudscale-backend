@@ -42,7 +42,13 @@ class PostgresEventStore:
     """Durable, append-only event log on PostgreSQL."""
 
     def __init__(self, conninfo: str) -> None:
-        self._conn = psycopg.connect(conninfo, row_factory=dict_row)
+        # Autocommit connection: psycopg3's recommended pattern. Without it, a
+        # bare read opens an implicit transaction and a later
+        # conn.transaction() block silently degrades to a SAVEPOINT that
+        # never commits (writes lost on close). With autocommit=True every
+        # transaction() block is a REAL transaction and single statements
+        # commit immediately.
+        self._conn = psycopg.connect(conninfo, row_factory=dict_row, autocommit=True)
         with self._conn.transaction():
             # Serialize concurrent schema creation across processes:
             # simultaneous CREATE TABLE IF NOT EXISTS can fail on the
