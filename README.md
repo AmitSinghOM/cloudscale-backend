@@ -80,9 +80,25 @@ scripts/verify_milestone.py   Deterministic gate; writes evidence/<git-sha>/mile
 
 ```
 make install-dev   # hash-pinned lockfile into .venv (Python 3.12)
-make check         # ruff format-check + lint, mypy, pytest (122 tests)
+make check         # ruff format-check + lint, mypy, pytest
 .venv/bin/python scripts/verify_milestone.py 1   # revision-bound evidence gate
 ```
+
+## Running on PostgreSQL (production shape)
+
+```
+export CLOUDSCALE_PG_DSN=postgresql://user:pass@host/db
+python -m cloudscale.entrypoints.migrate                 # Alembic upgrade head, once per release
+export CLOUDSCALE_STORAGE=postgres CLOUDSCALE_PG_SCHEMA=migrations \
+       CLOUDSCALE_RATE_LIMIT_BACKEND=postgres CLOUDSCALE_JWT_JWKS_URL=https://issuer/.well-known/jwks.json
+uvicorn --factory cloudscale.entrypoints.http.main:build_app   # any number of replicas
+python -m cloudscale.entrypoints.consumer_loop                 # projection consumer
+```
+
+In `migrations` mode the processes never create schema and refuse to start
+unless the database is at the Alembic revision this build requires. The
+schema is defined once (`cloudscale/adapters/postgres/schema.py`) and a test
+asserts that migrating and dev-mode auto-creation produce identical tables.
 
 Milestone 1 is deliberately **local-only**: HTTP/network behavior, Kafka
 delivery, the PostgreSQL production tier, auth, and load/availability gates

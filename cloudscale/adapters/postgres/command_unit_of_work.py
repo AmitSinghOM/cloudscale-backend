@@ -22,6 +22,7 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.rows import DictRow
 
+from cloudscale.adapters.postgres import schema
 from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cloudscale.application.command_execution import execute_command_decision
 from cloudscale.application.ports import NormalizedCommand
@@ -30,37 +31,7 @@ from cloudscale.domain.events import AccountEvent, Deposited, EventEnvelope, Wit
 from cloudscale.domain.results import CommandResult
 
 # Same events DDL as PostgresEventStore so both writers interoperate.
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS events (
-    id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    event_id   TEXT NOT NULL UNIQUE,
-    stream     TEXT NOT NULL,
-    seq        BIGINT NOT NULL,
-    type       TEXT,
-    account_id TEXT,
-    amount     BIGINT,
-    UNIQUE (stream, seq)
-);
-ALTER TABLE events ADD COLUMN IF NOT EXISTS published BOOLEAN NOT NULL DEFAULT false;
-CREATE INDEX IF NOT EXISTS events_unpublished_idx ON events (id) WHERE NOT published;
-CREATE TABLE IF NOT EXISTS command_results (
-    command_id   TEXT PRIMARY KEY,
-    request_hash BYTEA NOT NULL,
-    result_json  TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS event_envelopes (
-    event_id       TEXT PRIMARY KEY,
-    stream_id      TEXT NOT NULL,
-    stream_version BIGINT NOT NULL,
-    event_type     TEXT NOT NULL,
-    occurred_at    TEXT NOT NULL,
-    correlation_id TEXT NOT NULL,
-    causation_id   TEXT NOT NULL,
-    command_id     TEXT NOT NULL,
-    schema_version INTEGER NOT NULL,
-    UNIQUE (stream_id, stream_version)
-);
-"""
+_SCHEMA = schema.EVENTS + schema.COMMAND_RESULTS
 
 _MAX_RACE_RETRIES = 2
 
