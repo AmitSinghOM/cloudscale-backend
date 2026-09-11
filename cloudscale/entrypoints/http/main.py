@@ -41,6 +41,9 @@ def build_app() -> FastAPI:
     if storage == "postgres":
         import psycopg
 
+        from cloudscale.adapters.postgres.account_registry import (
+            PostgresAccountRegistry,
+        )
         from cloudscale.adapters.postgres.command_unit_of_work import (
             PostgresCommandUnitOfWork,
         )
@@ -51,18 +54,23 @@ def build_app() -> FastAPI:
         dsn = os.environ["CLOUDSCALE_PG_DSN"]
         pg_unit_of_work = PostgresCommandUnitOfWork(dsn)
         pg_projection = PostgresProjectionStore(dsn)
+        pg_registry = PostgresAccountRegistry(dsn)
         return create_app(
             settings,
             command_service=CommandService(pg_unit_of_work),
             query_service=QueryService(StoreProjectionReader(pg_projection)),
             storage_metadata=pg_projection.metadata,
             transient_errors=(psycopg.OperationalError,),
-            closeables=(pg_unit_of_work, pg_projection),
+            account_registry=pg_registry,
+            closeables=(pg_unit_of_work, pg_projection, pg_registry),
         )
 
     if storage != "sqlite":
         raise ValueError(f"unsupported CLOUDSCALE_STORAGE: {storage!r}")
 
+    from cloudscale.adapters.sqlite_compat.account_registry import (
+        SqliteAccountRegistry,
+    )
     from cloudscale.adapters.sqlite_compat.command_unit_of_work import (
         SqliteCommandUnitOfWork,
     )
@@ -70,16 +78,19 @@ def build_app() -> FastAPI:
         DeadLetteringProjectionStore,
     )
 
-    unit_of_work = SqliteCommandUnitOfWork(os.environ["CLOUDSCALE_LOG_DB"])
+    log_db = os.environ["CLOUDSCALE_LOG_DB"]
+    unit_of_work = SqliteCommandUnitOfWork(log_db)
     projection = DeadLetteringProjectionStore(
         path=os.environ["CLOUDSCALE_PROJECTION_DB"]
     )
+    registry = SqliteAccountRegistry(log_db)  # ownership lives beside the log
     return create_app(
         settings,
         command_service=CommandService(unit_of_work),
         query_service=QueryService(StoreProjectionReader(projection)),
         storage_metadata=projection.metadata,
-        closeables=(unit_of_work, projection),
+        account_registry=registry,
+        closeables=(unit_of_work, projection, registry),
     )
 
 

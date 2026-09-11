@@ -55,7 +55,7 @@ so the swap is wiring, not redesign.
 - Read-model projections with exactly-once effect under at-least-once delivery
 - Circuit breakers + bounded retry on the command path and in the consumer
 - Dead-letter queue with redrive tooling for poison messages
-- JWT authentication, claims-based account authorization, per-subject rate limiting
+- JWT authentication; authorization by registered account ownership (`POST /v1/accounts`), token claims, or admin scope — default deny; per-subject rate limiting
 - Structured JSON logs, append-only command audit log, Prometheus metrics, OpenTelemetry tracing
 
 ## Repository layout

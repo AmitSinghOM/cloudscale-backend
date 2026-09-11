@@ -151,6 +151,21 @@ def audit_command(
     )
 
 
+def audit_registration(
+    *, subject: str, issuer: str, account_id: str, outcome: str
+) -> None:
+    """Append-only audit record for one account-ownership registration."""
+    AUDIT_LOGGER.info(
+        "account.registered",
+        extra={
+            "subject": subject,
+            "issuer": issuer,
+            "account_id": account_id,
+            "outcome": outcome,
+        },
+    )
+
+
 class Metrics:
     """Per-app Prometheus registry and the instruments the tier exposes."""
 
@@ -196,5 +211,6 @@ __all__ = [
     "REQUEST_LOGGER",
     "RequestLogMiddleware",
     "audit_command",
+    "audit_registration",
     "configure_logging",
 ]

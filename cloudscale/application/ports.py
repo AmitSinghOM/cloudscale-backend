@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 import hashlib
 from typing import Protocol, TypeVar
 from uuid import UUID
@@ -87,10 +88,33 @@ class ProjectionUnitOfWork(Protocol[_ProjectionDeliveryT, _ProjectionDisposition
     def apply(self, delivery: _ProjectionDeliveryT) -> _ProjectionDispositionT: ...
 
 
+class RegistrationOutcome(StrEnum):
+    """Result of binding an account to an owning subject."""
+
+    CREATED = "created"
+    ALREADY_OWNED_BY_CALLER = "already_owned_by_caller"
+    TAKEN = "taken"
+
+
+class AccountRegistry(Protocol):
+    """Durable account-to-owner binding; the system's own record of ownership.
+
+    ``register`` is idempotent for the same caller and refuses to reassign an
+    account owned by someone else. ``owner_of`` returns ``None`` for accounts
+    nobody has registered.
+    """
+
+    def register(self, account_id: str, owner_subject: str) -> RegistrationOutcome: ...
+
+    def owner_of(self, account_id: str) -> str | None: ...
+
+
 __all__ = [
+    "AccountRegistry",
     "CommandUnitOfWork",
     "EventReader",
     "NormalizedCommand",
     "ProjectionReader",
     "ProjectionUnitOfWork",
+    "RegistrationOutcome",
 ]
