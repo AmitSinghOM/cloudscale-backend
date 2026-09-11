@@ -1,0 +1,99 @@
+{
+  "captured_at": "2026-09-11T21:24:38.690958+00:00",
+  "deployment": {
+    "auth": "JWT bearer on every request (accounts:admin scope)",
+    "consumer": "separate process (cloudscale.entrypoints.consumer_loop)",
+    "rate_limit": "disabled for bench (CLOUDSCALE_RATE_LIMIT_PER_MINUTE=0)",
+    "server": "uvicorn, 1 worker, 127.0.0.1 loopback",
+    "storage": "sqlite tier (temp dir)"
+  },
+  "gates": {
+    "availability_at_least_99_9_percent_over_30_days": {
+      "note": "not_evaluated: requires 30 days of operation, not a bench run",
+      "observed": null,
+      "passed": null,
+      "threshold": null
+    },
+    "command_p99_at_most_300_ms": {
+      "observed": 72.597,
+      "passed": true,
+      "threshold": 300.0
+    },
+    "maximum_projection_lag_at_most_1_second": {
+      "observed": 0.077,
+      "passed": true,
+      "threshold": 1.0
+    },
+    "query_p99_at_most_100_ms": {
+      "observed": 9.273,
+      "passed": true,
+      "threshold": 100.0
+    },
+    "sustained_1000_requests_per_second": {
+      "observed": 1393.7,
+      "passed": true,
+      "threshold": 1000.0
+    }
+  },
+  "gates_failed": 0,
+  "gates_passed": 4,
+  "harness": "scripts/http_gate_run.py",
+  "honest_scope": "localhost loopback, single uvicorn worker, SQLite tier, GIL-threaded load generator sharing the host; a local deployment baseline, not a service benchmark",
+  "phase": 4,
+  "results": {
+    "achieved_rps": 1393.7,
+    "commands": {
+      "max_ms": 89.912,
+      "mean_ms": 44.803,
+      "operations": 894,
+      "p50_ms": 43.147,
+      "p95_ms": 66.634,
+      "p99_ms": 72.597
+    },
+    "projection_lag_seconds": {
+      "max": 0.077,
+      "samples": [
+        0.0318,
+        0.0362,
+        0.0535,
+        0.0381,
+        0.0341,
+        0.0454,
+        0.0325,
+        0.0443,
+        0.0614,
+        0.0498,
+        0.0582,
+        0.0751,
+        0.0623,
+        0.0283,
+        0.0526,
+        0.0559,
+        0.0571,
+        0.0605,
+        0.0614,
+        0.077,
+        0.0606,
+        0.0464
+      ]
+    },
+    "queries": {
+      "max_ms": 18.927,
+      "mean_ms": 6.028,
+      "operations": 13277,
+      "p50_ms": 5.9,
+      "p95_ms": 7.659,
+      "p99_ms": 9.273
+    }
+  },
+  "revision": "4bf63dddb8f2eedc55fe0c62ae3a7681349ffa69",
+  "schema_version": 1,
+  "workload": {
+    "command_workers": 4,
+    "duration_seconds": 10.17,
+    "lag_probe_failures": 0,
+    "lag_probes": 22,
+    "query_workers": 8,
+    "request_errors": 0
+  }
+}
