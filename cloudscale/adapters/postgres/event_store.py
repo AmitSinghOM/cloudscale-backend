@@ -164,6 +164,15 @@ class PostgresEventStore:
             events.append(event)
         return events
 
+    def head_id(self) -> int:
+        """Highest consumable position (relays first). 0 when empty."""
+        self.relay_outbox()
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(MAX(position), 0) AS head FROM outbox"
+            ).fetchone()
+        return int(row["head"]) if row else 0
+
     @staticmethod
     def _row_to_event(row: dict) -> dict:
         event = {

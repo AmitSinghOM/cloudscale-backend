@@ -173,6 +173,14 @@ class SqliteEventStore:
             out.append(e)
         return out
 
+    def head_id(self) -> int:
+        """Highest global log id (the consumer's target offset). 0 when empty."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(MAX(id), 0) AS head FROM events"
+            ).fetchone()
+        return int(row["head"])
+
     @staticmethod
     def _row_to_event(r: sqlite3.Row) -> dict:
         e = {
