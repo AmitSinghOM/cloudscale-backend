@@ -1,23 +1,25 @@
-"""PostgreSQL projection store: idempotent apply, DLQ, and redrive.
+"""PostgreSQL projection store: idempotent apply, DLQ, and redrive — pooled.
 
-Production realization of the read-model tier with the exact transaction
-shape the SQLite tier proved out: the dedupe claim (``processed_events``
-PRIMARY KEY), the balance mutation, and the offset advance commit together,
-so at-least-once delivery yields exactly-once effect. Dead-lettering and
-redrive reuse the same claim, so poison events never wedge the log and
-replays are absorbed as duplicates.
+Same transaction shape the SQLite tier proved: the dedupe claim
+(``processed_events`` PRIMARY KEY), the balance mutation, and the offset
+advance commit together, so at-least-once delivery yields exactly-once
+effect. Dead-lettering and redrive reuse the same claim.
+
+Every operation checks a connection out of the pool; there is no
+process-wide lock, so multiple consumers (or a consumer beside an HTTP
+worker) proceed in parallel and the database arbitrates.
 """
 
 from __future__ import annotations
 
 import json
-import threading
 from datetime import UTC, datetime
 
 import psycopg
-from psycopg.rows import dict_row
+from psycopg.rows import DictRow
 
 from cloudscale.adapters.compat import adapt_legacy_event
+from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cloudscale.adapters.sqlite_compat.dead_letter_store import RedriveOutcome
 
 _SCHEMA = """
@@ -54,38 +56,27 @@ PRODUCTION_TIER_METADATA: dict[str, object] = {
 class PostgresProjectionStore:
     """Durable balance read model with exactly-once apply and a DLQ."""
 
-    def __init__(self, conninfo: str, consumer: str = "balances") -> None:
-        # Autocommit connection: psycopg3's recommended pattern. Without it, a
-        # bare read opens an implicit transaction and a later
-        # conn.transaction() block silently degrades to a SAVEPOINT that
-        # never commits (writes lost on close). With autocommit=True every
-        # transaction() block is a REAL transaction and single statements
-        # commit immediately.
-        self._conn = psycopg.connect(conninfo, row_factory=dict_row, autocommit=True)
-        with self._conn.transaction():
-            # Serialize concurrent schema creation across processes:
-            # simultaneous CREATE TABLE IF NOT EXISTS can fail on the
-            # pg_type unique index when server + consumer start together.
-            self._conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtext('cloudscale_schema'))"
-            )
-            self._conn.execute(_SCHEMA)
-            self._conn.execute(
+    def __init__(
+        self, conninfo: str, consumer: str = "balances", *, pool_max: int | None = None
+    ) -> None:
+        self._pool = open_pool(conninfo, max_size=pool_max)
+        ensure_schema(self._pool, _SCHEMA)
+        with self._pool.connection() as conn:
+            conn.execute(
                 "INSERT INTO consumer_offset (consumer, last_id) VALUES (%s, 0) "
                 "ON CONFLICT (consumer) DO NOTHING",
                 (consumer,),
             )
         self._consumer = consumer
-        self._lock = threading.Lock()
 
     def close(self) -> None:
-        self._conn.close()
+        self._pool.close()
 
     # -- consumer offset ------------------------------------------------------
 
     def last_id(self) -> int:
-        with self._lock:
-            row = self._conn.execute(
+        with self._pool.connection() as conn:
+            row = conn.execute(
                 "SELECT last_id FROM consumer_offset WHERE consumer = %s",
                 (self._consumer,),
             ).fetchone()
@@ -101,22 +92,22 @@ class PostgresProjectionStore:
         validated = adapt_legacy_event(event)
         log_id = int(event.get("id", 0))
 
-        with self._lock:
+        with self._pool.connection() as conn:
             try:
-                with self._conn.transaction():
-                    self._conn.execute(
+                with conn.transaction():
+                    conn.execute(
                         "INSERT INTO processed_events (event_id) VALUES (%s)",
                         (event_id,),
                     )
-                    self._apply_to_balance(validated)
-                    self._advance_offset(log_id)
+                    self._apply_to_balance(conn, validated)
+                    self._advance_offset(conn, log_id)
                 return True
             except psycopg.errors.UniqueViolation:
-                with self._conn.transaction():
-                    self._advance_offset(log_id)
+                with conn.transaction():
+                    self._advance_offset(conn, log_id)
                 return False
 
-    def _apply_to_balance(self, event: dict) -> None:
+    def _apply_to_balance(self, conn: psycopg.Connection[DictRow], event: dict) -> None:
         account_id = event.get("account_id")
         if account_id is None:
             return
@@ -129,7 +120,7 @@ class PostgresProjectionStore:
             if event_type == "Withdrawn"
             else 0
         )
-        self._conn.execute(
+        conn.execute(
             "INSERT INTO balances (account_id, balance, version) "
             "VALUES (%s, %s, 1) "
             "ON CONFLICT (account_id) DO UPDATE SET "
@@ -138,8 +129,8 @@ class PostgresProjectionStore:
             (account_id, delta),
         )
 
-    def _advance_offset(self, log_id: int) -> None:
-        self._conn.execute(
+    def _advance_offset(self, conn: psycopg.Connection[DictRow], log_id: int) -> None:
+        conn.execute(
             "UPDATE consumer_offset SET last_id = GREATEST(last_id, %s) "
             "WHERE consumer = %s",
             (log_id, self._consumer),
@@ -148,20 +139,19 @@ class PostgresProjectionStore:
     # -- dead letters ------------------------------------------------------------
 
     def dead_letter(self, event: dict, error: BaseException, attempts: int) -> bool:
-        """Park ``event`` and advance past it, exactly once (same as SQLite)."""
         if attempts < 1:
             raise ValueError("attempts must be at least 1")
         log_id = int(event.get("id", 0))
         event_id = str(event.get("event_id") or f"missing-event-id:log-{log_id}")
 
-        with self._lock:
+        with self._pool.connection() as conn:
             try:
-                with self._conn.transaction():
-                    self._conn.execute(
+                with conn.transaction():
+                    conn.execute(
                         "INSERT INTO processed_events (event_id) VALUES (%s)",
                         (event_id,),
                     )
-                    self._conn.execute(
+                    conn.execute(
                         "INSERT INTO dead_letters (event_id, log_id, payload, "
                         "error_type, error_message, attempts, dead_lettered_at) "
                         "VALUES (%s, %s, %s, %s, %s, %s, %s)",
@@ -175,16 +165,16 @@ class PostgresProjectionStore:
                             datetime.now(UTC).isoformat(),
                         ),
                     )
-                    self._advance_offset(log_id)
+                    self._advance_offset(conn, log_id)
                 return True
             except psycopg.errors.UniqueViolation:
-                with self._conn.transaction():
-                    self._advance_offset(log_id)
+                with conn.transaction():
+                    self._advance_offset(conn, log_id)
                 return False
 
     def dead_letters(self) -> list[dict]:
-        with self._lock:
-            rows = self._conn.execute(
+        with self._pool.connection() as conn:
+            rows = conn.execute(
                 "SELECT event_id, log_id, payload, error_type, error_message, "
                 "attempts, dead_lettered_at FROM dead_letters ORDER BY log_id ASC"
             ).fetchall()
@@ -202,38 +192,31 @@ class PostgresProjectionStore:
         ]
 
     def dead_letter_count(self) -> int:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT COUNT(*) AS n FROM dead_letters"
-            ).fetchone()
+        with self._pool.connection() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM dead_letters").fetchone()
         return int(row["n"]) if row else 0
 
     def redrive(self, event_id: str) -> RedriveOutcome:
-        """Re-apply one parked event and remove its letter, exactly once."""
-        with self._lock:
-            row = self._conn.execute(
+        with self._pool.connection() as conn:
+            row = conn.execute(
                 "SELECT payload FROM dead_letters WHERE event_id = %s",
                 (event_id,),
             ).fetchone()
             if row is None:
                 return RedriveOutcome.NOT_FOUND
-
             event = json.loads(row["payload"])
             try:
-                with self._conn.transaction():
-                    self._apply_to_balance(adapt_legacy_event(event))
-                    self._conn.execute(
+                with conn.transaction():
+                    self._apply_to_balance(conn, adapt_legacy_event(event))
+                    conn.execute(
                         "DELETE FROM dead_letters WHERE event_id = %s", (event_id,)
                     )
                 return RedriveOutcome.APPLIED
             except psycopg.OperationalError:
-                # Infrastructure failure (connection lost), not the payload's
-                # fault: the transaction block already rolled back; leave the
-                # letter untouched and propagate.
                 raise
             except Exception as error:
-                with self._conn.transaction():
-                    self._conn.execute(
+                with conn.transaction():
+                    conn.execute(
                         "UPDATE dead_letters SET attempts = attempts + 1, "
                         "error_type = %s, error_message = %s, "
                         "dead_lettered_at = %s WHERE event_id = %s",
@@ -253,8 +236,8 @@ class PostgresProjectionStore:
     # -- query -----------------------------------------------------------------
 
     def balance(self, account_id: str) -> dict:
-        with self._lock:
-            row = self._conn.execute(
+        with self._pool.connection() as conn:
+            row = conn.execute(
                 "SELECT account_id, balance, version FROM balances "
                 "WHERE account_id = %s",
                 (account_id,),
@@ -266,8 +249,6 @@ class PostgresProjectionStore:
             "balance": int(row["balance"]),
             "version": int(row["version"]),
         }
-
-    # -- metadata ----------------------------------------------------------------
 
     @property
     def metadata(self) -> dict[str, object]:
