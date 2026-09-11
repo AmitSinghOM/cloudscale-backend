@@ -180,7 +180,7 @@ opentelemetry-instrumentation-fastapi). Build order:
 - [x] DoD: suite green (204), gate-run evidence recorded, README status
       updated, tagged `cloudscale-backend/v0.4.0`
 
-## Phase 5 — Production readiness  ·  ~4–6 wknds  ·  🚧 started
+## Phase 5 — Production readiness  ·  ~4–6 wknds  ·  ✅ done (v0.5.0)
 **Goal:** Close the CTO / staff-security review gaps so the service can carry
 customer traffic. Source: the 2026-09-10 review (six blocking findings).
 
@@ -256,7 +256,16 @@ customer traffic. Source: the 2026-09-10 review (six blocking findings).
       metric names, targets with headroom over gate evidence, 43-min error
       budget, multi-window burn-rate + latency + consumer alert rules in
       PromQL; availability honestly marked target-not-yet-demonstrated).
-- [ ] Tagged release v0.5.0 with a fresh dual-tier gate run
+- [x] Tagged release v0.5.0 (2026-09-12) with a fresh gate run. SQLite tier:
+      all four evaluable gates pass (1,394 rps, command p99 72.6 ms, query
+      p99 9.3 ms, lag 0.077 s), evidence committed. **PostgreSQL tier: the
+      1,000 rps gate could not be honestly evaluated** — the run landed at
+      852 rps with command p99 31 ms and lag 0.089 s while the host carried
+      load 6–8 from unrelated GUI processes (measured: WindowServer +
+      dashboard renderer ≈ one full core). The three other PG gates pass.
+      No PG evidence file is committed for this release; re-run
+      `scripts/http_gate_run.py --storage postgres` on a quiet host and
+      commit it as a follow-up. Last clean PG pass: 1,218 rps on 5c75f99.
 
 ## Definition of done (every phase)
 1. Tests pass, CI green.
