@@ -44,12 +44,15 @@ def _token(
 ) -> str:
     claims: dict = {
         "iss": issuer,
+        "iat": datetime.now(UTC),
         "exp": datetime.now(UTC) + timedelta(seconds=expires_in),
     }
     if subject is not None:
         claims["sub"] = subject
     if scope is not None:
         claims["scope"] = scope
+        if scope == "accounts:admin":
+            claims["jti"] = "test-jti-" + uuid.uuid4().hex
     if accounts is not None:
         claims["accounts"] = accounts
     return jwt.encode(claims, secret, algorithm="HS256")

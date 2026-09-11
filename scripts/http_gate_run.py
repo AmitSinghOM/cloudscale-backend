@@ -82,6 +82,8 @@ def _token() -> str:
             "iss": "cloudscale",
             "sub": "gate-runner",
             "scope": "accounts:admin",
+            "jti": "gate-run-" + uuid4().hex,
+            "iat": datetime.now(UTC),
             "exp": datetime.now(UTC) + timedelta(hours=1),
         },
         BENCH_ONLY_SECRET,

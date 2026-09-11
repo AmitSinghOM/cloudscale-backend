@@ -40,6 +40,7 @@ from cloudscale.entrypoints.http.observability import (
     audit_registration,
 )
 from cloudscale.entrypoints.http.settings import HttpSettings
+from cloudscale.entrypoints.http.verifiers import TokenVerifier, build_verifier
 from cloudscale.resilience import (
     CircuitBreaker,
     CircuitOpenError,
@@ -132,6 +133,7 @@ def create_app(
     tracer_provider: TracerProvider | None = None,
     rate_limiter: RateLimiter | None = None,
     account_registry: AccountRegistry | None = None,
+    token_verifier: TokenVerifier | None = None,
     closeables: Sequence[Closeable] = (),
 ) -> FastAPI:
     """Build the HTTP app over explicit, injected collaborators.
@@ -160,6 +162,7 @@ def create_app(
     app = FastAPI(title="cloudscale-backend", version=API_VERSION, lifespan=lifespan)
     app.state.settings = settings
     app.state.metrics = metrics
+    app.state.token_verifier = token_verifier or build_verifier(settings)
 
     # Middleware order (outermost first): access log -> body cap -> CORS.
     app.add_middleware(RequestLogMiddleware, metrics=metrics)
