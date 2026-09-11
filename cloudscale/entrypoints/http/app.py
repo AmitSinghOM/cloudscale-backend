@@ -32,7 +32,11 @@ from cloudscale.entrypoints.http.auth import (
     authenticate,
     authorize_account,
 )
-from cloudscale.entrypoints.http.limits import BodySizeLimitMiddleware, RateLimiter
+from cloudscale.entrypoints.http.limits import (
+    BodySizeLimitMiddleware,
+    RateLimiter,
+    RateLimiterLike,
+)
 from cloudscale.entrypoints.http.observability import (
     Metrics,
     RequestLogMiddleware,
@@ -131,7 +135,7 @@ def create_app(
     retry_policy: RetryPolicy | None = None,
     breaker: CircuitBreaker | None = None,
     tracer_provider: TracerProvider | None = None,
-    rate_limiter: RateLimiter | None = None,
+    rate_limiter: RateLimiterLike | None = None,
     account_registry: AccountRegistry | None = None,
     token_verifier: TokenVerifier | None = None,
     closeables: Sequence[Closeable] = (),

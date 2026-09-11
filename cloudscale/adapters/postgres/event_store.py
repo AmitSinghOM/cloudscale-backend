@@ -29,30 +29,11 @@ import uuid
 
 import psycopg
 
+from cloudscale.adapters.postgres import schema
 from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cqrs import ConcurrencyError
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS events (
-    id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    event_id   TEXT NOT NULL UNIQUE,
-    stream     TEXT NOT NULL,
-    seq        BIGINT NOT NULL,
-    type       TEXT,
-    account_id TEXT,
-    amount     BIGINT,
-    UNIQUE (stream, seq)
-);
-CREATE TABLE IF NOT EXISTS outbox (
-    position BIGINT PRIMARY KEY,
-    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id)
-);
--- Publication flag + partial index make the relay O(pending events) instead
--- of an anti-join over the whole log on every consumer poll. Late-committing
--- rows are simply still unpublished when they become visible.
-ALTER TABLE events ADD COLUMN IF NOT EXISTS published BOOLEAN NOT NULL DEFAULT false;
-CREATE INDEX IF NOT EXISTS events_unpublished_idx ON events (id) WHERE NOT published;
-"""
+_SCHEMA = schema.EVENTS + schema.OUTBOX
 
 _RELAY_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('cloudscale_outbox_relay'))"
 

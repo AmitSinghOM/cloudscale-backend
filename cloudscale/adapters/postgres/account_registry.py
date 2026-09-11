@@ -9,17 +9,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from cloudscale.adapters.postgres import schema
 from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cloudscale.application.ports import RegistrationOutcome
 from cloudscale.domain.commands import _validate_account_id
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS accounts (
-    account_id    TEXT PRIMARY KEY,
-    owner_subject TEXT NOT NULL,
-    created_at    TEXT NOT NULL
-);
-"""
+_SCHEMA = schema.ACCOUNTS
 
 
 class PostgresAccountRegistry:

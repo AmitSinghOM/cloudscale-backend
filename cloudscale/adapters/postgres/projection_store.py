@@ -19,32 +19,11 @@ import psycopg
 from psycopg.rows import DictRow
 
 from cloudscale.adapters.compat import adapt_legacy_event
+from cloudscale.adapters.postgres import schema
 from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cloudscale.adapters.sqlite_compat.dead_letter_store import RedriveOutcome
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS balances (
-    account_id TEXT PRIMARY KEY,
-    balance    BIGINT NOT NULL DEFAULT 0,
-    version    BIGINT NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS processed_events (
-    event_id TEXT PRIMARY KEY
-);
-CREATE TABLE IF NOT EXISTS consumer_offset (
-    consumer TEXT PRIMARY KEY,
-    last_id  BIGINT NOT NULL DEFAULT 0
-);
-CREATE TABLE IF NOT EXISTS dead_letters (
-    event_id         TEXT PRIMARY KEY,
-    log_id           BIGINT NOT NULL,
-    payload          TEXT NOT NULL,
-    error_type       TEXT NOT NULL,
-    error_message    TEXT NOT NULL,
-    attempts         INTEGER NOT NULL,
-    dead_lettered_at TEXT NOT NULL
-);
-"""
+_SCHEMA = schema.PROJECTION
 
 PRODUCTION_TIER_METADATA: dict[str, object] = {
     "environment": "production-capable",

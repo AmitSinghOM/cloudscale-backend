@@ -17,13 +17,19 @@ WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY cloudscale ./cloudscale
 COPY cqrs ./cqrs
-COPY pyproject.toml README.md ./
+COPY migrations ./migrations
+COPY alembic.ini pyproject.toml README.md ./
 USER cloudscale
 EXPOSE 8000
 
-# Required at runtime: CLOUDSCALE_JWT_SECRET (>= 32 bytes) and either
+# Required at runtime: identity (exactly one of CLOUDSCALE_JWT_SECRET or
+# CLOUDSCALE_JWT_JWKS_URL) and storage:
 #   CLOUDSCALE_STORAGE=sqlite   + CLOUDSCALE_LOG_DB + CLOUDSCALE_PROJECTION_DB
 #   CLOUDSCALE_STORAGE=postgres + CLOUDSCALE_PG_DSN
+# Production PostgreSQL sequence (schema is never created by the app):
+#   1. python -m cloudscale.entrypoints.migrate            (once per release)
+#   2. run server + consumer with CLOUDSCALE_PG_SCHEMA=migrations
+#      and CLOUDSCALE_RATE_LIMIT_BACKEND=postgres for a replica-shared limit.
 # Consumer process: override CMD with
 #   python -m cloudscale.entrypoints.consumer_loop
 HEALTHCHECK --interval=15s --timeout=3s --retries=3 \

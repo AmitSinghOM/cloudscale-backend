@@ -55,6 +55,13 @@ def build_app() -> FastAPI:
         pg_unit_of_work = PostgresCommandUnitOfWork(dsn)
         pg_projection = PostgresProjectionStore(dsn)
         pg_registry = PostgresAccountRegistry(dsn)
+        pg_closeables: list = [pg_unit_of_work, pg_projection, pg_registry]
+        shared_limiter = None
+        if settings.rate_limit_backend == "postgres":
+            from cloudscale.adapters.postgres.rate_limiter import PostgresRateLimiter
+
+            shared_limiter = PostgresRateLimiter(dsn, settings.rate_limit_per_minute)
+            pg_closeables.append(shared_limiter)
         return create_app(
             settings,
             command_service=CommandService(pg_unit_of_work),
@@ -62,11 +69,16 @@ def build_app() -> FastAPI:
             storage_metadata=pg_projection.metadata,
             transient_errors=(psycopg.OperationalError,),
             account_registry=pg_registry,
-            closeables=(pg_unit_of_work, pg_projection, pg_registry),
+            rate_limiter=shared_limiter,
+            closeables=tuple(pg_closeables),
         )
 
     if storage != "sqlite":
         raise ValueError(f"unsupported CLOUDSCALE_STORAGE: {storage!r}")
+    if settings.rate_limit_backend == "postgres":
+        raise ValueError(
+            "rate_limit_backend=postgres requires CLOUDSCALE_STORAGE=postgres"
+        )
 
     from cloudscale.adapters.sqlite_compat.account_registry import (
         SqliteAccountRegistry,

@@ -12,9 +12,18 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Protocol
 
 from starlette.responses import JSONResponse
+
+
+class RateLimiterLike(Protocol):
+    """What the app needs from any limiter: in-process or shared."""
+
+    @property
+    def enabled(self) -> bool: ...
+
+    def try_acquire(self, key: str) -> tuple[bool, float]: ...
 
 
 class RateLimiter:
@@ -132,4 +141,4 @@ def _too_large(max_bytes: int) -> JSONResponse:
     )
 
 
-__all__ = ["BodySizeLimitMiddleware", "RateLimiter"]
+__all__ = ["BodySizeLimitMiddleware", "RateLimiter", "RateLimiterLike"]

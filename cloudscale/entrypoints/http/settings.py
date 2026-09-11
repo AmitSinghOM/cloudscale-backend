@@ -14,6 +14,8 @@ logged deployment decision (the load harness does this and records it).
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -47,6 +49,9 @@ class HttpSettings(BaseSettings):
 
     #: Per-subject token bucket, requests per minute. 0 disables (bench only).
     rate_limit_per_minute: int = Field(default=600, ge=0)
+    #: ``memory`` bounds one replica; ``postgres`` shares one budget across
+    #: every replica (requires the postgres storage tier).
+    rate_limit_backend: Literal["memory", "postgres"] = "memory"
     #: Maximum accepted request body, bytes (commands are ~150 bytes).
     max_body_bytes: int = Field(default=16_384, ge=1)
     #: CORS allowlist. Empty (default) = no cross-origin browser access.

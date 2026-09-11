@@ -219,8 +219,11 @@ customer traffic. Source: the 2026-09-10 review (six blocking findings).
       late-committing smaller id is delivered instead of skipped —
       regression-locked by a held-open-transaction test. SQLite tier is
       unchanged (single writer, commit order = id order).
-- [ ] **Shared rate limiter** — the in-process bucket bounds one replica;
-      move to a shared store (PostgreSQL or Redis) once there are replicas.
+- [x] **Shared rate limiter** (2026-09-11) — `PostgresRateLimiter`: one
+      atomic upsert per request using the database clock, so every replica
+      draws from a single per-subject budget; `CLOUDSCALE_RATE_LIMIT_BACKEND=
+      postgres` on the PG tier. Two-replica shared-budget test with
+      server-clock refill.
 - [x] **Identity** (2026-09-11) — OIDC/JWKS verification (RS256/ES256 via
       `PyJWKClient`, `kid`-based key rotation without restarts) as an
       alternative to the HS256 shared secret; settings require exactly one
@@ -230,8 +233,14 @@ customer traffic. Source: the 2026-09-10 review (six blocking findings).
       revocation list (`CLOUDSCALE_JWT_REVOKED_JTIS`). Tested against a
       locally generated RSA JWKS: accept, rotate, reject unknown key,
       reject HS256 in JWKS mode, lifetime, revocation.
-- [ ] **Migrations** (HIGH #6, rest) — Alembic-managed schema instead of
-      `CREATE TABLE IF NOT EXISTS` at startup; documented backup/restore.
+- [x] **Migrations** (2026-09-11) — Alembic with the schema defined ONCE
+      (`adapters/postgres/schema.py`) and consumed by both migration
+      `0001_initial` and the adapters' dev-mode auto-create; a PG-gated test
+      asserts the two paths yield identical `information_schema`.
+      `CLOUDSCALE_PG_SCHEMA=migrations` (production) makes adapters create
+      nothing and refuse to start unless Alembic is at the required
+      revision; `python -m cloudscale.entrypoints.migrate` applies. Dockerfile
+      documents the sequence. Backup/restore guidance → runbooks item.
 - [ ] **Consumer HA** — leader election or partitioned ownership so the
       projection consumer is not a single point of failure; export lag as a
       metric and alert on it. Prerequisite for honestly evaluating the
