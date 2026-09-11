@@ -1,31 +1,28 @@
-"""Concrete ``CommandUnitOfWork`` on PostgreSQL — same contract as SQLite.
+"""Concrete ``CommandUnitOfWork`` on PostgreSQL — pooled, same contract as SQLite.
 
-The decision logic lives in ``application.command_execution`` (shared with
-the SQLite adapter); this class supplies the four storage operations, the
-transaction, and the cross-process race handling. Single-connection
-instances serialize in-process with a lock; ACROSS processes the database's
-UNIQUE constraints arbitrate instead of any lock:
+The decision logic lives in ``application.command_execution``. This adapter
+checks one connection out of the pool per ``execute`` and hands the decision
+a ``_BoundStorage`` view whose four operations all run on that connection,
+inside that connection's transaction — so the fold, the append, and the
+result persistence are atomic together.
 
-- Two writers racing the same stream version both pass the pre-append fold,
-  and UNIQUE(stream, seq) rejects the loser. The loser's transaction rolls
-  back and the execute retries once — the fresh fold then yields the honest
-  ``version_conflict`` result (persisted, no append).
-- Two writers racing the same ``command_id`` collide on the
-  ``command_results`` PRIMARY KEY; the loser's retry finds the winner's
-  stored result and applies the normal replay/conflict semantics.
+No process-wide lock: concurrent executes run on separate connections and
+the database's UNIQUE constraints arbitrate. A lost race (stream version or
+command id) raises UniqueViolation, the transaction rolls back, and a
+bounded retry re-runs the decision on fresh state.
 """
 
 from __future__ import annotations
 
 import json
-import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import psycopg
-from psycopg.rows import dict_row
+from psycopg.rows import DictRow
 
+from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cloudscale.application.command_execution import execute_command_decision
 from cloudscale.application.ports import NormalizedCommand
 from cloudscale.domain.account import AccountState, fold
@@ -44,6 +41,8 @@ CREATE TABLE IF NOT EXISTS events (
     amount     BIGINT,
     UNIQUE (stream, seq)
 );
+ALTER TABLE events ADD COLUMN IF NOT EXISTS published BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS events_unpublished_idx ON events (id) WHERE NOT published;
 CREATE TABLE IF NOT EXISTS command_results (
     command_id   TEXT PRIMARY KEY,
     request_hash BYTEA NOT NULL,
@@ -70,58 +69,11 @@ def _stream_name(account_id: str) -> str:
     return f"account-{account_id}"
 
 
-class PostgresCommandUnitOfWork:
-    """Atomic command execution over the PostgreSQL durable log."""
+class _BoundStorage:
+    """``CommandDecisionStorage`` over one checked-out connection."""
 
-    def __init__(
-        self,
-        conninfo: str,
-        *,
-        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
-        event_id_factory: Callable[[], UUID] = uuid4,
-    ) -> None:
-        # Autocommit connection: psycopg3's recommended pattern. Without it, a
-        # bare read opens an implicit transaction and a later
-        # conn.transaction() block silently degrades to a SAVEPOINT that
-        # never commits (writes lost on close). With autocommit=True every
-        # transaction() block is a REAL transaction and single statements
-        # commit immediately.
-        self._conn = psycopg.connect(conninfo, row_factory=dict_row, autocommit=True)
-        with self._conn.transaction():
-            # Serialize concurrent schema creation across processes:
-            # simultaneous CREATE TABLE IF NOT EXISTS can fail on the
-            # pg_type unique index when server + consumer start together.
-            self._conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtext('cloudscale_schema'))"
-            )
-            self._conn.execute(_SCHEMA)
-        self._clock = clock
-        self._event_id_factory = event_id_factory
-        self._lock = threading.Lock()
-
-    def close(self) -> None:
-        self._conn.close()
-
-    def execute(self, request: NormalizedCommand) -> CommandResult:
-        with self._lock:
-            for attempt in range(1, _MAX_RACE_RETRIES + 2):
-                try:
-                    with self._conn.transaction():
-                        return execute_command_decision(
-                            self,
-                            request,
-                            clock=self._clock,
-                            event_id_factory=self._event_id_factory,
-                        )
-                except psycopg.errors.UniqueViolation:
-                    # Cross-process race lost: either another writer took our
-                    # stream seq or persisted our command_id first. The next
-                    # pass folds fresh state / finds the stored result.
-                    if attempt > _MAX_RACE_RETRIES:
-                        raise
-        raise AssertionError("unreachable")  # pragma: no cover
-
-    # -- CommandDecisionStorage ------------------------------------------------
+    def __init__(self, conn: psycopg.Connection[DictRow]) -> None:
+        self._conn = conn
 
     def stored_result(self, command_id: UUID) -> CommandResult | None:
         row = self._conn.execute(
@@ -188,6 +140,43 @@ class PostgresCommandUnitOfWork:
             "VALUES (%s, %s, %s)",
             (str(result.command_id), result.request_hash, result.to_json()),
         )
+
+
+class PostgresCommandUnitOfWork:
+    """Atomic command execution over the PostgreSQL durable log."""
+
+    def __init__(
+        self,
+        conninfo: str,
+        *,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        event_id_factory: Callable[[], UUID] = uuid4,
+        pool_max: int | None = None,
+    ) -> None:
+        self._pool = open_pool(conninfo, max_size=pool_max)
+        ensure_schema(self._pool, _SCHEMA)
+        self._clock = clock
+        self._event_id_factory = event_id_factory
+
+    def close(self) -> None:
+        self._pool.close()
+
+    def execute(self, request: NormalizedCommand) -> CommandResult:
+        with self._pool.connection() as conn:
+            storage = _BoundStorage(conn)
+            for attempt in range(1, _MAX_RACE_RETRIES + 2):
+                try:
+                    with conn.transaction():
+                        return execute_command_decision(
+                            storage,
+                            request,
+                            clock=self._clock,
+                            event_id_factory=self._event_id_factory,
+                        )
+                except psycopg.errors.UniqueViolation:
+                    if attempt > _MAX_RACE_RETRIES:
+                        raise
+        raise AssertionError("unreachable")  # pragma: no cover
 
 
 __all__ = ["PostgresCommandUnitOfWork"]

@@ -1,27 +1,35 @@
-"""PostgreSQL event store: the production realization of the durable log.
+"""PostgreSQL event store: pooled connections and a transactional outbox.
 
-Same contract as ``SqliteEventStore`` (append with per-stream 1-based ``seq``,
-optimistic concurrency via UNIQUE(stream, seq), stable ``event_id``, ordered
-per-stream and global reads), verified by the same guarantees tests, so it is
-drop-in behind the existing store seam.
+Same append contract as ``SqliteEventStore`` (per-stream 1-based ``seq``,
+optimistic concurrency via UNIQUE(stream, seq), stable ``event_id``).
 
-Known caveat, documented deliberately: ``read_all`` orders by an IDENTITY
-column, and under **concurrent writers** a smaller id can become visible after
-a larger one has been consumed (commit-order vs id-order skew), which a purely
-monotonic offset would then skip. The current deployment scope is a single
-writer process, where ids are gap-free in consumption order. The production
-fix when multi-writer arrives is a transactional outbox drained in commit
-order — see ROADMAP.
+Why an outbox
+=============
+``events.id`` is an IDENTITY column. Under concurrent writers a *smaller* id
+can commit *after* a larger one has already been consumed, and a consumer
+keeping a monotonic ``id`` offset would skip it forever. The fix is to give
+consumers a different, gapless, commit-ordered coordinate:
+
+- ``append`` writes the event row only.
+- ``relay_outbox`` runs under an advisory lock, selects every committed
+  event not yet in ``outbox`` (an anti-join, so late-committing ids are
+  picked up), and assigns them consecutive ``position`` values in id order.
+  Positions are gapless and reflect commit visibility, never assignment.
+- ``read_all`` relays first, then reads by ``position``; the ``id`` key on
+  returned events IS the outbox position, so the existing consumer offset
+  logic works unchanged.
+
+The relay is idempotent and cheap when there is nothing to publish; multiple
+consumers serialize on the lock rather than double-assigning.
 """
 
 from __future__ import annotations
 
-import threading
 import uuid
 
 import psycopg
-from psycopg.rows import dict_row
 
+from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cqrs import ConcurrencyError
 
 _SCHEMA = """
@@ -35,59 +43,51 @@ CREATE TABLE IF NOT EXISTS events (
     amount     BIGINT,
     UNIQUE (stream, seq)
 );
+CREATE TABLE IF NOT EXISTS outbox (
+    position BIGINT PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id)
+);
+-- Publication flag + partial index make the relay O(pending events) instead
+-- of an anti-join over the whole log on every consumer poll. Late-committing
+-- rows are simply still unpublished when they become visible.
+ALTER TABLE events ADD COLUMN IF NOT EXISTS published BOOLEAN NOT NULL DEFAULT false;
+CREATE INDEX IF NOT EXISTS events_unpublished_idx ON events (id) WHERE NOT published;
 """
+
+_RELAY_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('cloudscale_outbox_relay'))"
 
 
 class PostgresEventStore:
-    """Durable, append-only event log on PostgreSQL."""
+    """Durable, append-only event log on PostgreSQL with an outbox feed."""
 
-    def __init__(self, conninfo: str) -> None:
-        # Autocommit connection: psycopg3's recommended pattern. Without it, a
-        # bare read opens an implicit transaction and a later
-        # conn.transaction() block silently degrades to a SAVEPOINT that
-        # never commits (writes lost on close). With autocommit=True every
-        # transaction() block is a REAL transaction and single statements
-        # commit immediately.
-        self._conn = psycopg.connect(conninfo, row_factory=dict_row, autocommit=True)
-        with self._conn.transaction():
-            # Serialize concurrent schema creation across processes:
-            # simultaneous CREATE TABLE IF NOT EXISTS can fail on the
-            # pg_type unique index when server + consumer start together.
-            self._conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtext('cloudscale_schema'))"
-            )
-            self._conn.execute(_SCHEMA)
-        self._lock = threading.Lock()
+    def __init__(self, conninfo: str, *, pool_max: int | None = None) -> None:
+        self._pool = open_pool(conninfo, max_size=pool_max)
+        ensure_schema(self._pool, _SCHEMA)
 
     def close(self) -> None:
-        self._conn.close()
+        self._pool.close()
 
     # -- write path ----------------------------------------------------------
 
     def append(self, stream: str, event: dict) -> int:
-        """Append ``event`` to ``stream``; return its per-stream ``seq``.
-
-        Optimistic concurrency: the seq is computed as MAX+1 and the
-        UNIQUE(stream, seq) constraint turns a lost race into
-        :class:`ConcurrencyError`, exactly like the SQLite tier.
-        """
+        """Append ``event`` to ``stream``; return its per-stream ``seq``."""
         if not isinstance(stream, str) or not stream:
             raise ValueError("stream must be a non-empty string")
         if not isinstance(event, dict):
             raise TypeError("event must be a dict")
 
         event_id = event.get("event_id") or str(uuid.uuid4())
-        with self._lock:
+        with self._pool.connection() as conn:
             try:
-                with self._conn.transaction():
-                    row = self._conn.execute(
+                with conn.transaction():
+                    row = conn.execute(
                         "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq "
                         "FROM events WHERE stream = %s",
                         (stream,),
                     ).fetchone()
                     assert row is not None
                     seq = int(row["next_seq"])
-                    self._conn.execute(
+                    conn.execute(
                         "INSERT INTO events "
                         "(event_id, stream, seq, type, account_id, amount) "
                         "VALUES (%s, %s, %s, %s, %s, %s)",
@@ -101,23 +101,55 @@ class PostgresEventStore:
                         ),
                     )
             except psycopg.errors.UniqueViolation as exc:
-                # UNIQUE(stream, seq) => concurrent writer took our seq.
-                # UNIQUE(event_id)    => duplicate append of the same event.
                 raise ConcurrencyError(str(exc)) from exc
             return seq
+
+    # -- outbox relay ----------------------------------------------------------
+
+    def relay_outbox(self) -> int:
+        """Publish every committed-but-unpublished event; return how many.
+
+        Index scan over the partial ``events_unpublished_idx``; position
+        assignment and the ``published`` flip commit together so a crash
+        mid-relay republishes nothing and skips nothing.
+        """
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute(_RELAY_LOCK_SQL)
+            pending = conn.execute(
+                "SELECT id, event_id FROM events WHERE NOT published ORDER BY id ASC"
+            ).fetchall()
+            if not pending:
+                return 0
+            head = conn.execute(
+                "SELECT COALESCE(MAX(position), 0) AS head FROM outbox"
+            ).fetchone()
+            assert head is not None
+            position = int(head["head"])
+            outbox_rows = []
+            for row in pending:
+                position += 1
+                outbox_rows.append((position, row["event_id"]))
+            with conn.cursor() as cursor:
+                cursor.executemany(
+                    "INSERT INTO outbox (position, event_id) VALUES (%s, %s)",
+                    outbox_rows,
+                )
+            conn.execute(
+                "UPDATE events SET published = true WHERE id = ANY(%s)",
+                ([int(row["id"]) for row in pending],),
+            )
+            return len(outbox_rows)
 
     # -- read path -------------------------------------------------------------
 
     def read(self, stream: str) -> list[dict]:
-        """Return all events in ``stream`` in append (seq) order."""
         return self.read_after(stream, 0)
 
     def read_after(self, stream: str, after_seq: int) -> list[dict]:
-        """Return events in ``stream`` with ``seq`` > ``after_seq``, in order."""
         if after_seq < 0:
             raise ValueError("after_seq must be non-negative")
-        with self._lock:
-            rows = self._conn.execute(
+        with self._pool.connection() as conn:
+            rows = conn.execute(
                 "SELECT event_id, stream, seq, type, account_id, amount "
                 "FROM events WHERE stream = %s AND seq > %s ORDER BY seq ASC",
                 (stream, after_seq),
@@ -125,26 +157,29 @@ class PostgresEventStore:
         return [self._row_to_event(row) for row in rows]
 
     def read_all(self, after_id: int = 0, limit: int | None = None) -> list[dict]:
-        """Return events across all streams with ``id`` > ``after_id``.
+        """Consumer feed by outbox ``position`` (returned as ``id``).
 
-        The consumer feed; each event carries its global ``id`` for the
-        persisted offset. See the module docstring for the multi-writer
-        visibility caveat.
+        Relays first so newly committed events - including late-committing
+        smaller ids - are published before being read. Gapless and
+        commit-ordered; safe for a monotonic consumer offset.
         """
+        self.relay_outbox()
         sql = (
-            "SELECT id, event_id, stream, seq, type, account_id, amount "
-            "FROM events WHERE id > %s ORDER BY id ASC"
+            "SELECT o.position, e.event_id, e.stream, e.seq, e.type, "
+            "e.account_id, e.amount FROM outbox o "
+            "JOIN events e ON e.event_id = o.event_id "
+            "WHERE o.position > %s ORDER BY o.position ASC"
         )
         params: tuple = (after_id,)
         if limit is not None:
             sql += " LIMIT %s"
             params = (after_id, limit)
-        with self._lock:
-            rows = self._conn.execute(sql, params).fetchall()
+        with self._pool.connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
         events = []
         for row in rows:
             event = self._row_to_event(row)
-            event["id"] = int(row["id"])
+            event["id"] = int(row["position"])
             events.append(event)
         return events
 

@@ -209,12 +209,16 @@ customer traffic. Source: the 2026-09-10 review (six blocking findings).
       by claims, OR by registered ownership — everything else, including
       unregistered accounts, stays 403. Registrations are audit-logged.
       Cross-connection registration race tested on PG (exactly one winner).
-- [ ] **Connection pooling + transactional outbox** (HIGH #4) — replace the
-      single-connection-behind-a-lock adapters with `psycopg_pool`
-      (the unit-of-work storage protocol needs a per-call connection handle),
-      then drain the log through an outbox in commit order so the documented
-      multi-writer `read_all` id-skew stops being a caveat. Unlocks multiple
-      uvicorn workers and horizontal scale.
+- [x] **Connection pooling + transactional outbox** (2026-09-11) — all four
+      PG adapters check connections out of a `psycopg_pool` per operation
+      (no process-wide lock; `CLOUDSCALE_PG_POOL_MAX`, default 4); the unit
+      of work hands the decision core a per-call bound-connection storage
+      view so fold/append/persist stay atomic. `read_all` now reads by a
+      gapless, commit-ordered outbox `position` assigned by an
+      advisory-locked relay (anti-join over unpublished events), so a
+      late-committing smaller id is delivered instead of skipped —
+      regression-locked by a held-open-transaction test. SQLite tier is
+      unchanged (single writer, commit order = id order).
 - [ ] **Shared rate limiter** — the in-process bucket bounds one replica;
       move to a shared store (PostgreSQL or Redis) once there are replicas.
 - [ ] **Identity** (HIGH #5) — OIDC/JWKS verification (RS256/ES256,

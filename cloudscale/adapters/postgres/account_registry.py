@@ -1,19 +1,15 @@
-"""PostgreSQL realization of the account ownership registry.
+"""PostgreSQL realization of the account ownership registry — pooled.
 
-Autocommit connection (see the other PG adapters for why); ``register`` is a
-single INSERT ... ON CONFLICT DO NOTHING RETURNING, so a race between two
-callers for the same account id is decided by the PRIMARY KEY and the loser
-learns who won from the follow-up lookup.
+``register`` is a single INSERT ... ON CONFLICT DO NOTHING RETURNING, so a
+race between two callers for the same account id is decided by the PRIMARY
+KEY and the loser learns who won from the follow-up lookup.
 """
 
 from __future__ import annotations
 
-import threading
 from datetime import UTC, datetime
 
-import psycopg
-from psycopg.rows import dict_row
-
+from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cloudscale.application.ports import RegistrationOutcome
 from cloudscale.domain.commands import _validate_account_id
 
@@ -27,24 +23,19 @@ CREATE TABLE IF NOT EXISTS accounts (
 
 
 class PostgresAccountRegistry:
-    def __init__(self, conninfo: str) -> None:
-        self._conn = psycopg.connect(conninfo, row_factory=dict_row, autocommit=True)
-        with self._conn.transaction():
-            self._conn.execute(
-                "SELECT pg_advisory_xact_lock(hashtext('cloudscale_schema'))"
-            )
-            self._conn.execute(_SCHEMA)
-        self._lock = threading.Lock()
+    def __init__(self, conninfo: str, *, pool_max: int | None = None) -> None:
+        self._pool = open_pool(conninfo, max_size=pool_max)
+        ensure_schema(self._pool, _SCHEMA)
 
     def close(self) -> None:
-        self._conn.close()
+        self._pool.close()
 
     def register(self, account_id: str, owner_subject: str) -> RegistrationOutcome:
         _validate_account_id(account_id)
         if not isinstance(owner_subject, str) or not owner_subject:
             raise ValueError("owner_subject must be a non-empty string")
-        with self._lock:
-            inserted = self._conn.execute(
+        with self._pool.connection() as conn:
+            inserted = conn.execute(
                 "INSERT INTO accounts (account_id, owner_subject, created_at) "
                 "VALUES (%s, %s, %s) ON CONFLICT (account_id) DO NOTHING "
                 "RETURNING account_id",
@@ -52,7 +43,11 @@ class PostgresAccountRegistry:
             ).fetchone()
             if inserted is not None:
                 return RegistrationOutcome.CREATED
-            owner = self._owner_locked(account_id)
+            row = conn.execute(
+                "SELECT owner_subject FROM accounts WHERE account_id = %s",
+                (account_id,),
+            ).fetchone()
+        owner = str(row["owner_subject"]) if row else None
         return (
             RegistrationOutcome.ALREADY_OWNED_BY_CALLER
             if owner == owner_subject
@@ -60,13 +55,11 @@ class PostgresAccountRegistry:
         )
 
     def owner_of(self, account_id: str) -> str | None:
-        with self._lock:
-            return self._owner_locked(account_id)
-
-    def _owner_locked(self, account_id: str) -> str | None:
-        row = self._conn.execute(
-            "SELECT owner_subject FROM accounts WHERE account_id = %s", (account_id,)
-        ).fetchone()
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT owner_subject FROM accounts WHERE account_id = %s",
+                (account_id,),
+            ).fetchone()
         return str(row["owner_subject"]) if row else None
 
 

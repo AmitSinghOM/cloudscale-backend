@@ -266,6 +266,78 @@ def test_account_registry_semantics_and_cross_connection_race(
         second.close()
 
 
+def test_outbox_delivers_late_committing_smaller_ids(throwaway_dsn: str) -> None:
+    """The multi-writer skew the outbox exists to fix.
+
+    Writer A takes an IDENTITY id but has not committed; writer B takes the
+    next id and commits. A consumer reading by raw id would record an offset
+    past A's id and skip A forever once it commits. By outbox position, B is
+    published first, then A - gapless, commit-ordered, nothing lost.
+    """
+    store = PostgresEventStore(throwaway_dsn)
+    slow = psycopg.connect(throwaway_dsn)  # non-autocommit: holds a txn open
+    account_a = f"acct-{uuid.uuid4().hex[:8]}"
+    account_b = f"acct-{uuid.uuid4().hex[:8]}"
+    try:
+        # Drain anything pending from other tests so positions are predictable.
+        head = store.read_all(0)
+        after = head[-1]["id"] if head else 0
+
+        # A: insert (id assigned) but do NOT commit yet.
+        a_event_id = str(uuid.uuid4())
+        slow.execute(
+            "INSERT INTO events (event_id, stream, seq, type, account_id, amount) "
+            "VALUES (%s, %s, 1, 'Deposited', %s, 10)",
+            (a_event_id, account_a, account_a),
+        )
+        # B: append and commit normally -> gets the LARGER id.
+        store.append(account_b, _deposit(account_b, 20))
+
+        first = store.read_all(after)
+        assert [e["account_id"] for e in first] == [account_b]
+        assert first[0]["id"] == after + 1
+
+        slow.commit()  # A becomes visible AFTER B was consumed
+
+        second = store.read_all(first[-1]["id"])
+        assert [e["event_id"] for e in second] == [a_event_id]
+        assert second[0]["id"] == after + 2  # gapless, not skipped
+    finally:
+        slow.close()
+        store.close()
+
+
+def test_pooled_adapters_serve_concurrent_callers(
+    throwaway_dsn: str, consumer_name: str
+) -> None:
+    """Multiple threads hit one pooled projection store at once; no lock, no loss."""
+    import threading
+
+    projection = PostgresProjectionStore(throwaway_dsn, consumer=consumer_name)
+    account = f"acct-{uuid.uuid4().hex[:8]}"
+    events = [dict(_deposit(account, 1), id=i + 1) for i in range(40)]
+    try:
+
+        def worker(chunk: list[dict]) -> None:
+            for event in chunk:
+                projection.apply(event)
+
+        threads = [
+            threading.Thread(target=worker, args=(events[i::4],)) for i in range(4)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert projection.balance(account) == {
+            "account_id": account,
+            "balance": 40,
+            "version": 40,
+        }
+    finally:
+        projection.close()
+
+
 def test_resilient_consumer_end_to_end_on_postgres(
     throwaway_dsn: str, consumer_name: str
 ) -> None:
