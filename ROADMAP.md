@@ -221,9 +221,15 @@ customer traffic. Source: the 2026-09-10 review (six blocking findings).
       unchanged (single writer, commit order = id order).
 - [ ] **Shared rate limiter** — the in-process bucket bounds one replica;
       move to a shared store (PostgreSQL or Redis) once there are replicas.
-- [ ] **Identity** (HIGH #5) — OIDC/JWKS verification (RS256/ES256,
-      key rotation) as an alternative to the HS256 shared secret; short
-      token lifetimes plus a revocation list for the admin scope.
+- [x] **Identity** (2026-09-11) — OIDC/JWKS verification (RS256/ES256 via
+      `PyJWKClient`, `kid`-based key rotation without restarts) as an
+      alternative to the HS256 shared secret; settings require exactly one
+      mode and refuse algorithm confusion at configuration time; `iat`
+      required and lifetime capped (`CLOUDSCALE_JWT_MAX_LIFETIME_SECONDS`,
+      default 1 h); admin-scoped tokens must carry `jti` and honor a
+      revocation list (`CLOUDSCALE_JWT_REVOKED_JTIS`). Tested against a
+      locally generated RSA JWKS: accept, rotate, reject unknown key,
+      reject HS256 in JWKS mode, lifetime, revocation.
 - [ ] **Migrations** (HIGH #6, rest) — Alembic-managed schema instead of
       `CREATE TABLE IF NOT EXISTS` at startup; documented backup/restore.
 - [ ] **Consumer HA** — leader election or partitioned ownership so the

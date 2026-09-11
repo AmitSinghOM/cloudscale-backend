@@ -36,7 +36,7 @@ def build_app() -> FastAPI:
     storage = os.environ.get("CLOUDSCALE_STORAGE", "sqlite")
     # jwt_secret arrives via CLOUDSCALE_JWT_SECRET; pydantic-settings raises
     # at startup when absent (fail-closed by design).
-    settings = HttpSettings()  # type: ignore[call-arg]
+    settings = HttpSettings()
 
     if storage == "postgres":
         import psycopg

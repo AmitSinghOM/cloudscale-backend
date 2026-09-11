@@ -80,9 +80,12 @@ def _auth(subject: str, **claims: object) -> dict:
     payload: dict = {
         "iss": "cloudscale",
         "sub": subject,
+        "iat": datetime.now(UTC),
         "exp": datetime.now(UTC) + timedelta(minutes=5),
     }
     payload.update(claims)
+    if payload.get("scope") == "accounts:admin" and "jti" not in payload:
+        payload["jti"] = "test-jti-" + uuid.uuid4().hex
     return {"Authorization": f"Bearer {jwt.encode(payload, SECRET, algorithm='HS256')}"}
 
 

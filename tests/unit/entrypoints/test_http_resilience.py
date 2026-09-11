@@ -38,6 +38,8 @@ def _token() -> dict:
             "iss": "cloudscale",
             "sub": "user-1",
             "scope": "accounts:admin",
+            "jti": "test-jti-" + uuid.uuid4().hex,
+            "iat": datetime.now(UTC),
             "exp": datetime.now(UTC) + timedelta(minutes=5),
         },
         SECRET,

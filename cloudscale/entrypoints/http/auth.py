@@ -25,6 +25,7 @@ from fastapi import Depends, HTTPException, Request
 
 from cloudscale.application.ports import AccountRegistry
 from cloudscale.entrypoints.http.settings import HttpSettings
+from cloudscale.entrypoints.http.verifiers import TokenVerifier
 
 ADMIN_SCOPE = "accounts:admin"
 _INVALID_TOKEN = "invalid or expired bearer token"
@@ -68,43 +69,72 @@ def _string_list(value: object, claim: str) -> frozenset[str]:
     return frozenset(value)
 
 
+def _get_verifier(request: Request) -> TokenVerifier:
+    verifier = getattr(request.app.state, "token_verifier", None)
+    if verifier is None:
+        raise RuntimeError("app.state.token_verifier must be set by create_app")
+    return verifier
+
+
 def authenticate(
-    request: Request, settings: HttpSettings = Depends(_get_settings)
+    request: Request,
+    settings: HttpSettings = Depends(_get_settings),
+    verifier: TokenVerifier = Depends(_get_verifier),
 ) -> Principal:
-    """Verify the Bearer token and return the caller's principal."""
+    """Verify the Bearer token and return the caller's principal.
+
+    Beyond signature/issuer/expiry (delegated to the configured verifier):
+    ``iat`` is required and the token's lifetime (``exp - iat``) must not
+    exceed ``jwt_max_lifetime_seconds``; admin-scoped tokens must carry a
+    ``jti`` and are refused if it is on the revocation list.
+    """
     authorization = request.headers.get("Authorization", "")
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
         raise _unauthorized("missing bearer token")
-    required = ["sub", "exp", "iss"]
-    decode_kwargs: dict = {}
+    required = ["sub", "exp", "iss", "iat"]
     if settings.jwt_audience is not None:
         required.append("aud")
-        decode_kwargs["audience"] = settings.jwt_audience
     try:
-        claims = jwt.decode(
-            token.strip(),
-            settings.jwt_secret,
-            algorithms=[settings.jwt_algorithm],
-            issuer=settings.jwt_issuer,
-            options={"require": required},
-            **decode_kwargs,
+        claims = verifier.verify(
+            token.strip(), required_claims=required, audience=settings.jwt_audience
         )
     except jwt.InvalidTokenError as error:
         # One fixed message: never echo the parser's exception class.
         raise _unauthorized(_INVALID_TOKEN) from error
+
+    lifetime = _int_claim(claims, "exp") - _int_claim(claims, "iat")
+    if lifetime > settings.jwt_max_lifetime_seconds:
+        raise _unauthorized(_INVALID_TOKEN)
+
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject:
         raise _unauthorized(_INVALID_TOKEN)
     scope_value = claims.get("scope", "")
     if not isinstance(scope_value, str):
         raise _unauthorized("token claim 'scope' must be a string")
+    scopes = frozenset(scope_value.split())
+
+    if ADMIN_SCOPE in scopes:
+        jti = claims.get("jti")
+        if not isinstance(jti, str) or not jti:
+            raise _unauthorized("admin-scoped tokens must carry a jti")
+        if jti in settings.jwt_revoked_jtis:
+            raise _unauthorized(_INVALID_TOKEN)
+
     return Principal(
         issuer=str(claims["iss"]),
         subject=subject,
         account_ids=_string_list(claims.get("accounts"), "accounts"),
-        scopes=frozenset(scope_value.split()),
+        scopes=scopes,
     )
+
+
+def _int_claim(claims: dict, name: str) -> int:
+    value = claims.get(name)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _unauthorized(_INVALID_TOKEN)
+    return int(value)
 
 
 def authorize_account(
