@@ -5,14 +5,15 @@ expired, unsigned, wrongly signed, wrong-issuer, wrong-audience, and
 subject-less tokens are all rejected with a single fixed 401 message (no
 token-parser fingerprinting).
 
-Authorization is claims-based. A token grants access to exactly the
-accounts it names:
+Authorization is claims-based plus ownership-based. A token grants access to
+the accounts it names, and the system's own ownership registry grants access
+to accounts the subject registered:
 
 - ``accounts``: list of account ids the subject may command and read;
-- ``scope``: space-separated scopes; ``accounts:admin`` grants all accounts.
+- ``scope``: space-separated scopes; ``accounts:admin`` grants all accounts;
+- registry: ``owner_of(account_id) == subject`` (see ``POST /v1/accounts``).
 
-Anything else is 403. A durable ownership registry (accounts created by and
-bound to a subject) is the next step — see ROADMAP Phase 5.
+Anything else is 403.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from dataclasses import dataclass
 import jwt
 from fastapi import Depends, HTTPException, Request
 
+from cloudscale.application.ports import AccountRegistry
 from cloudscale.entrypoints.http.settings import HttpSettings
 
 ADMIN_SCOPE = "accounts:admin"
@@ -105,12 +107,24 @@ def authenticate(
     )
 
 
-def authorize_account(principal: Principal, account_id: str) -> None:
-    """Raise 403 unless ``principal`` may act on ``account_id``."""
-    if not principal.may_access(account_id):
-        raise HTTPException(
-            status_code=403, detail="principal is not authorized for this account"
-        )
+def authorize_account(
+    principal: Principal,
+    account_id: str,
+    registry: AccountRegistry | None = None,
+) -> None:
+    """Raise 403 unless ``principal`` may act on ``account_id``.
+
+    Access is granted by the admin scope, by the token naming the account, or
+    by the registry recording the caller as the account's owner. Everything
+    else — including accounts nobody has registered — is denied.
+    """
+    if principal.may_access(account_id):
+        return
+    if registry is not None and registry.owner_of(account_id) == principal.subject:
+        return
+    raise HTTPException(
+        status_code=403, detail="principal is not authorized for this account"
+    )
 
 
 __all__ = ["ADMIN_SCOPE", "Principal", "authenticate", "authorize_account"]

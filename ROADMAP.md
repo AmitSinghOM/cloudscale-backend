@@ -202,11 +202,13 @@ customer traffic. Source: the 2026-09-10 review (six blocking findings).
       README architecture reflects what is built
 
 ### Remaining, in priority order
-- [ ] **Account ownership registry** — authorization today trusts the token
-      issuer to name accounts. Add `POST /v1/accounts` that creates an
-      account bound to the caller's subject (persisted alongside the log),
-      and authorize against that record; keep claims as the admin/service
-      path. Closes the gap between "token says so" and "the system knows".
+- [x] **Account ownership registry** (2026-09-11) — `AccountRegistry` port
+      with SQLite and Postgres realizations; `POST /v1/accounts` binds an
+      account to the caller's subject (201 created / 200 idempotent for the
+      owner / 409 taken); authorization now grants access by admin scope,
+      by claims, OR by registered ownership — everything else, including
+      unregistered accounts, stays 403. Registrations are audit-logged.
+      Cross-connection registration race tested on PG (exactly one winner).
 - [ ] **Connection pooling + transactional outbox** (HIGH #4) — replace the
       single-connection-behind-a-lock adapters with `psycopg_pool`
       (the unit-of-work storage protocol needs a per-call connection handle),

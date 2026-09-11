@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 from cloudscale.application.command_service import CommandService
+from cloudscale.application.ports import AccountRegistry, RegistrationOutcome
 from cloudscale.application.query_service import QueryService
 from cloudscale.domain.commands import Deposit, Withdraw
 from cloudscale.domain.errors import DomainError
@@ -36,6 +37,7 @@ from cloudscale.entrypoints.http.observability import (
     Metrics,
     RequestLogMiddleware,
     audit_command,
+    audit_registration,
 )
 from cloudscale.entrypoints.http.settings import HttpSettings
 from cloudscale.resilience import (
@@ -53,6 +55,14 @@ API_VERSION = "v1"
 
 class Closeable(Protocol):
     def close(self) -> None: ...
+
+
+class RegisterAccountRequest(BaseModel):
+    """Claim ownership of an account id for the authenticated caller."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
 
 
 class CommandRequest(BaseModel):
@@ -121,6 +131,7 @@ def create_app(
     breaker: CircuitBreaker | None = None,
     tracer_provider: TracerProvider | None = None,
     rate_limiter: RateLimiter | None = None,
+    account_registry: AccountRegistry | None = None,
     closeables: Sequence[Closeable] = (),
 ) -> FastAPI:
     """Build the HTTP app over explicit, injected collaborators.
@@ -195,13 +206,47 @@ def create_app(
     def prometheus_metrics() -> object:
         return metrics.render()
 
+    @app.post(f"/{API_VERSION}/accounts")
+    def register_account(
+        request: RegisterAccountRequest,
+        principal: Principal = Depends(authenticated),
+    ) -> JSONResponse:
+        """Bind an account to the caller. Idempotent for the same caller."""
+        if account_registry is None:
+            raise HTTPException(
+                status_code=501, detail="account registration is not enabled"
+            )
+        try:
+            outcome = account_registry.register(request.account_id, principal.subject)
+        except DomainError as error:
+            raise HTTPException(status_code=400, detail=error.code) from error
+        audit_registration(
+            subject=principal.subject,
+            issuer=principal.issuer,
+            account_id=request.account_id,
+            outcome=outcome.value,
+        )
+        status = {
+            RegistrationOutcome.CREATED: 201,
+            RegistrationOutcome.ALREADY_OWNED_BY_CALLER: 200,
+            RegistrationOutcome.TAKEN: 409,
+        }[outcome]
+        return JSONResponse(
+            status_code=status,
+            content={
+                "account_id": request.account_id,
+                "outcome": outcome.value,
+                "owner": principal.subject if status != 409 else None,
+            },
+        )
+
     @app.post(f"/{API_VERSION}/accounts/{{account_id}}/commands")
     def post_command(
         account_id: str,
         request: CommandRequest,
         principal: Principal = Depends(authenticated),  # writes ALWAYS authenticate
     ) -> JSONResponse:
-        authorize_account(principal, account_id)
+        authorize_account(principal, account_id, account_registry)
         try:
             command = (
                 Deposit(account_id, request.amount, request.expected_version)
@@ -259,7 +304,7 @@ def create_app(
         principal: Principal | None = query_auth,
     ) -> BalanceResponse:
         if principal is not None:
-            authorize_account(principal, account_id)
+            authorize_account(principal, account_id, account_registry)
         try:
             view = query_service.get_balance(account_id)
         except DomainError as error:

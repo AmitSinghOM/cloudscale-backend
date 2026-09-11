@@ -219,6 +219,53 @@ def test_writes_are_visible_to_a_second_connection_after_reads(
         observer.close()
 
 
+def test_account_registry_semantics_and_cross_connection_race(
+    throwaway_dsn: str,
+) -> None:
+    from cloudscale.adapters.postgres.account_registry import PostgresAccountRegistry
+    from cloudscale.application.ports import RegistrationOutcome
+
+    account = f"acct-{uuid.uuid4().hex[:10]}"
+    first = PostgresAccountRegistry(throwaway_dsn)
+    second = PostgresAccountRegistry(throwaway_dsn)  # separate connection
+    try:
+        assert first.register(account, "alice") is RegistrationOutcome.CREATED
+        # Visible to the other connection immediately (autocommit discipline).
+        assert second.owner_of(account) == "alice"
+        assert (
+            second.register(account, "alice")
+            is RegistrationOutcome.ALREADY_OWNED_BY_CALLER
+        )
+        assert second.register(account, "bob") is RegistrationOutcome.TAKEN
+
+        # Two connections race a fresh id: exactly one CREATED, the other TAKEN.
+        import threading
+
+        raced = f"acct-{uuid.uuid4().hex[:10]}"
+        barrier = threading.Barrier(2)
+        outcomes: list[RegistrationOutcome] = []
+        lock = threading.Lock()
+
+        def contend(registry: PostgresAccountRegistry, subject: str) -> None:
+            barrier.wait()
+            outcome = registry.register(raced, subject)
+            with lock:
+                outcomes.append(outcome)
+
+        threads = [
+            threading.Thread(target=contend, args=(first, "alice")),
+            threading.Thread(target=contend, args=(second, "bob")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert sorted(o.value for o in outcomes) == ["created", "taken"]
+    finally:
+        first.close()
+        second.close()
+
+
 def test_resilient_consumer_end_to_end_on_postgres(
     throwaway_dsn: str, consumer_name: str
 ) -> None:
