@@ -53,9 +53,10 @@ def test_consumer_storage_selection_sqlite(
     import sqlite3
 
     _base_env(monkeypatch, tmp_path)
-    feed, projection, retryable = build_storage("sqlite")
+    feed, projection, retryable, lease = build_storage("sqlite")
     try:
         assert retryable == (sqlite3.OperationalError,)
+        assert lease.try_acquire() is True  # SQLite: NoLease
         assert feed.read_all(0) == []
         assert projection.last_id() == 0
     finally:

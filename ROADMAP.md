@@ -241,12 +241,21 @@ customer traffic. Source: the 2026-09-10 review (six blocking findings).
       nothing and refuse to start unless Alembic is at the required
       revision; `python -m cloudscale.entrypoints.migrate` applies. Dockerfile
       documents the sequence. Backup/restore guidance → runbooks item.
-- [ ] **Consumer HA** — leader election or partitioned ownership so the
-      projection consumer is not a single point of failure; export lag as a
-      metric and alert on it. Prerequisite for honestly evaluating the
-      Milestone 1 availability gate.
-- [ ] **Runbooks + SLOs** — on-call docs for DLQ redrive, circuit-open
-      recovery, consumer restart; SLOs derived from the gate-run numbers.
+- [x] **Consumer HA** (2026-09-11) — leader election via a PostgreSQL
+      *session-level* advisory lock on a dedicated connection: exactly one
+      consumer per name drains, standbys poll; a dead leader's lock drops
+      with its connection so failover needs no timeouts and has no
+      split-brain window. Consumer process exports Prometheus gauges
+      (`is_leader`, `lag_events`, `last_drain_timestamp`) and counters
+      (applied, dead-lettered, halts). Verified: two real processes, one
+      leader, SIGKILL → standby leads and drains backlog within 1 s.
+- [x] **Runbooks + SLOs** (2026-09-11) — `docs/RUNBOOK.md` (8 procedures:
+      migration mismatch, lag, DLQ growth/redrive, 503s, 429s, key rotation
+      and admin revocation, backup/restore with what is derived vs. source of
+      record, failover expectations) and `docs/SLO.md` (SLIs on exported
+      metric names, targets with headroom over gate evidence, 43-min error
+      budget, multi-window burn-rate + latency + consumer alert rules in
+      PromQL; availability honestly marked target-not-yet-demonstrated).
 - [ ] Tagged release v0.5.0 with a fresh dual-tier gate run
 
 ## Definition of done (every phase)
