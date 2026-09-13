@@ -158,6 +158,13 @@ transient errors — domain rejections (409/422/400) never trip it.
 idempotent, so a retry after partial failure returns the original result or
 performs the command exactly once.
 
+**Pool exhaustion looks the same.** When every pooled connection is busy,
+acquisition waits at most `CLOUDSCALE_PG_POOL_TIMEOUT_SECONDS` (default 3)
+and then fails as a transient error → breaker → 503. If 503s coincide with
+a healthy database and high `cloudscale_http_request_seconds`, raise
+`CLOUDSCALE_PG_POOL_MAX` (default 4) or add replicas; do not raise the
+timeout — that trades fast failure for slow failure.
+
 ---
 
 ## R5 — 429s: rate limiting

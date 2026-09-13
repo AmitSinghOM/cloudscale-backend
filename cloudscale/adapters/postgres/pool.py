@@ -33,15 +33,24 @@ def open_pool(conninfo: str, *, max_size: int | None = None) -> DictPool:
     )
     if size < 1:
         raise ValueError("pool max_size must be at least 1")
+    # Acquisition wait when every connection is busy. psycopg_pool's default
+    # is 30 s; against a 300 ms p99 objective that is an outage disguised as
+    # latency. Exhaustion raises PoolTimeout (an OperationalError), which the
+    # command path's breaker counts and maps to 503 + Retry-After - so a
+    # short bound turns "hang" into "fail fast, client retries".
+    acquire_timeout = float(os.environ.get("CLOUDSCALE_PG_POOL_TIMEOUT_SECONDS", "3"))
+    if acquire_timeout <= 0:
+        raise ValueError("pool acquisition timeout must be positive")
     pool: DictPool = ConnectionPool(
         conninfo,
         connection_class=Connection[DictRow],
         min_size=1,
         max_size=size,
+        timeout=acquire_timeout,
         kwargs={"autocommit": True, "row_factory": dict_row},
         open=True,
     )
-    pool.wait(timeout=30.0)
+    pool.wait(timeout=30.0)  # startup only: wait for min_size to connect
     return pool
 
 

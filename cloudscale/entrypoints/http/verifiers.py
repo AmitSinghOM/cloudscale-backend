@@ -19,6 +19,10 @@ from jwt import PyJWKClient
 
 from cloudscale.entrypoints.http.settings import HttpSettings
 
+#: Bound on one JWKS fetch. Known kids are cached; this only applies to a
+#: refetch, so it can be tight without affecting steady-state latency.
+JWKS_FETCH_TIMEOUT_SECONDS = 3
+
 
 class TokenVerifier(Protocol):
     def verify(
@@ -81,8 +85,11 @@ class JwksVerifier:
         *,
         jwk_client: PyJWKClient | None = None,
     ) -> None:
+        # A hung identity provider must not hold a request for PyJWT's 30 s
+        # default; known kids are served from cache, so this only bounds the
+        # refetch on an unknown kid or cache expiry.
         self._client = jwk_client or PyJWKClient(
-            jwks_url, cache_keys=True, lifespan=300
+            jwks_url, cache_keys=True, lifespan=300, timeout=JWKS_FETCH_TIMEOUT_SECONDS
         )
         self._algorithms = list(algorithms)
         self._issuer = issuer
