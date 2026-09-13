@@ -20,9 +20,10 @@ dated plan to become enforced or a reason it cannot.
   test: idempotency under retry, exactly-once projection, outbox ordering,
   autocommit visibility, lease exclusivity and failover, schema drift
   between `auto` and `migrations`, error-text leakage.
-- **Policy → enforced by 2026-Q4.** Event schema evolution. Every event
-  carries `schema_version`, but no upcaster exists and no test proves an
-  old-version event still folds. See ADR-0009 and ROADMAP Phase 6.
+- **Enforced.** Event schema evolution (ADR-0009): every event row carries
+  `schema_version`; `cloudscale.domain.upcasting` translates at read time;
+  `tests/fixtures/events/` holds one row per version ever written and the
+  suite fails if the corpus is incomplete or any fixture fails to fold.
 
 ## 2. Decisions are recorded with their *why*
 
@@ -40,14 +41,16 @@ dated plan to become enforced or a reason it cannot.
 - **Enforced.** Exact-pinned dependencies with hash-verified installs;
   base image receives security updates at build time; `pip-audit` and Trivy
   fail CI on fixable findings.
-- **Policy → enforced by 2027-Q1.** Python version policy: CI runs the
-  current and next CPython minors; `requires-python` allows both; the
-  project moves off a minor at least 12 months before its end-of-life
-  (3.12 EOL 2028-10). Currently pinned to 3.12 only — ADR-0010.
-- **Policy.** Quarterly dependency refresh: regenerate both locks with the
-  same `uv pip compile` command, run the full gate and a 10-second gate
-  run on both tiers, commit the diff with the report. Dependabot proposes;
-  the quarter closes it.
+- **Enforced.** Python version policy (ADR-0010): the CI gate runs on the
+  current and next CPython minors (3.12 and 3.13 today); `requires-python`
+  allows both; the project moves off a minor at least 12 months before its
+  end-of-life (3.12 EOL 2028-10).
+- **Enforced.** Quarterly dependency refresh: `scripts/check_lock_age.sh`
+  runs in CI and fails the build when either lock file has gone more than
+  120 days without regeneration (warns at 90). Regenerate both locks with
+  the recorded `uv pip compile` command, run the full gate and a 10-second
+  gate run on both tiers, commit the diff with the report. Dependabot
+  proposes; the staleness check makes the quarter close.
 
 ## 4. Data outlives code
 
@@ -57,10 +60,10 @@ dated plan to become enforced or a reason it cannot.
   (`CLOUDSCALE_PG_SCHEMA=migrations` refuses anything else).
 - **Enforced.** Events are stored as JSON with explicit `schema_version`,
   not pickled objects — readable by any language in any decade.
-- **Policy → enforced by 2026-Q4.** Upcasters: a registry mapping
-  `(event_type, schema_version) → current shape`, with a test that folds a
-  fixture of every historical version. Until then, changing an event's
-  shape is forbidden (additive optional fields only).
+- **Enforced.** Upcasters (ADR-0009): registry of one-step translations
+  chained to the current shape; stored events are never rewritten; a
+  version newer than the build dead-letters and the command path answers
+  503, so a rolled-back deploy freezes accounts rather than corrupting them.
 
 ## 5. Operations are rehearsed, not documented
 
@@ -111,4 +114,4 @@ year after its target date is either enforced, given a new dated plan with
 a written reason, or removed. Aspirations that nobody enforces are deleted,
 not carried.
 
-*Adopted 2026-09-13 at v0.5.1.*
+*Adopted 2026-09-13 at v0.5.1; reviewed at v0.6.0 the same day (four policy items became enforced).*

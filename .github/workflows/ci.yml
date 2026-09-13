@@ -56,6 +56,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # lock age is read from git history
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -67,6 +69,11 @@ jobs:
         run: |
           python -m pip install --quiet pip-audit==2.9.0
           pip-audit -r requirements.lock --strict --disable-pip --progress-spinner off
+      - name: Lock freshness (LONGEVITY §3 — quarterly refresh is enforced, not remembered)
+        # Age = time since the lock file last changed in git. Dependabot PRs
+        # only bump pyproject; the lock must be regenerated with the recorded
+        # uv command, which is exactly the act this check forces each quarter.
+        run: scripts/check_lock_age.sh requirements.lock requirements-dev.lock
 
   image:
     name: container image builds
