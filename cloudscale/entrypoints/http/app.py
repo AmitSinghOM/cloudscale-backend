@@ -34,6 +34,7 @@ from cloudscale.entrypoints.http.auth import (
 )
 from cloudscale.entrypoints.http.limits import (
     BodySizeLimitMiddleware,
+    ClientRateLimitMiddleware,
     RateLimiter,
     RateLimiterLike,
 )
@@ -60,6 +61,22 @@ API_VERSION = "v1"
 
 class Closeable(Protocol):
     def close(self) -> None: ...
+
+
+class ReadinessProbe(Protocol):
+    """Answers "can this replica serve traffic right now?".
+
+    Must touch the real dependencies (a storage round-trip, the schema
+    revision) and raise on any failure; the caller maps exceptions to 503.
+    Returns a small dict of what was checked, for the response body.
+    """
+
+    def check(self) -> dict[str, object]: ...
+
+
+class ReadyResponse(BaseModel):
+    status: Literal["ready", "not_ready"]
+    checks: dict[str, object]
 
 
 class RegisterAccountRequest(BaseModel):
@@ -138,6 +155,7 @@ def create_app(
     rate_limiter: RateLimiterLike | None = None,
     account_registry: AccountRegistry | None = None,
     token_verifier: TokenVerifier | None = None,
+    readiness_probe: ReadinessProbe | None = None,
     closeables: Sequence[Closeable] = (),
 ) -> FastAPI:
     """Build the HTTP app over explicit, injected collaborators.
@@ -168,8 +186,20 @@ def create_app(
     app.state.metrics = metrics
     app.state.token_verifier = token_verifier or build_verifier(settings)
 
-    # Middleware order (outermost first): access log -> body cap -> CORS.
+    # Middleware order (outermost first): access log -> client limit -> body
+    # cap -> CORS. The client limiter sits inside the access log so pre-auth
+    # 429s are still logged and counted; it runs before any body is read or
+    # any token is verified.
     app.add_middleware(RequestLogMiddleware, metrics=metrics)
+    if settings.client_rate_limit_per_minute > 0:
+        app.add_middleware(
+            ClientRateLimitMiddleware,
+            limiter=RateLimiter(settings.client_rate_limit_per_minute),
+            trust_proxy=settings.trust_proxy_headers,
+            exempt_paths=frozenset(
+                {f"/{API_VERSION}/health", f"/{API_VERSION}/ready", "/metrics"}
+            ),
+        )
     app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes)
     if settings.cors_origins:
         app.add_middleware(
@@ -207,7 +237,33 @@ def create_app(
 
     @app.get(f"/{API_VERSION}/health", response_model=HealthResponse)
     def health() -> HealthResponse:
+        # Liveness only: the process is up. Never touches storage, so it
+        # cannot be used to decide whether to route traffic here.
         return HealthResponse(status="ok", storage=storage_metadata)
+
+    @app.get(
+        f"/{API_VERSION}/ready",
+        response_model=ReadyResponse,
+        responses={503: {"model": ReadyResponse}},
+    )
+    def ready() -> JSONResponse:
+        # Readiness: storage round-trip (and schema revision on the PG tier).
+        # 503 tells the orchestrator to stop routing to this replica and to
+        # fail a rollout of a build that cannot reach or does not match the
+        # database. Without a probe wired, readiness == liveness (SQLite dev).
+        if readiness_probe is None:
+            return JSONResponse(
+                ReadyResponse(status="ready", checks={"probe": "none"}).model_dump()
+            )
+        try:
+            checks = readiness_probe.check()
+        except Exception as exc:  # noqa: BLE001 — any failure means not ready
+            body = ReadyResponse(
+                status="not_ready",
+                checks={"error": type(exc).__name__, "detail": str(exc)[:200]},
+            )
+            return JSONResponse(body.model_dump(), status_code=503)
+        return JSONResponse(ReadyResponse(status="ready", checks=checks).model_dump())
 
     @app.get("/metrics", include_in_schema=False)
     def prometheus_metrics() -> object:

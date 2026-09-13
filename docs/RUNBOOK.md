@@ -8,9 +8,26 @@ verified from inside the service (e.g. your alerting stack), it says so.
 
 | Process | Entrypoint | Scaling | Health signal |
 |---|---|---|---|
-| HTTP tier | `uvicorn --factory cloudscale.entrypoints.http.main:build_app` | N replicas (PG tier) | `GET /v1/health`, `GET /metrics` |
+| HTTP tier | `uvicorn --factory cloudscale.entrypoints.http.main:build_app` | N replicas (PG tier) | liveness `GET /v1/health`, **readiness `GET /v1/ready`**, `GET /metrics` |
 | Consumer | `python -m cloudscale.entrypoints.consumer_loop` | N replicas, **one leader** | `:CLOUDSCALE_CONSUMER_METRICS_PORT/metrics` |
 | Migrations | `python -m cloudscale.entrypoints.migrate` | once per release | exit code |
+
+**Probes.** Point the orchestrator's *liveness* probe at `/v1/health` (process
+up, never touches storage) and its *readiness* probe at `/v1/ready`, which
+does a real storage round-trip and, in `CLOUDSCALE_PG_SCHEMA=migrations`
+mode, re-verifies the Alembic revision. `503` from `/v1/ready` means: stop
+routing here; a rollout whose replicas never go ready has a schema or
+connectivity problem (see R1). Both probes and `/metrics` bypass the
+client rate limiter.
+
+**Abuse controls, in request order.** (1) pre-authentication per-client
+budget `CLOUDSCALE_CLIENT_RATE_LIMIT_PER_MINUTE` (default 1,200/replica) —
+bounds the cost of token verification for unauthenticated floods; set
+`CLOUDSCALE_TRUST_PROXY_HEADERS=true` **only** behind a proxy you control
+that overwrites `X-Forwarded-For`, otherwise clients can spoof out of it;
+(2) body cap; (3) authentication; (4) per-subject budget
+`CLOUDSCALE_RATE_LIMIT_PER_MINUTE` (shared across replicas with the
+`postgres` backend).
 
 Production PostgreSQL env: `CLOUDSCALE_STORAGE=postgres CLOUDSCALE_PG_DSN=…
 CLOUDSCALE_PG_SCHEMA=migrations CLOUDSCALE_RATE_LIMIT_BACKEND=postgres` plus

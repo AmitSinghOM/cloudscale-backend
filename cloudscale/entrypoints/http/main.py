@@ -50,12 +50,14 @@ def build_app() -> FastAPI:
         from cloudscale.adapters.postgres.projection_store import (
             PostgresProjectionStore,
         )
+        from cloudscale.adapters.postgres.readiness import PostgresReadinessProbe
 
         dsn = os.environ["CLOUDSCALE_PG_DSN"]
         pg_unit_of_work = PostgresCommandUnitOfWork(dsn)
         pg_projection = PostgresProjectionStore(dsn)
         pg_registry = PostgresAccountRegistry(dsn)
-        pg_closeables: list = [pg_unit_of_work, pg_projection, pg_registry]
+        pg_probe = PostgresReadinessProbe(dsn)
+        pg_closeables: list = [pg_unit_of_work, pg_projection, pg_registry, pg_probe]
         shared_limiter = None
         if settings.rate_limit_backend == "postgres":
             from cloudscale.adapters.postgres.rate_limiter import PostgresRateLimiter
@@ -70,6 +72,7 @@ def build_app() -> FastAPI:
             transient_errors=(psycopg.OperationalError,),
             account_registry=pg_registry,
             rate_limiter=shared_limiter,
+            readiness_probe=pg_probe,
             closeables=tuple(pg_closeables),
         )
 
@@ -89,12 +92,12 @@ def build_app() -> FastAPI:
     from cloudscale.adapters.sqlite_compat.dead_letter_store import (
         DeadLetteringProjectionStore,
     )
+    from cloudscale.adapters.sqlite_compat.readiness import SqliteReadinessProbe
 
     log_db = os.environ["CLOUDSCALE_LOG_DB"]
+    projection_db = os.environ["CLOUDSCALE_PROJECTION_DB"]
     unit_of_work = SqliteCommandUnitOfWork(log_db)
-    projection = DeadLetteringProjectionStore(
-        path=os.environ["CLOUDSCALE_PROJECTION_DB"]
-    )
+    projection = DeadLetteringProjectionStore(path=projection_db)
     registry = SqliteAccountRegistry(log_db)  # ownership lives beside the log
     return create_app(
         settings,
@@ -102,6 +105,7 @@ def build_app() -> FastAPI:
         query_service=QueryService(StoreProjectionReader(projection)),
         storage_metadata=projection.metadata,
         account_registry=registry,
+        readiness_probe=SqliteReadinessProbe(log_db, projection_db),
         closeables=(unit_of_work, projection, registry),
     )
 

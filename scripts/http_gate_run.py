@@ -224,6 +224,7 @@ def run_gates(
     command_workers: int,
     query_workers: int,
     storage: str = "sqlite",
+    server_workers: int = 1,
 ) -> dict:
     if storage not in ("sqlite", "postgres"):
         raise ValueError("storage must be 'sqlite' or 'postgres'")
@@ -269,6 +270,8 @@ def run_gates(
                     str(port),
                     "--log-level",
                     "warning",
+                    "--workers",
+                    str(server_workers),
                 ),
                 cwd=REPOSITORY_ROOT,
                 env=env,
@@ -367,7 +370,7 @@ def run_gates(
         "revision": _revision(),
         "captured_at": datetime.now(UTC).isoformat(),
         "deployment": {
-            "server": "uvicorn, 1 worker, 127.0.0.1 loopback",
+            "server": f"uvicorn, {server_workers} worker(s), 127.0.0.1 loopback",
             "consumer": "separate process (cloudscale.entrypoints.consumer_loop)",
             "storage": (
                 "postgresql 17 (throwaway db, local server)"
@@ -430,6 +433,12 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--command-workers", type=int, default=4)
     parser.add_argument("--query-workers", type=int, default=8)
+    parser.add_argument(
+        "--server-workers",
+        type=int,
+        default=1,
+        help="uvicorn worker processes (recorded in the report)",
+    )
     parser.add_argument("--evidence-root", type=Path)
     return parser.parse_args(arguments)
 
@@ -437,7 +446,11 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
 def main(arguments: Sequence[str] | None = None) -> int:
     args = _parse_args(arguments)
     report = run_gates(
-        args.duration, args.command_workers, args.query_workers, storage=args.storage
+        args.duration,
+        args.command_workers,
+        args.query_workers,
+        storage=args.storage,
+        server_workers=args.server_workers,
     )
 
     evidence_directory = (

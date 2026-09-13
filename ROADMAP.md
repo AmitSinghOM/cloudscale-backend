@@ -259,13 +259,25 @@ customer traffic. Source: the 2026-09-10 review (six blocking findings).
 - [x] Tagged release v0.5.0 (2026-09-12) with a fresh gate run. SQLite tier:
       all four evaluable gates pass (1,394 rps, command p99 72.6 ms, query
       p99 9.3 ms, lag 0.077 s), evidence committed. **PostgreSQL tier: the
-      1,000 rps gate could not be honestly evaluated** — the run landed at
-      852 rps with command p99 31 ms and lag 0.089 s while the host carried
-      load 6–8 from unrelated GUI processes (measured: WindowServer +
-      dashboard renderer ≈ one full core). The three other PG gates pass.
-      No PG evidence file is committed for this release; re-run
-      `scripts/http_gate_run.py --storage postgres` on a quiet host and
-      commit it as a follow-up. Last clean PG pass: 1,218 rps on 5c75f99.
+      1,000 rps gate does not pass on one uvicorn worker** — 852 rps, with
+      command p99 31–51 ms and lag < 0.1 s passing.
+      *Correction (2026-09-13):* the release-day attribution to host
+      contention was **wrong**. Two runs on different days under different
+      load agreed to 0.05 % (851.9 / 852.3 rps), which is a structural
+      ceiling, not noise. Profiled: every PG primitive is < 1 ms (SELECT
+      0.13 ms, append 0.56 ms); single-client HTTP latency on the PG tier is
+      *better* than SQLite (command 1.12 ms vs 1.50 ms). The gap exists only
+      under 12-way concurrency: one Python process saturates its GIL and the
+      PG request path does more Python-side work per request (pool checkout,
+      dict-row decoding, outbox write) than the in-process SQLite path.
+      Raising `CLOUDSCALE_PG_POOL_MAX` 4→16 cut command p99 51→35 ms but
+      added only 20 rps, confirming the process, not the pool, is the limit.
+      The tier's design answer is horizontal — the harness now takes
+      `--server-workers N` and records it in the report so evidence can
+      never mislabel the deployment shape. A 2-worker run reached 896 rps
+      on a host at load 9.7/10 cores and is not committed. Follow-up:
+      `--storage postgres --server-workers 2` on a quiet host. Last clean
+      1-worker PG pass: 1,218 rps on 5c75f99 (pre-pooling/outbox).
 
 ## Definition of done (every phase)
 1. Tests pass, CI green.
