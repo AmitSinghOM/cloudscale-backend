@@ -1,8 +1,8 @@
 # ADR-0009: Event schema evolution via upcasters
 
-**Status:** Proposed  **Date:** 2026-09-13
-**Enforced by:** *to be* `tests/unit/domain/test_upcasters.py` with a
-fixture of every historical event version (target 2026-Q4)
+**Status:** Accepted  **Date:** 2026-09-13
+**Enforced by:** `tests/unit/domain/test_upcasting.py` — fixture corpus in
+`tests/fixtures/events/` (one file per version ever written), completeness + fold asserted; landed 2026-09-13
 
 ## Context
 Every event carries `schema_version`, but no code has ever had to read an

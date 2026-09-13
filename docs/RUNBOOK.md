@@ -93,6 +93,14 @@ did not migrate.
 
 **Never** set `CLOUDSCALE_PG_SCHEMA=auto` in production to "make it start".
 
+**Rolling back a deploy after a schema-version bump.** Events written by a
+newer build carry a higher `schema_version`. An older build cannot translate
+them: the consumer dead-letters each one with
+`error_type = UnknownSchemaVersionError` (R3) rather than halting, and the
+command path returns 503 for accounts whose stream contains one. Balances
+for those accounts stay frozen until the newer build is redeployed — then
+`scripts/dlq.py … redrive --all` applies the parked events. Nothing is lost.
+
 ---
 
 ## R2 — Projection lag rising / reads stale

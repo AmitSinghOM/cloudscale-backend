@@ -1,0 +1,10 @@
+{
+  "id": 1,
+  "event_id": "5c0f3c1e-2a6b-4d4a-9f0e-7b1d2a3c4e5f",
+  "stream": "account-fixture-1",
+  "seq": 1,
+  "type": "Deposited",
+  "account_id": "fixture-1",
+  "amount": 250,
+  "schema_version": 1
+}

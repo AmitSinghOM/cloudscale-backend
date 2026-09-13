@@ -7,6 +7,13 @@ integrator; the commit history says how.
 ## [Unreleased]
 
 ### Added
+- Event schema evolution (ADR-0009): `cloudscale.domain.upcasting` registry,
+  `schema_version` on every `events` row (Alembic `0003_events_schema_version`;
+  SQLite files upgrade in place), upcasting at both read boundaries, fixture
+  corpus under `tests/fixtures/events/`. Events from a newer build dead-letter
+  instead of halting the consumer.
+- CI runs the gate on Python 3.12 and 3.13 (ADR-0010); `requires-python`
+  widened to `<3.14`.
 - Soak harness `scripts/soak_run.py` with fixed pass criteria (PR #15).
 - Longevity structure: `docs/LONGEVITY.md`, `docs/adr/` (ADR-0001..0010),
   `CONTRIBUTING.md`, `AGENTS.md`, `CODEOWNERS`, this changelog.

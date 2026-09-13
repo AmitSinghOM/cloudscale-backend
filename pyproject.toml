@@ -7,7 +7,7 @@ name = "cloudscale-backend"
 version = "0.5.1"
 description = "CQRS command/query split with a durable SQLite event log and idempotent consumer."
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.14"
 dependencies = [
     "alembic==1.19.2",
     "fastapi==0.141.1",

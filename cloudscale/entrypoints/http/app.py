@@ -28,6 +28,7 @@ from cloudscale.application.query_service import QueryService
 from cloudscale.domain.commands import Deposit, Withdraw
 from cloudscale.domain.errors import DomainError
 from cloudscale.domain.results import CommandResult
+from cloudscale.domain.upcasting import UnknownSchemaVersionError
 from cloudscale.entrypoints.http.auth import (
     Principal,
     authenticate,
@@ -353,6 +354,16 @@ def create_app(
                 status_code=503,
                 detail="command path unavailable (transient storage failure)",
                 headers={"Retry-After": "1"},
+            ) from error
+        except UnknownSchemaVersionError as error:
+            # The stream holds an event written by a NEWER build (rolled-back
+            # deploy). Not a client error and not transient storage: the fix
+            # is redeploying the newer build. 503 tells the client to retry
+            # later; the account is frozen, never corrupted (RUNBOOK R1).
+            raise HTTPException(
+                status_code=503,
+                detail="command path unavailable (event schema newer than this build)",
+                headers={"Retry-After": "60"},
             ) from error
 
         audit_command(

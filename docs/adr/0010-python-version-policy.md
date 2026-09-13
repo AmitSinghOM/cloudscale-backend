@@ -1,8 +1,8 @@
 # ADR-0010: Python version policy
 
-**Status:** Proposed  **Date:** 2026-09-13
-**Enforced by:** *to be* CI matrix over current and next CPython minors
-(target 2027-Q1)
+**Status:** Accepted  **Date:** 2026-09-13
+**Enforced by:** CI gate job matrix over 3.12 and 3.13 (`.github/workflows/ci.yml`)
+(landed 2026-09-13, ahead of the 2027-Q1 target)
 
 ## Context
 `requires-python = ">=3.12,<3.13"` pins one minor. CPython 3.12 reaches

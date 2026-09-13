@@ -33,6 +33,10 @@ CREATE TABLE IF NOT EXISTS events (
     type       TEXT NOT NULL,
     account_id TEXT,
     amount     INTEGER,
+    -- Shape the payload was written with; readers upcast to current
+    -- (cloudscale.domain.upcasting). Constant default: SQLite forbids
+    -- expression defaults in ADD COLUMN, and 1 is the first shape by definition.
+    schema_version INTEGER NOT NULL DEFAULT 1,
     -- (stream, seq) is the per-stream ordering + optimistic-concurrency guard:
     -- two writers racing on the same seq collide here instead of corrupting
     -- the log.
@@ -71,6 +75,12 @@ class SqliteEventStore:
             pass
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA)
+        # In-place upgrade for log files created before schema_version existed.
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(events)")}
+        if "schema_version" not in columns:
+            self._conn.execute(
+                "ALTER TABLE events ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
+            )
         self._conn.commit()
         self._lock = threading.Lock()
 
@@ -102,8 +112,9 @@ class SqliteEventStore:
             seq = int(cur.fetchone()["maxseq"]) + 1
             try:
                 self._conn.execute(
-                    "INSERT INTO events (event_id, stream, seq, type, account_id, amount) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO events "
+                    "(event_id, stream, seq, type, account_id, amount, schema_version) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         event_id,
                         stream,
@@ -111,6 +122,7 @@ class SqliteEventStore:
                         event.get("type"),
                         event.get("account_id"),
                         event.get("amount"),
+                        int(event.get("schema_version", 1)),
                     ),
                 )
                 self._conn.commit()
@@ -127,7 +139,7 @@ class SqliteEventStore:
         """Return all events in ``stream`` in append (seq) order."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT event_id, stream, seq, type, account_id, amount "
+                "SELECT event_id, stream, seq, type, account_id, amount, schema_version "
                 "FROM events WHERE stream = ? ORDER BY seq ASC",
                 (stream,),
             ).fetchall()
@@ -143,7 +155,7 @@ class SqliteEventStore:
             raise ValueError("after_seq must be non-negative")
         with self._lock:
             rows = self._conn.execute(
-                "SELECT event_id, stream, seq, type, account_id, amount "
+                "SELECT event_id, stream, seq, type, account_id, amount, schema_version "
                 "FROM events WHERE stream = ? AND seq > ? ORDER BY seq ASC",
                 (stream, after_seq),
             ).fetchall()
@@ -157,7 +169,7 @@ class SqliteEventStore:
         ``id`` so the consumer can persist an offset.
         """
         sql = (
-            "SELECT id, event_id, stream, seq, type, account_id, amount "
+            "SELECT id, event_id, stream, seq, type, account_id, amount, schema_version "
             "FROM events WHERE id > ? ORDER BY id ASC"
         )
         params: tuple = (after_id,)
@@ -188,6 +200,9 @@ class SqliteEventStore:
             "stream": r["stream"],
             "seq": int(r["seq"]),
             "type": r["type"],
+            "schema_version": int(r["schema_version"])
+            if "schema_version" in r.keys()
+            else 1,
         }
         if r["account_id"] is not None:
             e["account_id"] = r["account_id"]

@@ -25,6 +25,7 @@ from cloudscale.application.command_execution import execute_command_decision
 from cloudscale.application.ports import NormalizedCommand
 from cloudscale.domain.account import AccountState, fold
 from cloudscale.domain.events import AccountEvent, Deposited, EventEnvelope, Withdrawn
+from cloudscale.domain.upcasting import upcast
 from cloudscale.domain.results import CommandResult
 
 # Identical to cqrs.durable_eventstore._SCHEMA so both writers interoperate
@@ -38,6 +39,7 @@ CREATE TABLE IF NOT EXISTS events (
     type       TEXT NOT NULL,
     account_id TEXT,
     amount     INTEGER,
+    schema_version INTEGER NOT NULL DEFAULT 1,
     UNIQUE (stream, seq),
     UNIQUE (event_id)
 );
@@ -87,6 +89,13 @@ def _add_created_at_if_missing(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS command_results_created_at_idx "
         "ON command_results (created_at)"
     )
+    # Same treatment for events.schema_version (ADR-0009): legacy files read
+    # as v1, which is the first shape by definition.
+    event_columns = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "schema_version" not in event_columns:
+        conn.execute(
+            "ALTER TABLE events ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
+        )
 
 
 def _stream_name(account_id: str) -> str:
@@ -149,28 +158,29 @@ class SqliteCommandUnitOfWork:
 
     def fold_stream(self, account_id: str) -> AccountState:
         rows = self._conn.execute(
-            "SELECT type, account_id, amount FROM events "
+            "SELECT type, account_id, amount, schema_version FROM events "
             "WHERE stream = ? ORDER BY seq ASC",
             (_stream_name(account_id),),
         ).fetchall()
         events: list[Deposited | Withdrawn] = []
         for row in rows:
-            if row["type"] == "Deposited":
-                events.append(
-                    Deposited(account_id=row["account_id"], amount=row["amount"])
-                )
-            elif row["type"] == "Withdrawn":
-                events.append(
-                    Withdrawn(account_id=row["account_id"], amount=row["amount"])
-                )
+            # Translate the stored shape to the current one before folding
+            # (ADR-0009); rows predating the column read as v1.
+            current = upcast(dict(row))
+            account_id, amount = str(current["account_id"]), int(current["amount"])  # type: ignore[call-overload]
+            if current["type"] == "Deposited":
+                events.append(Deposited(account_id=account_id, amount=amount))
+            elif current["type"] == "Withdrawn":
+                events.append(Withdrawn(account_id=account_id, amount=amount))
             else:  # pragma: no cover - typed path never writes other types
                 raise ValueError(f"unsupported event type in stream: {row['type']!r}")
         return fold(events)
 
     def append_event(self, envelope: EventEnvelope, event: AccountEvent) -> None:
         self._conn.execute(
-            "INSERT INTO events (event_id, stream, seq, type, account_id, amount) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO events "
+            "(event_id, stream, seq, type, account_id, amount, schema_version) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 str(envelope.event_id),
                 _stream_name(event.account_id),
@@ -178,6 +188,7 @@ class SqliteCommandUnitOfWork:
                 envelope.event_type,
                 event.account_id,
                 event.amount,
+                envelope.schema_version,
             ),
         )
         self._conn.execute(

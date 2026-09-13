@@ -71,8 +71,8 @@ class PostgresEventStore:
                     seq = int(row["next_seq"])
                     conn.execute(
                         "INSERT INTO events "
-                        "(event_id, stream, seq, type, account_id, amount) "
-                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        "(event_id, stream, seq, type, account_id, amount, "
+                        "schema_version) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                         (
                             event_id,
                             stream,
@@ -80,6 +80,7 @@ class PostgresEventStore:
                             event.get("type"),
                             event.get("account_id"),
                             event.get("amount"),
+                            int(event.get("schema_version", 1)),
                         ),
                     )
             except psycopg.errors.UniqueViolation as exc:
@@ -133,7 +134,7 @@ class PostgresEventStore:
             raise ValueError("after_seq must be non-negative")
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT event_id, stream, seq, type, account_id, amount "
+                "SELECT event_id, stream, seq, type, account_id, amount, schema_version "
                 "FROM events WHERE stream = %s AND seq > %s ORDER BY seq ASC",
                 (stream, after_seq),
             ).fetchall()
@@ -149,7 +150,7 @@ class PostgresEventStore:
         self.relay_outbox()
         sql = (
             "SELECT o.position, e.event_id, e.stream, e.seq, e.type, "
-            "e.account_id, e.amount FROM outbox o "
+            "e.account_id, e.amount, e.schema_version FROM outbox o "
             "JOIN events e ON e.event_id = o.event_id "
             "WHERE o.position > %s ORDER BY o.position ASC"
         )
@@ -182,6 +183,7 @@ class PostgresEventStore:
             "stream": row["stream"],
             "seq": int(row["seq"]),
             "type": row["type"],
+            "schema_version": int(row.get("schema_version", 1)),
         }
         if row["account_id"] is not None:
             event["account_id"] = row["account_id"]
