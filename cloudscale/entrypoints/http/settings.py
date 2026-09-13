@@ -52,6 +52,14 @@ class HttpSettings(BaseSettings):
     #: ``memory`` bounds one replica; ``postgres`` shares one budget across
     #: every replica (requires the postgres storage tier).
     rate_limit_backend: Literal["memory", "postgres"] = "memory"
+    #: Pre-authentication per-client-address budget, requests per minute.
+    #: Bounds the cost of unauthenticated floods (token verification is not
+    #: free). Per replica, in memory. 0 disables (bench only).
+    client_rate_limit_per_minute: int = Field(default=1_200, ge=0)
+    #: Trust ``X-Forwarded-For`` for the client address. Enable ONLY behind
+    #: a proxy you control that overwrites the header; otherwise clients can
+    #: spoof their way out of the client limiter.
+    trust_proxy_headers: bool = False
     #: Maximum accepted request body, bytes (commands are ~150 bytes).
     max_body_bytes: int = Field(default=16_384, ge=1)
     #: CORS allowlist. Empty (default) = no cross-origin browser access.

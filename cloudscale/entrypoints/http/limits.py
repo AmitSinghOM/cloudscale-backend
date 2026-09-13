@@ -75,6 +75,65 @@ class RateLimiter:
             del self._buckets[key]
 
 
+class ClientRateLimitMiddleware:
+    """Per-client-address token bucket applied BEFORE authentication.
+
+    The per-subject limiter runs inside the auth dependency, so without this
+    an unauthenticated flood gets unmetered token verification (RSA checks in
+    JWKS mode). This meters every request by client address, so the cost of
+    a 401 is bounded. Trust ``X-Forwarded-For`` only when ``trust_proxy`` is
+    set — behind a terminating proxy the socket peer is always the proxy.
+    Exempt paths (health/readiness/metrics) bypass so orchestrator probes
+    are never throttled.
+    """
+
+    def __init__(
+        self,
+        app: Any,
+        limiter: RateLimiterLike,
+        *,
+        trust_proxy: bool = False,
+        exempt_paths: frozenset[str] = frozenset(),
+    ) -> None:
+        self.app = app
+        self._limiter = limiter
+        self._trust_proxy = trust_proxy
+        self._exempt = exempt_paths
+
+    def _client_key(self, scope: Any) -> str:
+        if self._trust_proxy:
+            for name, value in scope.get("headers", ()):
+                if name == b"x-forwarded-for":
+                    # Left-most entry is the originating client per RFC 7239.
+                    first = value.decode("latin-1").split(",", 1)[0].strip()
+                    if first:
+                        return first
+        client = scope.get("client")
+        return client[0] if client else "unknown"
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] != "http" or scope.get("path") in self._exempt:
+            await self.app(scope, receive, send)
+            return
+        allowed, retry_after = self._limiter.try_acquire(self._client_key(scope))
+        if allowed:
+            await self.app(scope, receive, send)
+            return
+        body = b'{"detail":"rate limit exceeded"}'
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 429,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode()),
+                    (b"retry-after", str(max(1, int(retry_after + 0.999))).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
 class BodySizeLimitMiddleware:
     """Reject requests whose declared or streamed body exceeds ``max_bytes``.
 
@@ -141,4 +200,9 @@ def _too_large(max_bytes: int) -> JSONResponse:
     )
 
 
-__all__ = ["BodySizeLimitMiddleware", "RateLimiter", "RateLimiterLike"]
+__all__ = [
+    "BodySizeLimitMiddleware",
+    "ClientRateLimitMiddleware",
+    "RateLimiter",
+    "RateLimiterLike",
+]
