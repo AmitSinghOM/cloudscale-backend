@@ -44,6 +44,24 @@ jobs:
             tests/unit/adapters/test_postgres_command_uow.py -q -rs 2>&1 | tee pg.log
           ! grep -q "SKIPPED" pg.log
 
+  dependency-audit:
+    name: dependency vulnerabilities (pip-audit, production lock)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Audit the exact hash-pinned set that ships in the image
+        # --strict: any resolution problem is a failure, not a skip.
+        # Runs against requirements.lock (production), not the dev lock, so
+        # a vulnerable test-only tool cannot block a release and a vulnerable
+        # runtime dependency can never be hidden behind one.
+        run: |
+          python -m pip install --quiet pip-audit==2.9.0
+          pip-audit -r requirements.lock --strict --disable-pip --progress-spinner off
+
   image:
     name: container image builds
     runs-on: ubuntu-latest
@@ -58,6 +76,15 @@ jobs:
           push: false
           load: true
           tags: cloudscale-backend:ci
+      - name: Scan image (OS + Python packages; fails on fixable CRITICAL/HIGH)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: cloudscale-backend:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          vuln-type: os,library
       - name: Smoke (app factory constructs, fails closed without secret)
         run: |
           set -e
