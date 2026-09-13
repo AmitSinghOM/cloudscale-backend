@@ -278,6 +278,30 @@ def test_pg_prunes_results_buckets_and_optionally_dead_letters(
 
 
 @pg
+def test_pg_prune_tolerates_tables_this_deployment_never_created(
+    fresh_dsn: str, monkeypatch
+) -> None:
+    """Only the command UoW has run: no rate_limit_buckets, no dead_letters.
+    Retention must prune what exists and report zero for the rest, not crash.
+    (Found by the soak harness, which runs without the postgres limiter.)"""
+    from cloudscale.adapters.postgres.command_unit_of_work import (
+        PostgresCommandUnitOfWork,
+    )
+
+    monkeypatch.setenv("CLOUDSCALE_PG_SCHEMA", "auto")
+    PostgresCommandUnitOfWork(fresh_dsn).close()
+    with psycopg.connect(fresh_dsn) as conn:
+        present = conn.execute(
+            "SELECT to_regclass('rate_limit_buckets') IS NOT NULL"
+        ).fetchone()[0]
+    assert present is False  # precondition: the limiter table really is absent
+
+    report = prune_postgres(fresh_dsn, RetentionPolicy(dead_letters_days=1))
+    assert report.rate_limit_buckets == 0
+    assert report.dead_letters == 0
+
+
+@pg
 def test_pg_upgrade_from_0001_adds_created_at_and_stamps_existing_rows(
     fresh_dsn: str, monkeypatch
 ) -> None:
