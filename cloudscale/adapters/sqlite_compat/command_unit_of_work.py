@@ -47,7 +47,8 @@ _UOW_SCHEMA = """
 CREATE TABLE IF NOT EXISTS command_results (
     command_id   TEXT PRIMARY KEY,
     request_hash BLOB NOT NULL,
-    result_json  TEXT NOT NULL
+    result_json  TEXT NOT NULL,
+    created_at   REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS event_envelopes (
@@ -63,6 +64,29 @@ CREATE TABLE IF NOT EXISTS event_envelopes (
     UNIQUE (stream_id, stream_version)
 );
 """
+
+
+def _add_created_at_if_missing(conn: sqlite3.Connection) -> None:
+    """In-place upgrade for databases created before retention existed.
+
+    SQLite has no ``ADD COLUMN IF NOT EXISTS``; inspect first. Existing rows
+    are stamped "now" (treated as fresh) — the same choice the PostgreSQL
+    migration makes. ``CREATE TABLE IF NOT EXISTS`` above is a no-op for an
+    existing table, so the column must be added here.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(command_results)")}
+    if "created_at" not in columns:
+        conn.execute(
+            "ALTER TABLE command_results ADD COLUMN created_at REAL NOT NULL DEFAULT 0"
+        )
+        # Stamp pre-existing rows "now": treat them as fresh, like the PG migration.
+        conn.execute("UPDATE command_results SET created_at = unixepoch('subsec')")
+    # Index lives here, not in the CREATE script: on a legacy file the column
+    # does not exist until the ALTER above has run.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS command_results_created_at_idx "
+        "ON command_results (created_at)"
+    )
 
 
 def _stream_name(account_id: str) -> str:
@@ -87,6 +111,7 @@ class SqliteCommandUnitOfWork:
         except sqlite3.OperationalError:
             pass
         self._conn.executescript(_EVENTS_SCHEMA + _UOW_SCHEMA)
+        _add_created_at_if_missing(self._conn)
         self._conn.commit()
         self._clock = clock
         self._event_id_factory = event_id_factory
@@ -174,9 +199,14 @@ class SqliteCommandUnitOfWork:
 
     def persist_result(self, result: CommandResult) -> None:
         self._conn.execute(
-            "INSERT INTO command_results (command_id, request_hash, result_json) "
-            "VALUES (?, ?, ?)",
-            (str(result.command_id), result.request_hash, result.to_json()),
+            "INSERT INTO command_results "
+            "(command_id, request_hash, result_json, created_at) VALUES (?, ?, ?, ?)",
+            (
+                str(result.command_id),
+                result.request_hash,
+                result.to_json(),
+                self._clock().timestamp(),
+            ),
         )
 
 

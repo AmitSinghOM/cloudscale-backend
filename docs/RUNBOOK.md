@@ -29,6 +29,46 @@ that overwrites `X-Forwarded-For`, otherwise clients can spoof out of it;
 `CLOUDSCALE_RATE_LIMIT_PER_MINUTE` (shared across replicas with the
 `postgres` backend).
 
+## Deployment assumptions (non-negotiable for customer traffic)
+
+The service deliberately does **not** implement these itself. Each is a
+precondition; a deployment missing one is not production.
+
+| # | Assumption | Why | How to verify |
+|---|---|---|---|
+| D1 | **TLS is terminated upstream** (load balancer / ingress / sidecar). The app speaks plain HTTP on its listen port and sets no HSTS or other browser security headers. | Bearer tokens in the clear = account takeover. | Listen port is not reachable from outside the private network; the public hostname serves only HTTPS. |
+| D2 | **`/metrics` on both tiers is network-restricted** to the scraper. It is unauthenticated by design. | Leaks route names, traffic shape, and error rates. | `curl` from outside the cluster network returns a connection error, not a 200. |
+| D3 | **Audit and request logs are shipped to an append-only sink** (WORM bucket, immutable log store). `cloudscale.audit` is structured JSON on stdout; it carries no tamper evidence of its own. | Non-repudiation of every command outcome and ownership change. | The sink denies delete/overwrite to every principal the deployment uses. |
+| D4 | **Secrets arrive from a secrets manager**, injected into the process environment at start; never baked into images, compose files, or CI logs. Covers `CLOUDSCALE_JWT_SECRET`, `CLOUDSCALE_PG_DSN`. | Environment variables are visible to anyone who can exec into the container. | Image history and repo contain no secret values; rotation does not require a code change. |
+| D5 | **Client budgets are enforced at the edge too.** The in-app pre-auth limiter bounds CPU per replica; it is not a volumetric defence. | Layer-3/4 floods never reach the application. | Edge rate limit and connection limits configured; `CLOUDSCALE_TRUST_PROXY_HEADERS=true` set **only** if the edge overwrites `X-Forwarded-For`. |
+| D6 | **Retention job is scheduled.** `python -m cloudscale.entrypoints.retention` runs at least daily (see R9). | Idempotency records and limiter buckets otherwise grow without bound. | Last run's JSON report is recent and its exit code was 0. |
+| D7 | **Multiple HTTP workers/replicas on the PostgreSQL tier.** One uvicorn worker is CPU-bound near 850 rps; throughput scales horizontally (`--workers N` or N replicas). | Single-process ceiling is structural (GIL), not tunable. | Load test at the deployment's replica count, not on one worker. |
+
+## Retention (R9)
+
+`python -m cloudscale.entrypoints.retention` prunes, in bounded batches:
+
+- `command_results` older than `--command-results-days` (default 7). This is
+  the **idempotency window**: a client retrying a `command_id` older than
+  this is treated as a new command. Set it longer than any client's retry
+  horizon, never shorter.
+- `rate_limit_buckets` idle for longer than `--rate-limit-idle-seconds`
+  (default 3600). A pruned bucket is recreated full on next use — identical
+  to a fully refilled one, so no behaviour changes.
+- `dead_letters` **only** when `--dead-letters-days` is given. They are
+  evidence of a producer or infrastructure defect; the default keeps them.
+
+Never pruned: the event log, `event_envelopes`, `processed_events`,
+`accounts`. Event-stream snapshots are a separate ROADMAP item; until then
+the practical ceiling is cold-start replay time for the longest account
+stream (the memoized fold keeps the hot path O(1) once warm).
+
+Schema note: retention added `command_results.created_at` (Alembic
+`0002_command_results_created_at`; the SQLite tier upgrades a legacy file in
+place on first open). Pre-existing rows are stamped at migration time —
+treated as fresh — so a first retention run right after upgrading prunes
+nothing.
+
 Production PostgreSQL env: `CLOUDSCALE_STORAGE=postgres CLOUDSCALE_PG_DSN=…
 CLOUDSCALE_PG_SCHEMA=migrations CLOUDSCALE_RATE_LIMIT_BACKEND=postgres` plus
 exactly one of `CLOUDSCALE_JWT_SECRET` / `CLOUDSCALE_JWT_JWKS_URL`.

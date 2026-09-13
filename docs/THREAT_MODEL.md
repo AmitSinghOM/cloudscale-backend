@@ -102,9 +102,12 @@ B6 Operators → everything. B7 Supply chain → image.
    next hardening PR. *2026-09-13*
 5. **No independent penetration test.** Required before the first external
    contract. *2026-09-13*
-6. **Unbounded table growth** (`command_results`, `dead_letters`,
-   `rate_limit_buckets`, event log without snapshots). Retention job in
-   progress; until then a documented ceiling. *2026-09-13*
+6. **Event log without snapshots.** `command_results`, `rate_limit_buckets`
+   and (optionally) `dead_letters` are now bounded by the retention job
+   (`entrypoints/retention.py`, RUNBOOK R9). The event log itself is the
+   source of record and is never pruned; cold-start replay of one very
+   long account stream is the remaining ceiling until snapshots land.
+   *2026-09-13*
 
 ## Out of scope
 
