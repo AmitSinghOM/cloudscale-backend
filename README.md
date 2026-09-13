@@ -77,6 +77,22 @@ tests/
 scripts/verify_milestone.py   Deterministic gate; writes evidence/<git-sha>/milestone-1/
 ```
 
+## Governance (how this stays safe to change)
+
+| Document | Purpose |
+|---|---|
+| `docs/LONGEVITY.md` | The charter: what keeps this maintainable through 2033, marked enforced vs. policy |
+| `docs/adr/` | Architecture Decision Records — the *why* behind every load-bearing decision |
+| `CONTRIBUTING.md` | Definition of done, gates, evidence rule |
+| `AGENTS.md` | Contract for language-model contributors: same gates, invariants never weakened, humans own the irreversible |
+| `SECURITY.md` · `docs/THREAT_MODEL.md` | Disclosure policy; STRIDE model with dated accepted risks |
+| `docs/RUNBOOK.md` · `docs/SLO.md` | Operations procedures; SLIs, targets, alert rules |
+| `CHANGELOG.md` | Operator-facing history per release |
+
+The ADR index, changelog structure and presence of these files are checked
+by `tests/architecture/test_governance_docs.py` — governance is part of the
+build, not a wish.
+
 ## Verifying
 
 ```
