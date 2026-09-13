@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Protocol
 
+from cloudscale.domain.upcasting import upcast
 from cloudscale.resilience import (
     CircuitBreaker,
     CircuitOpenError,
@@ -91,8 +92,14 @@ class ResilientConsumer:
         self._batch = batch
 
     def _apply_under_breaker(self, event: dict) -> bool:
-        """One breaker-guarded apply attempt for ``event``."""
-        return self._breaker.call(partial(self._projection.apply, event))
+        """One breaker-guarded apply attempt for ``event``.
+
+        The stored event is translated to the current schema first
+        (ADR-0009). A version this build cannot translate raises
+        ``UnknownSchemaVersionError`` (a ``ValueError``): deterministic, so
+        the loop below dead-letters it as poison instead of halting the log.
+        """
+        return self._breaker.call(partial(self._projection.apply, upcast(event)))
 
     def run(self) -> ConsumerReport:
         """Consume until the log is drained or the circuit opens."""

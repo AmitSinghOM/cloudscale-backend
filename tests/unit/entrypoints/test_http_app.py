@@ -287,3 +287,24 @@ def test_end_to_end_command_to_consumer_to_query(stack: _Stack) -> None:
         "version": 2,
         "consistency": "eventual",
     }
+
+
+def test_future_schema_event_in_stream_maps_to_503_not_500(stack: _Stack) -> None:
+    """A rolled-back deploy leaves newer-schema events in the log. The command
+    path must say 'retry later' (503), never leak a 500 (ADR-0009, RUNBOOK R1)."""
+    import sqlite3
+
+    conn = sqlite3.connect(stack.log_path)
+    conn.execute(
+        "INSERT INTO events (event_id, stream, seq, type, account_id, amount, schema_version)"
+        " VALUES ('future-1', 'account-acct-9', 1, 'Deposited', 'acct-9', 5, 99)"
+    )
+    conn.commit()
+    conn.close()
+
+    response = stack.client.post(
+        "/v1/accounts/acct-9/commands", json=_command_body(), headers=_auth()
+    )
+    assert response.status_code == 503
+    assert "newer than this build" in response.json()["detail"]
+    assert int(response.headers["Retry-After"]) >= 1

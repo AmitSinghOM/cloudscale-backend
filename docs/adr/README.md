@@ -23,7 +23,7 @@ or add one. Reviewers reject otherwise.
 | [0006](0006-consumer-ha-via-session-advisory-lock.md) | Consumer HA via session advisory lock | Accepted |
 | [0007](0007-fail-closed-migrations-in-production.md) | Fail-closed migrations in production | Accepted |
 | [0008](0008-exact-pins-hash-verified-installs.md) | Exact pins and hash-verified installs | Accepted |
-| [0009](0009-event-schema-evolution-via-upcasters.md) | Event schema evolution via upcasters | Proposed |
-| [0010](0010-python-version-policy.md) | Python version policy | Proposed |
+| [0009](0009-event-schema-evolution-via-upcasters.md) | Event schema evolution via upcasters | Accepted |
+| [0010](0010-python-version-policy.md) | Python version policy | Accepted |
 
 Template: [`TEMPLATE.md`](TEMPLATE.md).

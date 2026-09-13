@@ -330,14 +330,18 @@ What follows turns each remaining *policy* item into an *enforced* one.
 
 - [x] **Longevity structure** (2026-09-13) — as above; ADR index and status
       lines checked by `tests/architecture/test_governance_docs.py`.
-- [ ] **Event upcasters** (ADR-0009, target 2026-Q4) — registry
-      `(event_type, from_version) → payload`, fixture directory with one
-      sample of every version ever written, test folding all of them
-      through the current projection. Until then: additive optional fields
-      only.
-- [ ] **Python version matrix** (ADR-0010, target 2027-Q1) — CI on 3.12 and
-      3.13; `requires-python` widened; default moves ≥ 12 months before EOL
-      (3.12 EOL 2028-10).
+- [x] **Event upcasters** (ADR-0009, 2026-09-13) — `domain/upcasting.py`
+      registry `(event_type, from_version) → payload`, chained one version
+      at a time; applied at both read boundaries (command fold in both UoWs,
+      resilient consumer before every projection apply). `schema_version`
+      now on the `events` row (Alembic `0003`; SQLite in-place). A version
+      newer than the build dead-letters as poison instead of wedging the
+      log. Fixture corpus `tests/fixtures/events/` with completeness + fold
+      tests: adding a version without its fixture fails the build.
+- [x] **Python version matrix** (ADR-0010, 2026-09-13) — CI gate runs on
+      3.12 and 3.13 (`fail-fast: false`); `requires-python >=3.12,<3.14`;
+      full gate verified locally on 3.13.12 (304 tests). Locks unchanged
+      (universal). Default moves ≥ 12 months before 3.12 EOL (2028-10).
 - [ ] **Quarterly dependency refresh** (first: 2026-12) — regenerate both
       locks with the recorded `uv` command, full gate + 10 s gate on both
       tiers, commit diff and report. Add a CI job that fails if the lock is
