@@ -6,6 +6,11 @@ integrator; the commit history says how.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-13
+
+Longevity: the structure and enforcement that keep the service safe to
+change through 2033.
+
 ### Added
 - Event schema evolution (ADR-0009): `cloudscale.domain.upcasting` registry,
   `schema_version` on every `events` row (Alembic `0003_events_schema_version`;
@@ -14,6 +19,8 @@ integrator; the commit history says how.
   instead of halting the consumer.
 - CI runs the gate on Python 3.12 and 3.13 (ADR-0010); `requires-python`
   widened to `<3.14`.
+- Lock-freshness check `scripts/check_lock_age.sh` in CI: fails when a lock
+  file is more than 120 days since regeneration (warns at 90).
 - Soak harness `scripts/soak_run.py` with fixed pass criteria (PR #15).
 - Longevity structure: `docs/LONGEVITY.md`, `docs/adr/` (ADR-0001..0010),
   `CONTRIBUTING.md`, `AGENTS.md`, `CODEOWNERS`, this changelog.
@@ -73,7 +80,8 @@ fold (29.6× hot-path throughput).
 Phases 0–2: hexagonal core, idempotent command unit of work, resilient
 consumer with retry, circuit breaker and dead-letter redrive.
 
-[Unreleased]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.3.0...v0.4.0

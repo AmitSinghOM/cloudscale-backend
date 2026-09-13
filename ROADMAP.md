@@ -321,7 +321,7 @@ a 30-day availability window; backup/restore rehearsal; live (restart-free)
 admin revocation; consumer partitioning by account hash; alert routing to a
 pager; independent penetration test; static security lint (`ruff` S rules).
 
-## Phase 6 — Longevity (seven-year horizon)  ·  🚧 started 2026-09-13
+## Phase 6 — Longevity (seven-year horizon)  ·  🚧 started 2026-09-13 · v0.6.0 tagged
 
 Governed by `docs/LONGEVITY.md`. The structure landed first (charter,
 ADR-0001..0010 reconstructing existing decisions, `CONTRIBUTING.md`,
@@ -342,10 +342,10 @@ What follows turns each remaining *policy* item into an *enforced* one.
       3.12 and 3.13 (`fail-fast: false`); `requires-python >=3.12,<3.14`;
       full gate verified locally on 3.13.12 (304 tests). Locks unchanged
       (universal). Default moves ≥ 12 months before 3.12 EOL (2028-10).
-- [ ] **Quarterly dependency refresh** (first: 2026-12) — regenerate both
-      locks with the recorded `uv` command, full gate + 10 s gate on both
-      tiers, commit diff and report. Add a CI job that fails if the lock is
-      older than 120 days.
+- [x] **Quarterly dependency refresh — enforced** (2026-09-13) —
+      `scripts/check_lock_age.sh` in the CI dependency-audit job: fails when
+      either lock is > 120 days since its last regeneration (warns at 90).
+      First refresh due 2026-12.
 - [ ] **Annual restore drill** (first: 2026-Q4) — dump, restore to a fresh
       instance, `migrate current`, start in `migrations` mode, rebuild the
       projection from the log, compare balances; record time under
