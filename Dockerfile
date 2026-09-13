@@ -39,6 +39,8 @@ EXPOSE 8000
 #      and CLOUDSCALE_RATE_LIMIT_BACKEND=postgres for a replica-shared limit.
 # Consumer process: override CMD with
 #   python -m cloudscale.entrypoints.consumer_loop
+# Retention (scheduled, at least daily): override CMD with
+#   python -m cloudscale.entrypoints.retention --command-results-days 7
 # Docker's single HEALTHCHECK is closest to a readiness probe: use /v1/ready
 # so a replica with a dead database is marked unhealthy. Orchestrators with
 # separate liveness/readiness probes should use /v1/health and /v1/ready.

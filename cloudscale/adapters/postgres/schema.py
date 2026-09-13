@@ -15,7 +15,7 @@ information_schema is identical.
 from __future__ import annotations
 
 #: Alembic revision the adapters require in ``migrations`` schema mode.
-CURRENT_REVISION = "0001_initial"
+CURRENT_REVISION = "0002_command_results_created_at"
 
 EVENTS = """
 CREATE TABLE IF NOT EXISTS events (
@@ -43,8 +43,11 @@ COMMAND_RESULTS = """
 CREATE TABLE IF NOT EXISTS command_results (
     command_id   TEXT PRIMARY KEY,
     request_hash BYTEA NOT NULL,
-    result_json  TEXT NOT NULL
+    result_json  TEXT NOT NULL,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS command_results_created_at_idx
+    ON command_results (created_at);
 CREATE TABLE IF NOT EXISTS event_envelopes (
     event_id       TEXT PRIMARY KEY,
     stream_id      TEXT NOT NULL,

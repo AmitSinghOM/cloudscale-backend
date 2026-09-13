@@ -279,6 +279,41 @@ customer traffic. Source: the 2026-09-10 review (six blocking findings).
       `--storage postgres --server-workers 2` on a quiet host. Last clean
       1-worker PG pass: 1,218 rps on 5c75f99 (pre-pooling/outbox).
 
+## Phase 5.1 — Production-readiness review fixes  ·  ✅ done (2026-09-13)
+
+A CTO / staff-security style review of v0.5.0 judged the service ready for
+an internal or early-access pilot but **not** for general availability, and
+named six blockers. All six are closed:
+
+- [x] **Readiness probe** (PR #9) — `/v1/ready` does a real storage
+      round-trip and re-verifies the Alembic revision in production mode;
+      503 stops routing and fails a mismatched rollout. `/v1/health` is
+      liveness only. Docker `HEALTHCHECK` now targets readiness.
+- [x] **Pre-authentication rate limit** (PR #9) — per-client budget ahead of
+      token verification bounds the cost of unauthenticated floods;
+      `X-Forwarded-For` trusted only behind a controlled proxy.
+- [x] **Security scanning + disclosure** (PR #10) — `pip-audit` on the
+      production lock and a Trivy image scan fail CI on fixable
+      CRITICAL/HIGH; Dependabot; `SECURITY.md`; `docs/THREAT_MODEL.md`
+      (STRIDE, six dated accepted risks). First scan found 12 real fixable
+      CVEs in the Debian base layer; fixed by applying security updates in
+      the runtime stage. Kafka client removed from the default install.
+- [x] **Retention** — `entrypoints/retention.py` bounds `command_results`
+      (idempotency window, default 7 d), idle `rate_limit_buckets`, and
+      optionally `dead_letters`, in batches; Alembic `0002` adds
+      `command_results.created_at`; SQLite upgrades legacy files in place.
+- [x] **Deployment assumptions stated** — RUNBOOK D1–D7: TLS upstream,
+      `/metrics` network-restricted, audit log to an append-only sink,
+      secrets from a manager, edge rate limits, scheduled retention,
+      multiple workers on the PG tier.
+- [x] **PG throughput gate attribution corrected** (PR #9) — see the v0.5.0
+      note above: structural single-process ceiling, not host contention.
+
+Still open before GA (P1, not blockers for a pilot): hours-long soak run and
+a 30-day availability window; backup/restore rehearsal; live (restart-free)
+admin revocation; consumer partitioning by account hash; alert routing to a
+pager; independent penetration test; static security lint (`ruff` S rules).
+
 ## Definition of done (every phase)
 1. Tests pass, CI green.
 2. README status updated.
