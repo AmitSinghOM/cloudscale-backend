@@ -46,6 +46,7 @@ B6 Operators → everything. B7 Supply chain → image.
 | T | Body tampering / oversized payloads | Pydantic models reject unknown shapes; body cap 16 KiB before parsing | `limits.BodySizeLimitMiddleware`; 413 test |
 | R | Caller denies issuing a command | Audit log records subject, account, `command_id`, outcome | `observability.audit_command`; audit tests |
 | I | Auth failure oracle (user vs. password vs. scope) | Single fixed 401 message for every authentication failure | `auth._unauthorized`; test asserting identical bodies |
+| I | Readiness endpoint leaks infrastructure detail (host names, DSN fragments in driver errors) | `/v1/ready` returns the exception class only; the message goes to the operator log | test `ready_is_503_and_never_leaks_the_error_message` |
 | I | Cross-account read | Default deny; grant only via admin scope, `accounts` claim, or registry ownership | `auth.authorize_account`; ownership tests incl. cross-connection race |
 | D | Unauthenticated flood exhausting CPU on token verification | Pre-auth per-client budget before any verification; probes exempt | `limits.ClientRateLimitMiddleware`; flood test `401,401,401,429,429` |
 | D | Authenticated subject floods | Per-subject budget; shared across replicas via PostgreSQL backend | `RateLimiter`, `PostgresRateLimiter`; 429 tests |
@@ -97,9 +98,11 @@ B6 Operators → everything. B7 Supply chain → image.
    deployment must ship it to an append-only sink. *2026-09-13*
 3. **`/metrics` unauthenticated.** Exposes route names and traffic shape;
    must be network-restricted. *2026-09-13*
-4. **No static security lint (`ruff` `S` rules / Bandit).** Parameterised SQL
-   is enforced by review, not tooling. Low cost to add; scheduled for the
-   next hardening PR. *2026-09-13*
+4. ~~No static security lint.~~ **Closed 2026-09-13**: `ruff` `S`
+   (flake8-bandit) rules are part of `make check` and CI. The three runtime
+   `assert`s it found were replaced with explicit errors (asserts vanish
+   under `python -O`); the one false positive (a constant 401 message) is
+   annotated inline. Tests and harness scripts carry scoped ignores.
 5. **No independent penetration test.** Required before the first external
    contract. *2026-09-13*
 6. **Event log without snapshots.** `command_results`, `rate_limit_buckets`

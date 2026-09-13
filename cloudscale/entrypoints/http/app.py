@@ -9,6 +9,7 @@ rate limit, body-size cap, CORS allowlist) are on by default.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
     from opentelemetry.trace import TracerProvider
 
 API_VERSION = "v1"
+_LOGGER = logging.getLogger("cloudscale.http")
 
 
 class Closeable(Protocol):
@@ -258,9 +260,15 @@ def create_app(
         try:
             checks = readiness_probe.check()
         except Exception as exc:  # noqa: BLE001 — any failure means not ready
+            # Unauthenticated endpoint: expose only the exception class. The
+            # message can carry host names or DSN fragments; that goes to the
+            # log, where operators (not the internet) read it.
+            _LOGGER.warning(
+                "readiness probe failed",
+                extra={"error_type": type(exc).__name__, "error": str(exc)[:500]},
+            )
             body = ReadyResponse(
-                status="not_ready",
-                checks={"error": type(exc).__name__, "detail": str(exc)[:200]},
+                status="not_ready", checks={"error": type(exc).__name__}
             )
             return JSONResponse(body.model_dump(), status_code=503)
         return JSONResponse(ReadyResponse(status="ready", checks=checks).model_dump())

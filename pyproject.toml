@@ -69,7 +69,16 @@ line-length = 88
 src = ["cloudscale", "cqrs", "tests"]
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F"]
+# S = flake8-bandit: static security lint (SQL built from strings, weak
+# hashes, subprocess with shell=True, hardcoded secrets, asserts as guards).
+select = ["E4", "E7", "E9", "F", "S"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert by design and carry fixed bench/test secrets; harness scripts
+# spawn real processes and create throwaway databases by name.
+"tests/**" = ["S101", "S105", "S106", "S108", "S311", "S314", "S603", "S607", "S608"]
+"scripts/**" = ["S101", "S105", "S314", "S603", "S607", "S608"]
+"migrations/**" = ["S608"]
 
 [tool.ruff.format]
 docstring-code-format = true

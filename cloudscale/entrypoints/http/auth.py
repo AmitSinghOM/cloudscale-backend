@@ -28,7 +28,7 @@ from cloudscale.entrypoints.http.settings import HttpSettings
 from cloudscale.entrypoints.http.verifiers import TokenVerifier
 
 ADMIN_SCOPE = "accounts:admin"
-_INVALID_TOKEN = "invalid or expired bearer token"
+_INVALID_TOKEN = "invalid or expired bearer token"  # noqa: S105 — error message, not a secret
 
 
 @dataclass(frozen=True, slots=True)

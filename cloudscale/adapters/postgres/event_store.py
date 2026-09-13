@@ -66,7 +66,8 @@ class PostgresEventStore:
                         "FROM events WHERE stream = %s",
                         (stream,),
                     ).fetchone()
-                    assert row is not None
+                    if row is None:  # aggregate query always yields one row
+                        raise RuntimeError("next_seq query returned no row")
                     seq = int(row["next_seq"])
                     conn.execute(
                         "INSERT INTO events "
@@ -104,7 +105,8 @@ class PostgresEventStore:
             head = conn.execute(
                 "SELECT COALESCE(MAX(position), 0) AS head FROM outbox"
             ).fetchone()
-            assert head is not None
+            if head is None:  # COALESCE(MAX()) always yields one row
+                raise RuntimeError("outbox head query returned no row")
             position = int(head["head"])
             outbox_rows = []
             for row in pending:
