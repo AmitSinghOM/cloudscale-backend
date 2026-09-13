@@ -308,6 +308,13 @@ named six blockers. All six are closed:
       multiple workers on the PG tier.
 - [x] **PG throughput gate attribution corrected** (PR #9) — see the v0.5.0
       note above: structural single-process ceiling, not host contention.
+- [x] **Second-pass findings** (PRs #12–#13) — `/v1/ready` no longer echoes
+      driver error text (class only; message to the log); `ruff` S rules in
+      the gate with three guard-asserts replaced by explicit errors; pool
+      acquisition and JWKS fetch bounded at 3 s (were 30 s library defaults)
+      so dependency failure degrades to 503 fast instead of hanging.
+- [x] **Tagged v0.5.1** (2026-09-13) — PRs #9–#13; suite 258 → 283. No new
+      gate run: this release changes failure behaviour, not the hot path.
 
 Still open before GA (P1, not blockers for a pilot): hours-long soak run and
 a 30-day availability window; backup/restore rehearsal; live (restart-free)
