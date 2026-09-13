@@ -99,6 +99,17 @@ def prune_postgres(
 
         _batched(results_batch, report, "command_results")
 
+        def table_exists(name: str) -> bool:
+            # Adapters create their own tables lazily: rate_limit_buckets exists
+            # only with the postgres limiter backend, dead_letters only once a
+            # projection store has run. A missing table is "nothing to prune",
+            # not a failure - found by the soak harness, which runs without
+            # the postgres limiter.
+            row = conn.execute(
+                "SELECT to_regclass(%s) IS NOT NULL AS present", (name,)
+            ).fetchone()
+            return bool(row and row[0])
+
         idle_before = moment.timestamp() - policy.rate_limit_idle_seconds
 
         def buckets_batch() -> int:
@@ -109,9 +120,10 @@ def prune_postgres(
                 (idle_before, policy.batch_size),
             ).rowcount
 
-        _batched(buckets_batch, report, "rate_limit_buckets")
+        if table_exists("rate_limit_buckets"):
+            _batched(buckets_batch, report, "rate_limit_buckets")
 
-        if policy.dead_letters_days is not None:
+        if policy.dead_letters_days is not None and table_exists("dead_letters"):
             dlq_cutoff = (moment - timedelta(days=policy.dead_letters_days)).isoformat()
 
             def letters_batch() -> int:
@@ -165,7 +177,13 @@ def prune_sqlite(
         try:
             dlq_cutoff = (moment - timedelta(days=policy.dead_letters_days)).isoformat()
 
+            has_table = projection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dead_letters'"
+            ).fetchone()
+
             def letters_batch() -> int:
+                if not has_table:  # projection never dead-lettered: nothing to prune
+                    return 0
                 with projection:
                     return projection.execute(
                         "DELETE FROM dead_letters WHERE rowid IN ("
