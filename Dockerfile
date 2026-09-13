@@ -12,7 +12,14 @@ FROM python:3.12-slim AS runtime
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
-RUN useradd --system --uid 10001 --create-home cloudscale
+# The base image is a point-in-time snapshot; Debian security fixes land
+# between its rebuilds. Apply them here so the image scan (CI) is judged on
+# what actually ships. No new packages are installed.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --create-home cloudscale
 WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY cloudscale ./cloudscale
@@ -32,7 +39,10 @@ EXPOSE 8000
 #      and CLOUDSCALE_RATE_LIMIT_BACKEND=postgres for a replica-shared limit.
 # Consumer process: override CMD with
 #   python -m cloudscale.entrypoints.consumer_loop
+# Docker's single HEALTHCHECK is closest to a readiness probe: use /v1/ready
+# so a replica with a dead database is marked unhealthy. Orchestrators with
+# separate liveness/readiness probes should use /v1/health and /v1/ready.
 HEALTHCHECK --interval=15s --timeout=3s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/v1/health', timeout=2).status==200 else 1)"
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/v1/ready', timeout=2).status==200 else 1)"
 CMD ["uvicorn", "--factory", "cloudscale.entrypoints.http.main:build_app", \
      "--host", "0.0.0.0", "--port", "8000", "--log-level", "warning"]

@@ -10,12 +10,10 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic==1.19.2",
-    "confluent-kafka==2.15.0",
     "fastapi==0.141.1",
     "httpx==0.28.1",
     "opentelemetry-api==1.44.0",
     "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
-    "opentelemetry-instrumentation-confluent-kafka==0.65b0",
     "opentelemetry-instrumentation-fastapi==0.65b0",
     "opentelemetry-instrumentation-psycopg==0.65b0",
     "opentelemetry-sdk==1.44.0",
@@ -28,6 +26,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Kafka transport is deferred (ROADMAP, dated decision). Kept out of the
+# default install so the production image carries no unused native broker
+# client; install with `pip install .[kafka]` when the transport lands.
+kafka = [
+    "confluent-kafka==2.15.0",
+    "opentelemetry-instrumentation-confluent-kafka==0.65b0",
+]
 dev = [
     "coverage==7.16.0",
     "hypothesis==6.167.1",
@@ -35,7 +40,7 @@ dev = [
     "pytest==9.1.1",
     "pytest-cov==7.1.0",
     "ruff==0.16.6",
-    "testcontainers[kafka,postgres]==4.15.0",
+    "testcontainers[postgres]==4.15.0",
 ]
 
 [tool.setuptools.packages.find]
