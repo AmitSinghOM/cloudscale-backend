@@ -109,7 +109,8 @@ def build_verifier(settings: HttpSettings) -> TokenVerifier:
         return JwksVerifier(
             settings.jwt_jwks_url, settings.jwt_algorithms, settings.jwt_issuer
         )
-    assert settings.jwt_secret is not None  # enforced by settings validator
+    if settings.jwt_secret is None:  # enforced by the settings validator
+        raise ValueError("HMAC verifier requires jwt_secret")
     return HmacVerifier(
         settings.jwt_secret, settings.jwt_algorithms, settings.jwt_issuer
     )

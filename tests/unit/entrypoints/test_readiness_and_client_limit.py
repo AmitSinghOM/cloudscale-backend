@@ -72,15 +72,19 @@ def test_ready_calls_probe_and_reports_checks(tmp_path) -> None:
     assert probe.calls == 1
 
 
-def test_ready_is_503_when_probe_raises(tmp_path) -> None:
-    client, _ = _client(tmp_path, probe=_Probe(RuntimeError("db unreachable")))
-    with client:
+def test_ready_is_503_and_never_leaks_the_error_message(tmp_path, caplog) -> None:
+    """Unauthenticated endpoint: class name only. The message (which can carry
+    host names or DSN fragments) must reach the log, not the response."""
+    client, _ = _client(
+        tmp_path, probe=_Probe(RuntimeError("db unreachable at pg.internal:5432"))
+    )
+    with client, caplog.at_level("WARNING", logger="cloudscale.http"):
         response = client.get("/v1/ready")
     assert response.status_code == 503
     body = response.json()
-    assert body["status"] == "not_ready"
-    assert body["checks"]["error"] == "RuntimeError"
-    assert "unreachable" in body["checks"]["detail"]
+    assert body == {"status": "not_ready", "checks": {"error": "RuntimeError"}}
+    assert "pg.internal" not in response.text
+    assert any("pg.internal" in getattr(r, "error", "") for r in caplog.records)
 
 
 def test_health_stays_liveness_only_when_probe_fails(tmp_path) -> None:
