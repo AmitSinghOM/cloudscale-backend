@@ -1,0 +1,20 @@
+# Review ownership. Paths later in the file take precedence.
+# Bus factor is 1 today (LONGEVITY §6); add a second owner to every line
+# below before any external SLA.
+
+*                                   @AmitSinghOM
+
+# Public contracts: changes here require an ADR (CONTRIBUTING §3).
+/cloudscale/domain/                 @AmitSinghOM
+/cloudscale/application/ports.py    @AmitSinghOM
+/cloudscale/adapters/postgres/schema.py  @AmitSinghOM
+/migrations/                        @AmitSinghOM
+/cloudscale/entrypoints/http/auth.py     @AmitSinghOM
+/cloudscale/entrypoints/http/verifiers.py @AmitSinghOM
+
+# Governance
+/docs/adr/                          @AmitSinghOM
+/docs/LONGEVITY.md                  @AmitSinghOM
+/SECURITY.md                        @AmitSinghOM
+/AGENTS.md                          @AmitSinghOM
+/.github/                           @AmitSinghOM

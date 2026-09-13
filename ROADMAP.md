@@ -321,6 +321,41 @@ a 30-day availability window; backup/restore rehearsal; live (restart-free)
 admin revocation; consumer partitioning by account hash; alert routing to a
 pager; independent penetration test; static security lint (`ruff` S rules).
 
+## Phase 6 — Longevity (seven-year horizon)  ·  🚧 started 2026-09-13
+
+Governed by `docs/LONGEVITY.md`. The structure landed first (charter,
+ADR-0001..0010 reconstructing existing decisions, `CONTRIBUTING.md`,
+`AGENTS.md`, `CODEOWNERS`, `CHANGELOG.md`, governance-consistency tests).
+What follows turns each remaining *policy* item into an *enforced* one.
+
+- [x] **Longevity structure** (2026-09-13) — as above; ADR index and status
+      lines checked by `tests/architecture/test_governance_docs.py`.
+- [ ] **Event upcasters** (ADR-0009, target 2026-Q4) — registry
+      `(event_type, from_version) → payload`, fixture directory with one
+      sample of every version ever written, test folding all of them
+      through the current projection. Until then: additive optional fields
+      only.
+- [ ] **Python version matrix** (ADR-0010, target 2027-Q1) — CI on 3.12 and
+      3.13; `requires-python` widened; default moves ≥ 12 months before EOL
+      (3.12 EOL 2028-10).
+- [ ] **Quarterly dependency refresh** (first: 2026-12) — regenerate both
+      locks with the recorded `uv` command, full gate + 10 s gate on both
+      tiers, commit diff and report. Add a CI job that fails if the lock is
+      older than 120 days.
+- [ ] **Annual restore drill** (first: 2026-Q4) — dump, restore to a fresh
+      instance, `migrate current`, start in `migrations` mode, rebuild the
+      projection from the log, compare balances; record time under
+      `evidence/<sha>/restore-drill/`.
+- [ ] **Bus factor ≥ 2** (before any external SLA) — second maintainer has
+      merged a non-trivial change and performed one restore drill; every
+      `CODEOWNERS` line lists two people.
+- [ ] **Deprecation policy** — any public contract removal is announced
+      one minor release ahead in `CHANGELOG.md` and the response/CLI emits
+      a deprecation warning for that release.
+- [ ] **Charter review at each tagged release** — unenforced policy items
+      older than one year are enforced, re-planned with a reason, or
+      deleted.
+
 ## Definition of done (every phase)
 1. Tests pass, CI green.
 2. README status updated.
