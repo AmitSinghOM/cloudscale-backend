@@ -105,6 +105,7 @@ scripts/verify_milestone.py   Deterministic gate; writes evidence/<git-sha>/mile
 | `AGENTS.md` | Contract for language-model contributors: same gates, invariants never weakened, humans own the irreversible |
 | `SECURITY.md` · `docs/THREAT_MODEL.md` | Disclosure policy; STRIDE model with dated accepted risks |
 | `docs/RUNBOOK.md` · `docs/SLO.md` | Operations procedures; SLIs, targets, alert rules |
+| `docs/CONFIGURATION.md` | Every environment variable, default, and production value — completeness enforced by a test |
 | `CHANGELOG.md` | Operator-facing history per release |
 
 The ADR index, changelog structure and presence of these files are checked
