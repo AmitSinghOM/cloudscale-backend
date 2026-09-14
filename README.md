@@ -44,7 +44,7 @@ Interactive API docs at `/docs`, readiness at `/v1/ready`, metrics at
 `/metrics`. `examples/python_client.py` is a copy-paste client that shows the
 three things integrators get wrong (retry with the same `command_id`, handle
 409 by re-reading the version, wait for the projection) and runs against
-`make dev`. `make check` runs the full gate (format · lint · types · 305
+`make dev`. `make check` runs the full gate (format · lint · types · 313
 tests) in about 15 seconds. The dev secret is fixed and local-only; the
 production shape (PostgreSQL, OIDC/JWKS, migrations) is
 [below](#running-on-postgresql-production-shape).
