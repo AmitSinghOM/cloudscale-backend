@@ -55,7 +55,9 @@ A pull request merges when **all** of the following hold:
 
 ## Releases
 
-Tag `vX.Y.Z` on the merge commit; bump `pyproject.toml`; move the
+Before tagging, run `scripts/check_fresh_tree.sh` — it exports exactly what
+git tracks and runs `make install-dev && make check` there, catching files the
+working tree relies on that never reached git. Then tag `vX.Y.Z` on the merge commit; bump `pyproject.toml`; move the
 *Unreleased* changelog section under the version; update the README status
 line. Patch releases change failure behaviour or fix bugs; minor releases
 add capability; a major release changes a public contract incompatibly and

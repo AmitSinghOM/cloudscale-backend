@@ -6,7 +6,7 @@ VENV_MYPY := $(VENV)/bin/mypy
 
 .DEFAULT_GOAL := check
 
-.PHONY: help venv install install-dev format format-check lint type test coverage check resolved
+.PHONY: help venv install install-dev format format-check lint type test coverage check resolved fresh-tree
 
 help:  ## list targets
 	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | sed -E 's/^([a-zA-Z_-]+):[^#]*## /  \1|/' | sort | column -t -s '|'
@@ -39,6 +39,9 @@ coverage:  ## pytest with coverage
 	$(VENV_PYTHON) -m pytest --cov=cloudscale --cov=cqrs --cov-report=term-missing --cov-fail-under=85
 
 check: format-check lint type test  ## full gate (default)
+
+fresh-tree:  ## prove HEAD works from exactly what git tracks (install + gate in a temp export)
+	scripts/check_fresh_tree.sh
 
 resolved:  ## print the resolved dependency set
 	$(VENV_PYTHON) -m pip list --format=freeze | LC_ALL=C sort
