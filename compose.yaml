@@ -63,6 +63,13 @@ services:
     command: ["python", "-m", "cloudscale.entrypoints.consumer_loop"]
     ports:
       - "9100:9100"
+    # The image's HEALTHCHECK probes the API's /v1/ready on :8000; this process
+    # serves no HTTP there. Its metrics endpoint is the liveness signal.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
     depends_on:
       migrate:
         condition: service_completed_successfully
