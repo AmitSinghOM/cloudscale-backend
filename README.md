@@ -28,6 +28,24 @@
 > honestly not_evaluated). Kafka remains deferred behind the ports — see
 > [ROADMAP.md](./ROADMAP.md).
 
+## Quickstart (60 seconds, no infrastructure)
+
+```bash
+git clone https://github.com/AmitSinghOM/cloudscale-backend && cd cloudscale-backend
+make install-dev          # Python 3.12 or 3.13; hash-verified install into .venv
+make dev                  # API + projection consumer on http://127.0.0.1:8000 (SQLite tier)
+make token ARGS=--curl    # prints a ready-to-run deposit; paste it
+curl -s http://127.0.0.1:8000/v1/accounts/demo/balance \
+  -H "Authorization: Bearer $(make -s token)"          # → {"account_id":"demo","balance":100,...}
+make stop                 # data stays in .dev/; delete the directory to reset
+```
+
+Interactive API docs at `/docs`, readiness at `/v1/ready`, metrics at
+`/metrics`. `make check` runs the full gate (format · lint · types · 305
+tests) in about 15 seconds. The dev secret is fixed and local-only; the
+production shape (PostgreSQL, OIDC/JWKS, migrations) is
+[below](#running-on-postgresql-production-shape).
+
 ## Why this exists
 
 A reference backend that does the unglamorous things right: separates reads from writes, sources state from events, isolates failures with circuit breakers, and never silently drops work. The point is to *operate* it under load and show the numbers.
