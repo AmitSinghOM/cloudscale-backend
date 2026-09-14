@@ -89,6 +89,26 @@ jobs:
           push: false
           load: true
           tags: cloudscale-backend:ci
+      - name: Compose stack (PostgreSQL 17 · migrate · api · consumer, migrations mode)
+        # The README's production-shaped quickstart, executed: schema comes
+        # from Alembic only, the API must report ready, and a deposit must
+        # round-trip through the consumer to the balance read model.
+        run: |
+          set -e
+          docker compose up -d --wait --wait-timeout 120
+          curl -sf http://127.0.0.1:8000/v1/ready
+          python3 -m pip install --quiet pyjwt
+          TOKEN=$(CLOUDSCALE_JWT_SECRET=local-dev-only-secret-0123456789abcdef-0123456789abcdef \
+                  python3 scripts/dev_token.py --subject ci --minutes 5)
+          curl -sf -X POST http://127.0.0.1:8000/v1/accounts/ci/commands \
+            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+            -d "{\"command_id\":\"$(uuidgen | tr A-Z a-z)\",\"type\":\"deposit\",\"amount\":42,\"expected_version\":0}" | tee cmd.json
+          grep -q '"outcome":"accepted"' cmd.json
+          sleep 1
+          curl -sf http://127.0.0.1:8000/v1/accounts/ci/balance -H "Authorization: Bearer $TOKEN" | tee bal.json
+          grep -q '"balance":42' bal.json
+          docker compose logs --no-color migrate | tail -5
+          docker compose down -v
       - name: Scan image (OS + Python packages; fails on fixable CRITICAL/HIGH)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

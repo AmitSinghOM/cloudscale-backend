@@ -121,6 +121,18 @@ make check         # ruff format-check + lint, mypy, pytest
 
 ## Running on PostgreSQL (production shape)
 
+One command, production mode (Alembic owns the schema; the app creates nothing):
+
+```bash
+docker compose up --build            # PostgreSQL 17 → migrate → api :8000 + consumer (metrics :9100)
+make token ARGS=--curl               # same local dev secret as the compose file; paste the curl
+docker compose down -v               # reset
+```
+
+CI runs exactly this stack on every pull request and asserts `/v1/ready`,
+an accepted deposit, and the balance read model — so the compose file is
+tested, not decorative. Manual equivalent:
+
 ```
 export CLOUDSCALE_PG_DSN=postgresql://user:pass@host/db
 python -m cloudscale.entrypoints.migrate                 # Alembic upgrade head, once per release
