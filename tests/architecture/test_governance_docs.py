@@ -79,6 +79,8 @@ def test_governance_documents_exist() -> None:
         "CHANGELOG.md",
         "docs/LONGEVITY.md",
         "docs/CONFIGURATION.md",
+        "docs/ARCHITECTURE.md",
+        "docs/API_ERRORS.md",
         "docs/RUNBOOK.md",
         "docs/SLO.md",
         "docs/THREAT_MODEL.md",

@@ -66,6 +66,9 @@ Client ──JWT──▶ FastAPI (authn · claims-based authz · rate limit · 
           (SQLite | PostgreSQL)     separate process                        (SQLite | PostgreSQL)
 ```
 
+Full write path, read path, failure behaviour, deployment topology and a
+"where to change what" table: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
+
 Kafka as the log transport is **deferred by decision** (no broker available to
 verify against); the consumer speaks a transport-agnostic `EventFeed` protocol,
 so the swap is wiring, not redesign.
@@ -102,6 +105,7 @@ scripts/verify_milestone.py   Deterministic gate; writes evidence/<git-sha>/mile
 
 | Document | Purpose |
 |---|---|
+| `docs/ARCHITECTURE.md` | Write/read paths, failure behaviour, topology, and which test proves each guarantee |
 | `docs/LONGEVITY.md` | The charter: what keeps this maintainable through 2033, marked enforced vs. policy |
 | `docs/adr/` | Architecture Decision Records — the *why* behind every load-bearing decision |
 | `CONTRIBUTING.md` | Definition of done, gates, evidence rule |
