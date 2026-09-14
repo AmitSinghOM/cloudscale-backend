@@ -30,6 +30,8 @@ A pull request merges when **all** of the following hold:
    regression test named after the bug.
 3. Public contract changes (HTTP route/response, event shape, table,
    environment variable, CLI flag, exit code) reference an ADR or add one.
+   HTTP changes also regenerate the committed contract
+   (`python scripts/export_openapi.py`) so the diff is reviewed as such.
 4. Operational behaviour changes update `docs/RUNBOOK.md`; SLI/metric
    changes update `docs/SLO.md`; security-relevant changes update
    `docs/THREAT_MODEL.md`.

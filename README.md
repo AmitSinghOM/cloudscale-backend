@@ -109,6 +109,7 @@ scripts/verify_milestone.py   Deterministic gate; writes evidence/<git-sha>/mile
 | `SECURITY.md` · `docs/THREAT_MODEL.md` | Disclosure policy; STRIDE model with dated accepted risks |
 | `docs/RUNBOOK.md` · `docs/SLO.md` | Operations procedures; SLIs, targets, alert rules |
 | `docs/CONFIGURATION.md` | Every environment variable, default, and production value — completeness enforced by a test |
+| `docs/openapi.json` | The HTTP contract, committed; a test fails the build if the running app's schema drifts from it. Generate clients from this file |
 | `CHANGELOG.md` | Operator-facing history per release |
 
 The ADR index, changelog structure and presence of these files are checked
