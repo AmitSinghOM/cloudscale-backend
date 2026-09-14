@@ -6,38 +6,41 @@ VENV_MYPY := $(VENV)/bin/mypy
 
 .DEFAULT_GOAL := check
 
-.PHONY: venv install install-dev format format-check lint type test coverage check resolved
+.PHONY: help venv install install-dev format format-check lint type test coverage check resolved
 
-venv:
+help:  ## list targets
+	@grep -hE '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | sed -E 's/^([a-zA-Z_-]+):[^#]*## /  \1|/' | sort | column -t -s '|'
+
+venv:  ## create the virtualenv
 	$(PYTHON) -m venv $(VENV)
 
-install: venv
+install: venv  ## hash-verified runtime install (requirements.lock)
 	$(VENV_PYTHON) -m pip install --require-hashes -r requirements.lock
 
-install-dev: venv
+install-dev: venv  ## hash-verified dev install (requirements-dev.lock)
 	$(VENV_PYTHON) -m pip install --require-hashes -r requirements-dev.lock
 
-format:
+format:  ## ruff format
 	$(VENV_RUFF) format .
 
-format-check:
+format-check:  ## ruff format --check
 	$(VENV_RUFF) format --check .
 
-lint:
+lint:  ## ruff check (incl. bandit S rules)
 	$(VENV_RUFF) check .
 
-type:
+type:  ## mypy
 	$(VENV_MYPY) cloudscale cqrs
 
-test:
+test:  ## pytest (PostgreSQL-gated tests need CLOUDSCALE_TEST_PG)
 	$(VENV_PYTHON) -m pytest -q
 
-coverage:
+coverage:  ## pytest with coverage
 	$(VENV_PYTHON) -m pytest --cov=cloudscale --cov=cqrs --cov-report=term-missing --cov-fail-under=85
 
-check: format-check lint type test
+check: format-check lint type test  ## full gate (default)
 
-resolved:
+resolved:  ## print the resolved dependency set
 	$(VENV_PYTHON) -m pip list --format=freeze | LC_ALL=C sort
 
 # -- local developer loop (SQLite tier, no infrastructure) -------------------
@@ -52,7 +55,7 @@ DEV_ENV       = CLOUDSCALE_STORAGE=sqlite \
                 CLOUDSCALE_PROJECTION_DB=$(DEV_DIR)/projection.db \
                 CLOUDSCALE_JWT_SECRET=$(DEV_SECRET)
 
-dev: venv
+dev: venv  ## start API + consumer on the SQLite tier (DEV_PORT=8000)
 	@if lsof -nP -iTCP:$(DEV_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 	    echo "port $(DEV_PORT) is already in use by another process."; \
 	    echo "  either stop it, or: make dev DEV_PORT=8123   (then: make token DEV_PORT=8123)"; \
@@ -70,10 +73,10 @@ dev: venv
 	@echo "next     make token        # or: make token ARGS=--curl"
 	@echo "stop     make stop"
 
-token: venv
+token: venv  ## mint a dev bearer token; ARGS=--curl prints a paste-ready deposit
 	@CLOUDSCALE_JWT_SECRET=$(DEV_SECRET) $(VENV_PYTHON) scripts/dev_token.py --port $(DEV_PORT) $(ARGS)
 
-stop:
+stop:  ## stop the dev stack; data kept in .dev/
 	@for p in server consumer; do \
 	    if [ -f $(DEV_DIR)/$$p.pid ]; then kill $$(cat $(DEV_DIR)/$$p.pid) 2>/dev/null || true; rm -f $(DEV_DIR)/$$p.pid; fi; done
 	@echo "stopped (data kept in $(DEV_DIR)/; delete the directory to reset)"
