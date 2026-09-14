@@ -28,6 +28,27 @@
 > honestly not_evaluated). Kafka remains deferred behind the ports — see
 > [ROADMAP.md](./ROADMAP.md).
 
+## Quickstart (60 seconds, no infrastructure)
+
+```bash
+git clone https://github.com/AmitSinghOM/cloudscale-backend && cd cloudscale-backend
+make install-dev          # Python 3.12 or 3.13; hash-verified install into .venv
+make dev                  # API + projection consumer on http://127.0.0.1:8000 (SQLite tier)
+make token ARGS=--curl    # prints a ready-to-run deposit; paste it
+curl -s http://127.0.0.1:8000/v1/accounts/demo/balance \
+  -H "Authorization: Bearer $(make -s token)"          # → {"account_id":"demo","balance":100,...}
+make stop                 # data stays in .dev/; delete the directory to reset
+```
+
+Interactive API docs at `/docs`, readiness at `/v1/ready`, metrics at
+`/metrics`. `examples/python_client.py` is a copy-paste client that shows the
+three things integrators get wrong (retry with the same `command_id`, handle
+409 by re-reading the version, wait for the projection) and runs against
+`make dev`. `make check` runs the full gate (format · lint · types · 313
+tests) in about 15 seconds. The dev secret is fixed and local-only; the
+production shape (PostgreSQL, OIDC/JWKS, migrations) is
+[below](#running-on-postgresql-production-shape).
+
 ## Why this exists
 
 A reference backend that does the unglamorous things right: separates reads from writes, sources state from events, isolates failures with circuit breakers, and never silently drops work. The point is to *operate* it under load and show the numbers.
@@ -44,6 +65,9 @@ Client ──JWT──▶ FastAPI (authn · claims-based authz · rate limit · 
           Durable event log ──▶ ResilientConsumer (retry · breaker · DLQ) ──▶ Projection
           (SQLite | PostgreSQL)     separate process                        (SQLite | PostgreSQL)
 ```
+
+Full write path, read path, failure behaviour, deployment topology and a
+"where to change what" table: [`docs/ARCHITECTURE.md`](./docs/ARCHITECTURE.md).
 
 Kafka as the log transport is **deferred by decision** (no broker available to
 verify against); the consumer speaks a transport-agnostic `EventFeed` protocol,
@@ -81,12 +105,16 @@ scripts/verify_milestone.py   Deterministic gate; writes evidence/<git-sha>/mile
 
 | Document | Purpose |
 |---|---|
+| `docs/ARCHITECTURE.md` | Write/read paths, failure behaviour, topology, and which test proves each guarantee |
 | `docs/LONGEVITY.md` | The charter: what keeps this maintainable through 2033, marked enforced vs. policy |
 | `docs/adr/` | Architecture Decision Records — the *why* behind every load-bearing decision |
 | `CONTRIBUTING.md` | Definition of done, gates, evidence rule |
 | `AGENTS.md` | Contract for language-model contributors: same gates, invariants never weakened, humans own the irreversible |
 | `SECURITY.md` · `docs/THREAT_MODEL.md` | Disclosure policy; STRIDE model with dated accepted risks |
 | `docs/RUNBOOK.md` · `docs/SLO.md` | Operations procedures; SLIs, targets, alert rules |
+| `docs/CONFIGURATION.md` | Every environment variable, default, and production value — completeness enforced by a test |
+| `docs/API_ERRORS.md` | Every status and error code a client can receive, with the correct client action — completeness enforced by a test |
+| `docs/openapi.json` | The HTTP contract, committed; a test fails the build if the running app's schema drifts from it. Generate clients from this file |
 | `CHANGELOG.md` | Operator-facing history per release |
 
 The ADR index, changelog structure and presence of these files are checked
@@ -102,6 +130,18 @@ make check         # ruff format-check + lint, mypy, pytest
 ```
 
 ## Running on PostgreSQL (production shape)
+
+One command, production mode (Alembic owns the schema; the app creates nothing):
+
+```bash
+docker compose up --build            # PostgreSQL 17 → migrate → api :8000 + consumer (metrics :9100)
+make token ARGS=--curl               # same local dev secret as the compose file; paste the curl
+docker compose down -v               # reset
+```
+
+CI runs exactly this stack on every pull request and asserts `/v1/ready`,
+an accepted deposit, and the balance read model — so the compose file is
+tested, not decorative. Manual equivalent:
 
 ```
 export CLOUDSCALE_PG_DSN=postgresql://user:pass@host/db

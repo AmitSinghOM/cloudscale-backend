@@ -1,0 +1,78 @@
+# Production-shaped local stack: PostgreSQL 17, one-shot migration, API, and
+# the projection consumer — in the exact mode production runs
+# (CLOUDSCALE_PG_SCHEMA=migrations: the app creates NO tables; Alembic does).
+#
+#   docker compose up --build          # then: make token ARGS=--curl  (same dev secret)
+#   docker compose down -v             # reset everything
+#
+# Local only: the JWT secret below is fixed and public. Production injects
+# secrets from a manager and terminates TLS upstream (RUNBOOK D1–D7).
+
+name: cloudscale
+
+x-app-env: &app-env
+  CLOUDSCALE_STORAGE: postgres
+  CLOUDSCALE_PG_DSN: postgresql://cloudscale:cloudscale@postgres:5432/cloudscale
+  CLOUDSCALE_PG_SCHEMA: migrations
+  CLOUDSCALE_RATE_LIMIT_BACKEND: postgres
+  CLOUDSCALE_JWT_SECRET: local-dev-only-secret-0123456789abcdef-0123456789abcdef
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: cloudscale
+      POSTGRES_PASSWORD: cloudscale
+      POSTGRES_DB: cloudscale
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudscale -d cloudscale"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  migrate:
+    build: .
+    environment: *app-env
+    command: ["python", "-m", "cloudscale.entrypoints.migrate", "upgrade"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    environment: *app-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/v1/ready', timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  consumer:
+    build: .
+    environment:
+      <<: *app-env
+      CLOUDSCALE_CONSUMER_METRICS_PORT: "9100"
+    command: ["python", "-m", "cloudscale.entrypoints.consumer_loop"]
+    ports:
+      - "9100:9100"
+    # The image's HEALTHCHECK probes the API's /v1/ready on :8000; this process
+    # serves no HTTP there. Its metrics endpoint is the liveness signal.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=2).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:

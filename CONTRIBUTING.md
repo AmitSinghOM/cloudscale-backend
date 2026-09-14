@@ -30,6 +30,8 @@ A pull request merges when **all** of the following hold:
    regression test named after the bug.
 3. Public contract changes (HTTP route/response, event shape, table,
    environment variable, CLI flag, exit code) reference an ADR or add one.
+   HTTP changes also regenerate the committed contract
+   (`python scripts/export_openapi.py`) so the diff is reviewed as such.
 4. Operational behaviour changes update `docs/RUNBOOK.md`; SLI/metric
    changes update `docs/SLO.md`; security-relevant changes update
    `docs/THREAT_MODEL.md`.
@@ -53,7 +55,9 @@ A pull request merges when **all** of the following hold:
 
 ## Releases
 
-Tag `vX.Y.Z` on the merge commit; bump `pyproject.toml`; move the
+Before tagging, run `scripts/check_fresh_tree.sh` — it exports exactly what
+git tracks and runs `make install-dev && make check` there, catching files the
+working tree relies on that never reached git. Then tag `vX.Y.Z` on the merge commit; bump `pyproject.toml`; move the
 *Unreleased* changelog section under the version; update the README status
 line. Patch releases change failure behaviour or fix bugs; minor releases
 add capability; a major release changes a public contract incompatibly and

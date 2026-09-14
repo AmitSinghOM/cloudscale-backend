@@ -6,6 +6,27 @@ integrator; the commit history says how.
 
 ## [Unreleased]
 
+Developer experience: from clone to a correct first integration without
+reading source.
+
+### Added
+- `make dev` / `make token` / `make stop`: API + consumer on the SQLite tier
+  with a fixed local-only secret; `make token ARGS=--curl` prints a
+  paste-ready deposit. `make dev` refuses to start if the port is taken.
+- `compose.yaml`: production-shaped stack (PostgreSQL 17 → Alembic migrate →
+  API + consumer, `migrations` mode). CI brings it up and asserts
+  `/v1/ready`, an accepted deposit, and the balance read model.
+- `docs/CONFIGURATION.md`: every `CLOUDSCALE_*` variable with default and
+  production value; a test fails the build on undocumented or stale entries.
+- `docs/API_ERRORS.md`: every status and error code with the correct client
+  action; a test fails the build if a domain code or outcome is missing.
+- `docs/openapi.json`: the committed HTTP contract; a test fails the build
+  when the running app's schema drifts from it.
+- `examples/python_client.py`: copy-paste client showing same-`command_id`
+  retry, 409 handling, and read-your-write polling; exercised against a real
+  server by `tests/smoke/`.
+- `make help`; `.devcontainer/` for Codespaces / VS Code.
+
 ## [0.6.0] — 2026-09-13
 
 Longevity: the structure and enforcement that keep the service safe to
