@@ -45,7 +45,7 @@ services:
     build: .
     environment: *app-env
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"  # loopback only: the dev secret in this file is public
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -62,7 +62,7 @@ services:
       CLOUDSCALE_CONSUMER_METRICS_PORT: "9100"
     command: ["python", "-m", "cloudscale.entrypoints.consumer_loop"]
     ports:
-      - "9100:9100"
+      - "127.0.0.1:9100:9100"
     # The image's HEALTHCHECK probes the API's /v1/ready on :8000; this process
     # serves no HTTP there. Its metrics endpoint is the liveness signal.
     healthcheck:
