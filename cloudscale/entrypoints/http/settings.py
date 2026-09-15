@@ -23,6 +23,14 @@ _HMAC_ALGORITHMS = frozenset({"HS256", "HS384", "HS512"})
 _ASYMMETRIC_ALGORITHMS = frozenset({"RS256", "RS384", "RS512", "ES256", "ES384"})
 
 
+#: Secrets that appear verbatim in this repository (Makefile, compose.yaml,
+#: CI). A deployment running one of them in production mode is warned at
+#: startup - see HttpSettings.production_warnings.
+KNOWN_DEVELOPMENT_SECRETS: frozenset[str] = frozenset(
+    {"local-dev-only-secret-0123456789abcdef-0123456789abcdef"}
+)
+
+
 class HttpSettings(BaseSettings):
     """Environment-driven settings (prefix ``CLOUDSCALE_``)."""
 
@@ -64,6 +72,24 @@ class HttpSettings(BaseSettings):
     max_body_bytes: int = Field(default=16_384, ge=1)
     #: CORS allowlist. Empty (default) = no cross-origin browser access.
     cors_origins: list[str] = Field(default_factory=list)
+
+    def production_warnings(self, *, schema_mode: str) -> list[str]:
+        """Loud, non-fatal warnings for configurations that must not reach customers.
+
+        Refusing would break the compose quickstart, which deliberately runs in
+        production shape (``migrations`` mode) with the repository's public
+        development secret. Warning at startup is the honest middle: the
+        operator sees it in the first log lines and in ``/v1/ready`` checks.
+        """
+        warnings: list[str] = []
+        if self.jwt_secret in KNOWN_DEVELOPMENT_SECRETS and schema_mode == "migrations":
+            warnings.append(
+                "CLOUDSCALE_JWT_SECRET is the PUBLIC development secret from the "
+                "repository while CLOUDSCALE_PG_SCHEMA=migrations (production mode): "
+                "anyone with the repo can mint admin tokens. Fine for a laptop; "
+                "never for customer traffic (RUNBOOK D4)."
+            )
+        return warnings
 
     @property
     def identity_mode(self) -> str:

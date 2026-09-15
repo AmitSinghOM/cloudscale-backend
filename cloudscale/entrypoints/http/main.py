@@ -19,6 +19,7 @@ The projection is filled by the separate consumer loop process
 
 from __future__ import annotations
 
+import logging
 import os
 
 from fastapi import FastAPI
@@ -37,6 +38,10 @@ def build_app() -> FastAPI:
     # jwt_secret arrives via CLOUDSCALE_JWT_SECRET; pydantic-settings raises
     # at startup when absent (fail-closed by design).
     settings = HttpSettings()
+    for warning in settings.production_warnings(
+        schema_mode=os.environ.get("CLOUDSCALE_PG_SCHEMA", "auto")
+    ):
+        logging.getLogger("cloudscale.http").warning(warning)
 
     if storage == "postgres":
         import psycopg
