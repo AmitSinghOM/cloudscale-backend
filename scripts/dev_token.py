@@ -22,29 +22,46 @@ from uuid import uuid4
 import jwt
 
 DEV_SECRET_ENV = "CLOUDSCALE_JWT_SECRET"
+MAX_MINUTES = (
+    60  # the server caps lifetime at CLOUDSCALE_JWT_MAX_LIFETIME_SECONDS (3600)
+)
 
 
-def mint(secret: str, *, subject: str, minutes: int) -> str:
+def mint(
+    secret: str, *, subject: str, minutes: int, issuer: str, audience: str | None
+) -> str:
     now = datetime.now(UTC)
-    return jwt.encode(
-        {
-            "iss": "cloudscale",
-            "sub": subject,
-            "scope": "accounts:admin",
-            "jti": f"dev-{uuid4().hex}",
-            "iat": now,
-            "exp": now + timedelta(minutes=minutes),
-        },
-        secret,
-        algorithm="HS256",
-    )
+    claims: dict[str, object] = {
+        "iss": issuer,
+        "sub": subject,
+        "scope": "accounts:admin",
+        "jti": f"dev-{uuid4().hex}",
+        "iat": now,
+        "exp": now + timedelta(minutes=minutes),
+    }
+    if audience:
+        claims["aud"] = audience
+    return jwt.encode(claims, secret, algorithm="HS256")
+
+
+def _minutes(value: str) -> int:
+    minutes = int(value)
+    if not 1 <= minutes <= MAX_MINUTES:
+        raise argparse.ArgumentTypeError(
+            f"must be 1..{MAX_MINUTES}: the server rejects tokens whose lifetime "
+            "exceeds CLOUDSCALE_JWT_MAX_LIFETIME_SECONDS (default 3600) with a fixed 401"
+        )
+    return minutes
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--subject", default="dev-user")
     parser.add_argument(
-        "--minutes", type=int, default=55, help="< 60: the server caps lifetime at 1 h"
+        "--minutes",
+        type=_minutes,
+        default=55,
+        help=f"token lifetime, 1..{MAX_MINUTES} (server caps at 1 h)",
     )
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
@@ -62,7 +79,13 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    token = mint(secret, subject=args.subject, minutes=args.minutes)
+    token = mint(
+        secret,
+        subject=args.subject,
+        minutes=args.minutes,
+        issuer=os.environ.get("CLOUDSCALE_JWT_ISSUER", "cloudscale"),
+        audience=os.environ.get("CLOUDSCALE_JWT_AUDIENCE") or None,
+    )
     if not args.curl:
         print(token)
         return 0
