@@ -22,23 +22,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-#: Appears in the OpenAPI document as the bearer security scheme so generated
-#: clients send Authorization. It does NOT authenticate: ``auto_error=False``
-#: and the value is ignored; ``auth.authenticate`` remains the single verifier
-#: (fixed 401 text, lifetime cap, jti revocation).
-_BEARER = HTTPBearer(auto_error=False, scheme_name="bearerAuth")
-
-#: Documented non-2xx responses shared by the authenticated account routes.
-#: The bodies are described in docs/API_ERRORS.md; declaring them here makes
-#: the committed contract (docs/openapi.json) honest for client generators.
-_AUTH_RESPONSES: dict[int | str, dict[str, object]] = {
-    401: {"description": "Missing, invalid or expired bearer token (fixed message)."},
-    403: {"description": "Token valid but not authorized for this account."},
-    429: {"description": "Rate limit exceeded; honour Retry-After."},
-    503: {
-        "description": "Command path unavailable; retry with the SAME command_id after Retry-After."
-    },
-}
 from pydantic import BaseModel, ConfigDict
 
 from cloudscale.application.command_service import CommandService
@@ -76,6 +59,24 @@ from cloudscale.resilience import (
 
 if TYPE_CHECKING:
     from opentelemetry.trace import TracerProvider
+
+#: Appears in the OpenAPI document as the bearer security scheme so generated
+#: clients send Authorization. It does NOT authenticate: ``auto_error=False``
+#: and the value is ignored; ``auth.authenticate`` remains the single verifier
+#: (fixed 401 text, lifetime cap, jti revocation).
+_BEARER = HTTPBearer(auto_error=False, scheme_name="bearerAuth")
+
+#: Documented non-2xx responses shared by the authenticated account routes.
+#: The bodies are described in docs/API_ERRORS.md; declaring them here makes
+#: the committed contract (docs/openapi.json) honest for client generators.
+_AUTH_RESPONSES: dict[int | str, dict[str, object]] = {
+    401: {"description": "Missing, invalid or expired bearer token (fixed message)."},
+    403: {"description": "Token valid but not authorized for this account."},
+    429: {"description": "Rate limit exceeded; honour Retry-After."},
+    503: {
+        "description": "Command path unavailable; retry with the SAME command_id after Retry-After."
+    },
+}
 
 API_VERSION = "v1"
 _LOGGER = logging.getLogger("cloudscale.http")
