@@ -15,9 +15,16 @@
 set -eu
 rev="${1:-HEAD}"
 root="$(git rev-parse --show-toplevel)"
+# Inside a monorepo the package is a subdirectory; archive only that subtree
+# so the export has this Makefile at its top level. Empty prefix = standalone.
+prefix="$(git rev-parse --show-prefix)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/cloudscale-fresh.XXXXXX")"
-echo "exporting $rev -> $work"
-git -C "$root" archive --format=tar "$rev" | tar -x -C "$work"
+echo "exporting $rev:${prefix:-.} -> $work"
+if [ -n "$prefix" ]; then
+  git -C "$root" archive --format=tar "$rev:${prefix%/}" | tar -x -C "$work"
+else
+  git -C "$root" archive --format=tar "$rev" | tar -x -C "$work"
+fi
 cd "$work"
 # The harness self-test asserts a real revision; give the export a git identity.
 git init -q && git add -A && git -c user.email=fresh@check -c user.name=fresh commit -qm "fresh-tree export of $rev"

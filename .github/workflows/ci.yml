@@ -97,7 +97,7 @@ jobs:
           set -e
           docker compose up -d --wait --wait-timeout 120
           curl -sf http://127.0.0.1:8000/v1/ready
-          python3 -m pip install --quiet pyjwt
+          python3 -m pip install --quiet pyjwt==2.13.0  # matches requirements.lock (ADR-0008)
           TOKEN=$(CLOUDSCALE_JWT_SECRET=local-dev-only-secret-0123456789abcdef-0123456789abcdef \
                   python3 scripts/dev_token.py --subject ci --minutes 5)
           curl -sf -X POST http://127.0.0.1:8000/v1/accounts/ci/commands \
@@ -108,7 +108,14 @@ jobs:
           curl -sf http://127.0.0.1:8000/v1/accounts/ci/balance -H "Authorization: Bearer $TOKEN" | tee bal.json
           grep -q '"balance":42' bal.json
           docker compose logs --no-color migrate | tail -5
-          docker compose down -v
+      - name: Compose diagnostics (on failure)
+        if: failure()
+        run: |
+          docker compose ps || true
+          docker compose logs --no-color --tail=100 || true
+      - name: Compose teardown
+        if: always()
+        run: docker compose down -v || true
       - name: Scan image (OS + Python packages; fails on fixable CRITICAL/HIGH)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

@@ -21,7 +21,7 @@ def test_committed_openapi_matches_the_application() -> None:
 
 def test_openapi_covers_the_public_surface() -> None:
     document = json.loads(OUTPUT.read_text())
-    paths = set(document["paths"])
+    paths = document["paths"]
     for route in (
         "/v1/health",
         "/v1/ready",
@@ -31,3 +31,27 @@ def test_openapi_covers_the_public_surface() -> None:
     ):
         assert route in paths, route
     assert document["info"]["title"] == "cloudscale-backend"
+
+
+def test_openapi_declares_bearer_auth_on_every_account_route() -> None:
+    """A generated client must send Authorization; probes must stay open."""
+    document = json.loads(OUTPUT.read_text())
+    schemes = document["components"]["securitySchemes"]
+    assert schemes["bearerAuth"] == {"type": "http", "scheme": "bearer"}
+    for path, ops in document["paths"].items():
+        for method, op in ops.items():
+            if path in ("/v1/health", "/v1/ready"):
+                assert "security" not in op, f"{method} {path} must be unauthenticated"
+            else:
+                assert op.get("security") == [{"bearerAuth": []}], f"{method} {path}"
+
+
+def test_openapi_documents_the_real_status_codes() -> None:
+    """The codes docs/API_ERRORS.md promises must be in the contract."""
+    document = json.loads(OUTPUT.read_text())
+    commands = document["paths"]["/v1/accounts/{account_id}/commands"]["post"]
+    assert {"200", "201", "400", "409", "422", "401", "403", "429", "503"} <= set(
+        commands["responses"]
+    )
+    balance = document["paths"]["/v1/accounts/{account_id}/balance"]["get"]
+    assert {"200", "404", "401", "403"} <= set(balance["responses"])

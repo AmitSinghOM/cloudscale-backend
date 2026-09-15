@@ -32,9 +32,17 @@ import httpx
 
 
 class VersionConflict(Exception):
+    """409 version_conflict: another writer got there first. Re-read and resubmit."""
+
     def __init__(self, current_version: int) -> None:
         super().__init__(f"stream is at version {current_version}")
         self.current_version = current_version
+
+
+class CommandIdConflict(Exception):
+    """409 command_id_conflict: the same command_id was reused with a different
+    request. A command_id identifies ONE intent; mint a new id for a new intent.
+    This is a caller bug, not a race - never retry it."""
 
 
 @dataclass(frozen=True)
@@ -92,19 +100,30 @@ class CloudScaleClient:
                     command_id, data["outcome"], data["committed_version"]
                 )
             if response.status_code == 409:
-                raise VersionConflict(int(response.json()["current_version"]))
-            if response.status_code == 503 and attempt < self._max_attempts:
+                data = response.json()
+                if data.get("error_code") == "version_conflict":
+                    raise VersionConflict(int(data["current_version"]))
+                # command_id_conflict: this id was already used for a DIFFERENT
+                # request. That is a bug in the caller, never a race; do not retry.
+                raise CommandIdConflict(str(command_id))
+            if response.status_code in (429, 503) and attempt < self._max_attempts:
+                # Both carry Retry-After; both are safe to retry with the SAME id.
                 time.sleep(float(response.headers.get("Retry-After", "1")))
-                continue  # same command_id: safe
+                continue
             response.raise_for_status()
         raise RuntimeError("unreachable")
 
     # -- queries ------------------------------------------------------------------
 
     def balance(self, account_id: str) -> dict:
-        response = self._http.get(f"/v1/accounts/{account_id}/balance")
-        response.raise_for_status()
-        return response.json()
+        for attempt in range(1, self._max_attempts + 1):
+            response = self._http.get(f"/v1/accounts/{account_id}/balance")
+            if response.status_code == 429 and attempt < self._max_attempts:
+                time.sleep(float(response.headers.get("Retry-After", "1")))
+                continue
+            response.raise_for_status()
+            return response.json()
+        raise RuntimeError("unreachable")
 
     def wait_for_version(
         self, account_id: str, version: int, timeout: float = 5.0

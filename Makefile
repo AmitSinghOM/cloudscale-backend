@@ -71,6 +71,12 @@ dev: venv  ## start API + consumer on the SQLite tier (DEV_PORT=8000)
 	    > $(DEV_DIR)/consumer.log 2>&1 & echo $$! > $(DEV_DIR)/consumer.pid
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 	    curl -sf http://127.0.0.1:$(DEV_PORT)/v1/ready >/dev/null 2>&1 && break; sleep 0.5; done
+	@curl -sf http://127.0.0.1:$(DEV_PORT)/v1/ready >/dev/null 2>&1 || { \
+	    echo "server did not become ready on :$(DEV_PORT); last lines of $(DEV_DIR)/server.log:"; \
+	    tail -20 $(DEV_DIR)/server.log; $(MAKE) -s stop; exit 1; }
+	@kill -0 $$(cat $(DEV_DIR)/consumer.pid) 2>/dev/null || { \
+	    echo "consumer exited at startup; last lines of $(DEV_DIR)/consumer.log:"; \
+	    tail -20 $(DEV_DIR)/consumer.log; $(MAKE) -s stop; exit 1; }
 	@echo "API      http://127.0.0.1:$(DEV_PORT)   (docs: /docs, ready: /v1/ready, metrics: /metrics)"
 	@echo "logs     $(DEV_DIR)/server.log  $(DEV_DIR)/consumer.log"
 	@echo "next     make token        # or: make token ARGS=--curl"

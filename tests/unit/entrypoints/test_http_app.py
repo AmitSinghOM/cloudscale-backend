@@ -308,3 +308,22 @@ def test_future_schema_event_in_stream_maps_to_503_not_500(stack: _Stack) -> Non
     assert response.status_code == 503
     assert "newer than this build" in response.json()["detail"]
     assert int(response.headers["Retry-After"]) >= 1
+
+
+def test_public_dev_secret_in_production_mode_is_warned_not_refused() -> None:
+    """Review finding: compose.yaml ships a public secret in migrations mode. The
+    server must start (the quickstart depends on it) but must say so loudly."""
+    from cloudscale.entrypoints.http.settings import (
+        KNOWN_DEVELOPMENT_SECRETS,
+        HttpSettings,
+    )
+
+    dev_secret = next(iter(KNOWN_DEVELOPMENT_SECRETS))
+    settings = HttpSettings(jwt_secret=dev_secret)
+    assert settings.production_warnings(schema_mode="auto") == []  # dev: silent
+    [warning] = settings.production_warnings(schema_mode="migrations")
+    assert "PUBLIC development secret" in warning and "RUNBOOK D4" in warning
+    assert (
+        HttpSettings(jwt_secret=SECRET).production_warnings(schema_mode="migrations")
+        == []
+    )

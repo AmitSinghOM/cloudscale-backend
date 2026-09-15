@@ -20,6 +20,8 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
 from pydantic import BaseModel, ConfigDict
 
 from cloudscale.application.command_service import CommandService
@@ -57,6 +59,24 @@ from cloudscale.resilience import (
 
 if TYPE_CHECKING:
     from opentelemetry.trace import TracerProvider
+
+#: Appears in the OpenAPI document as the bearer security scheme so generated
+#: clients send Authorization. It does NOT authenticate: ``auto_error=False``
+#: and the value is ignored; ``auth.authenticate`` remains the single verifier
+#: (fixed 401 text, lifetime cap, jti revocation).
+_BEARER = HTTPBearer(auto_error=False, scheme_name="bearerAuth")
+
+#: Documented non-2xx responses shared by the authenticated account routes.
+#: The bodies are described in docs/API_ERRORS.md; declaring them here makes
+#: the committed contract (docs/openapi.json) honest for client generators.
+_AUTH_RESPONSES: dict[int | str, dict[str, object]] = {
+    401: {"description": "Missing, invalid or expired bearer token (fixed message)."},
+    403: {"description": "Token valid but not authorized for this account."},
+    429: {"description": "Rate limit exceeded; honour Retry-After."},
+    503: {
+        "description": "Command path unavailable; retry with the SAME command_id after Retry-After."
+    },
+}
 
 API_VERSION = "v1"
 _LOGGER = logging.getLogger("cloudscale.http")
@@ -228,7 +248,9 @@ def create_app(
             )
 
     def authenticated(
-        request: Request, principal: Principal = Depends(authenticate)
+        request: Request,
+        principal: Principal = Depends(authenticate),
+        _schema_only: HTTPAuthorizationCredentials | None = Depends(_BEARER),
     ) -> Principal:
         _rate_limited(request, principal)
         return principal
@@ -278,7 +300,17 @@ def create_app(
     def prometheus_metrics() -> object:
         return metrics.render()
 
-    @app.post(f"/{API_VERSION}/accounts")
+    @app.post(
+        f"/{API_VERSION}/accounts",
+        status_code=201,
+        responses={
+            200: {"description": "Already registered to this caller (idempotent)."},
+            409: {"description": "Registered to a different subject."},
+            400: {"description": "invalid_account_id."},
+            501: {"description": "Registration not enabled in this deployment."},
+            **_AUTH_RESPONSES,
+        },
+    )
     def register_account(
         request: RegisterAccountRequest,
         principal: Principal = Depends(authenticated),
@@ -312,7 +344,23 @@ def create_app(
             },
         )
 
-    @app.post(f"/{API_VERSION}/accounts/{{account_id}}/commands")
+    @app.post(
+        f"/{API_VERSION}/accounts/{{account_id}}/commands",
+        status_code=201,
+        responses={
+            200: {
+                "description": "Idempotent replay of a previously accepted command_id."
+            },
+            400: {
+                "description": "CommandResult with outcome=domain_rejected and error_code."
+            },
+            409: {
+                "description": "CommandResult: version_conflict or command_id_conflict."
+            },
+            422: {"description": "CommandResult: insufficient_funds."},
+            **_AUTH_RESPONSES,
+        },
+    )
     def post_command(
         account_id: str,
         request: CommandRequest,
@@ -380,6 +428,12 @@ def create_app(
     @app.get(
         f"/{API_VERSION}/accounts/{{account_id}}/balance",
         response_model=BalanceResponse,
+        responses={
+            404: {
+                "description": "No event projected yet for this account; poll after a write."
+            },
+            **_AUTH_RESPONSES,
+        },
     )
     def get_balance(
         account_id: str,

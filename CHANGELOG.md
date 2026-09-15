@@ -9,6 +9,15 @@ integrator; the commit history says how.
 Developer experience: from clone to a correct first integration without
 reading source.
 
+### Fixed
+- Four-role review of the developer-experience change set (`docs/reviews/2026-09-15-dx-review.md`):
+  OpenAPI contract now declares bearer auth and real status codes; example
+  client distinguishes 409 kinds and backs off on 429; `make dev` fails loudly
+  when the server does not start; compose binds loopback only; `dev_token`
+  honours issuer/audience and bounds `--minutes`; startup warning when the
+  public dev secret runs in production mode; plus five low-severity items.
+- `check_fresh_tree.sh` now works from inside a monorepo.
+
 ### Added
 - `make dev` / `make token` / `make stop`: API + consumer on the SQLite tier
   with a fixed local-only secret; `make token ARGS=--curl` prints a
