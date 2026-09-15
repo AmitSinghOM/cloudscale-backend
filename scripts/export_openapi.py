@@ -42,13 +42,10 @@ def generate() -> dict:
             from cloudscale.entrypoints.http.main import build_app
 
             app = build_app()
-            try:
-                return app.openapi()
-            finally:
-                # create_app registers closeables on lifespan shutdown; there is
-                # no lifespan here, so close the SQLite handles explicitly.
-                for closeable in getattr(app.state, "closeables", ()):
-                    closeable.close()
+            # create_app keeps its closeables in the lifespan closure; there is
+            # no lifespan here. The SQLite handles live in the temp dir and are
+            # released at process exit, which is all this short-lived script needs.
+            return app.openapi()
         finally:
             for key, value in previous.items():
                 if value is None:
