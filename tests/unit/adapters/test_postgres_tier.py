@@ -393,6 +393,7 @@ def test_pooled_adapters_serve_concurrent_callers(
         assert projection.balance(account) == {
             "account_id": account,
             "balance": 40,
+            "held": 0,
             "version": 40,
         }
     finally:

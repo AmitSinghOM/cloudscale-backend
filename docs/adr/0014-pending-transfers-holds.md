@@ -3,16 +3,21 @@
 **Status:** Accepted
 **Date:** 2026-09-19
 **Enforced by:** `tests/unit/domain/test_holds.py` (available-funds rule,
-place/post/partial/void/expire decision rules, `held` fold, conservation
-including held funds); `tests/unit/adapters/test_sqlite_command_uow.py::test_hold_*`
-and `tests/unit/adapters/test_postgres_command_uow.py::test_hold_*`;
-`tests/unit/adapters/test_postgres_tier.py::test_hold_*` (`balances.held`,
-`holds` read model); `tests/unit/scripts/test_sweep_holds.py` (deterministic
-command id, two sweepers racing release each hold once);
+open-hold derivation, place/post/partial/void/expire decision rules, `held`
+fold, envelope round trip, Hypothesis lifecycle property: conservation and
+`held == sum(open holds)` at every step);
+`tests/unit/adapters/test_sqlite_command_uow.py` (`test_hold_*`,
+`test_post_hold_*`, `test_partial_capture_*`, `test_void_and_expire_*`) and
+`tests/unit/adapters/test_postgres_command_uow.py`
+(`test_hold_lifecycle_on_postgres_and_read_model`,
+`test_concurrent_post_and_void_of_one_hold_resolve_to_exactly_one_winner`);
+`tests/unit/scripts/test_sweep_holds.py` (deterministic command id,
+idempotent sweep, two sweepers racing leave exactly one
+`HoldReleased(expired)` per hold in the log);
 `tests/unit/entrypoints/test_http_app.py::test_hold_*`;
-`tests/unit/adapters/test_postgres_migrations.py` (`0006` parity and guard);
-`tests/architecture/test_api_errors_doc.py`; fixture corpus
-`HoldPlaced.v1`, `HoldReleased.v1`, `TransferDebited.v1` (with `pending_id`).
+`tests/unit/adapters/test_postgres_migrations.py::test_downgrade_0006_refuses_while_hold_events_exist`
+and the schema-parity test; `tests/architecture/test_api_errors_docs.py`;
+fixture corpus `HoldPlaced.v1`, `HoldReleased.v1`, `HoldPosted.v1`.
 
 ## Context
 
@@ -41,41 +46,60 @@ Forces:
 
 `AccountState` gains `held: int` (sum of the account's open holds as
 source); `available = balance - held`. Every debit rule (`Withdraw`,
-`Transfer`, `Post`, `Hold`) checks **available** funds. Two new events at
-schema version 1: `HoldPlaced(account_id, amount, hold_id, counterparty,
-expires_at)` folds `held += amount`; `HoldReleased(account_id, amount,
-hold_id, reason)` with `reason ∈ {voided, expired, partial}` folds
-`held -= amount`. Posting a hold reuses `TransferDebited` /
-`TransferCredited` with `transfer_id = hold_id`; the debit carries a new
-nullable `pending_id = hold_id` so the fold applies `held -= amount` as
-well as `balance -= amount`. `HELD_SIGN` is a second table beside
-`BALANCE_SIGN`; each projected quantity has exactly one table. Commands:
-`Hold(account_id, target_account_id, amount, expected_version, ttl_seconds)`
-→ `HoldPlaced` (hold id = command id); `PostHold(account_id, hold_id,
-expected_version, amount=None)` → the posting pair, plus a
-`HoldReleased(reason=partial)` for the remainder when `amount` is less than
-held, all in one transaction; `VoidHold(account_id, hold_id,
-expected_version)` → `HoldReleased(voided)`. Hold state (open, amount,
-expiry, target) is read from the `holds` read model maintained by the
-consumer, not from the aggregate.
+`Transfer`, `Post`, `Hold`) checks **available** funds. Three new event
+types at schema version 1, all on the source stream: `HoldPlaced(account_id,
+amount, hold_id, counterparty, expires_at)` folds `held += amount`;
+`HoldReleased(account_id, amount, hold_id, reason)` with `reason ∈ {voided,
+expired, partial}` folds `held -= amount`; `HoldPosted(account_id, amount,
+hold_id, counterparty)` folds `balance -= amount; held -= amount` and is
+paired with a `TransferCredited` on the target whose `transfer_id` is the
+`hold_id`. `HELD_SIGN` is a second table beside `BALANCE_SIGN`; each
+projected quantity has exactly one table and the fold applies both.
+`CURRENT_STATE_VERSION` (ADR-0012) becomes 2. Commands:
+`Hold(account_id, target_account_id, amount, expected_version, expires_at)`
+→ `HoldPlaced` (hold id = command id; `expires_at` is absolute UTC text
+produced by the HTTP layer from `ttl_seconds`, bounded by
+`CLOUDSCALE_HOLD_MAX_TTL_SECONDS`); `PostHold(account_id, hold_id,
+expected_version, amount=None)` → `HoldPosted` + `TransferCredited`, plus a
+`HoldReleased(partial)` for the remainder when `amount` is less than held,
+all in one transaction; `VoidHold` → `HoldReleased(voided)`; `ExpireHold` →
+`HoldReleased(expired)`, refused before `expires_at`.
 
-**Expiry** is an ordinary command. `scripts/sweep_holds.py <db-or-dsn>`
-reads open holds past `expires_at` from the read model and executes
-`ExpireHold` for each with a deterministic `command_id = uuid5(hold_id,
-"expire")`, so two sweepers, or a sweeper racing a `PostHold`, resolve
-through the existing `command_results` claim: exactly one wins, the other
-sees the stored result or `hold_not_open`. The fold never consults the
-clock.
+**The decision reads the hold from the log, never from the read model.**
+`CommandDecisionStorage.open_hold(account_id, hold_id)` derives the open
+hold from the source stream's own `Hold*` events with that id, inside the
+command transaction (`open_hold_from_events` in the domain). An eventual
+read model could lag a just-placed hold or a just-completed post; the log
+cannot. `PostHold` and `ExpireHold` consult the decision clock (the same
+`now` that stamps `occurred_at`) once, at decision time; the *fold* never
+reads a clock, so replay stays deterministic.
 
-Storage: `events` gains nullable `pending_id` and `expires_at` (Alembic
-`0006`, downgrade refuses while hold rows exist); `balances` gains `held`;
-new `holds(hold_id PK, source, target, amount, expires_at, state)`. HTTP:
-`POST …/{account_id}/holds` (201; `hold_id` in the body),
+**Expiry** is an ordinary command. `scripts/sweep_holds.py` reads open
+holds past `expires_at` from the `holds` read model and executes
+`ExpireHold` for each with a deterministic `command_id = uuid5(namespace,
+hold_id)`, so two sweepers, or a sweeper racing a `PostHold`, resolve
+through the existing `command_results` claim: the log carries exactly one
+`HoldReleased(expired)` per hold. A concurrent sweeper that folded the same
+version issues a byte-identical command and receives the stored ACCEPTED
+result as a replay; one that folded a different version gets
+`command_id_conflict` or `version_conflict`; one that arrives after a post
+gets `hold_not_open`.
+
+Storage: `events` gains nullable `expires_at` and `release_reason`; a hold's
+id is stored in the existing `transfer_id` column (it becomes the posting's
+transfer id) with a partial index on `(stream, transfer_id)` serving the
+derivation (Alembic `0006`, downgrade refuses while hold events exist);
+`balances` gains `held`; new `holds(hold_id PK, source, target, amount,
+expires_at, state)` maintained by every projection. HTTP:
+`POST …/{account_id}/holds` (201; the `command_id` is the `hold_id`),
 `POST …/holds/{hold_id}/post`, `POST …/holds/{hold_id}/void`;
-`GET …/balance` gains `held` and `available`. New error codes:
-`hold_not_found` (404), `hold_not_open` (409), `capture_exceeds_hold` (400).
-Authorization is on the source for all three routes; the target's stream is
-untouched until post.
+`GET …/balance` gains `held` and `available`. New error codes (all 400):
+`hold_not_open`, `hold_expired`, `hold_not_expired`, `capture_exceeds_hold`,
+`invalid_expiry`. Authorization is on the source for all three routes; the
+target's stream is untouched until post and its `committed_version` is
+redacted unless the caller may read it. `CommandResult.postings` stays one
+per stream: when a partial capture writes the source twice, the posting
+names the source's last event.
 
 ## Alternatives rejected
 
@@ -84,8 +108,15 @@ untouched until post.
 - **A `holds` dict on `AccountState`.** Snapshots grow with open holds and
   the fold shape stops being fixed; the read model carries per-hold detail
   instead.
-- **A separate `HoldPosted` event type.** The debit *is* a transfer debit;
-  a nullable `pending_id` keeps `BALANCE_SIGN` the single balance table.
+- **A separate `HoldPosted` event type versus reusing `TransferDebited`
+  with a `pending_id`.** Reusing the transfer debit would add a key to its
+  v1 payload, which the envelope validates exactly (ADR-0011 chose new
+  types over shape changes for the same reason); `HoldPosted` keeps
+  `TransferDebited.v1` frozen and lets `HELD_SIGN` stay a plain sign table.
+- **Reading the hold from the `holds` read model in the decision.** The
+  read model is eventual; a post right after a place could see no hold, and
+  two racing resolutions could both see it open. The decision derives it
+  from the source stream's events inside the transaction instead.
 - **Debit at reserve time into a suspense account.** Moves money twice
   and shows the target activity it has no claim to; also breaks the
   per-account conservation reading of the balance.
@@ -95,9 +126,11 @@ untouched until post.
 - Easier: card-style authorize/capture, escrow and scheduled payouts are
   three idempotent requests with no client-side compensation.
 - Harder / must be maintained: the fold has one more quantity and
-  `CURRENT_STATE_VERSION` (ADR-0012) is bumped; a sweeper is one more
-  operator process and appears in `RUNBOOK.md`; the fixture corpus grows by
-  two types and one variant.
+  `CURRENT_STATE_VERSION` (ADR-0012) is bumped to 2, so every existing
+  snapshot is discarded and refolded once on first read after deploy; a
+  sweeper is one more operator process and appears in `RUNBOOK.md`; the
+  fixture corpus grows by three types; every balance projection carries
+  `held` and the `holds` table.
 - Stated limitation: `expires_at` is honoured to sweeper cadence, not to
   the second; a hold is enforceable only once the sweeper has run. Holds
   with N legs and target consent (escrow with acceptance) are deferred.

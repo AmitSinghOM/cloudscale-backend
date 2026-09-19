@@ -1,0 +1,12 @@
+{
+  "id": 6,
+  "event_id": "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e",
+  "stream": "account-fixture-1",
+  "seq": 5,
+  "type": "HoldReleased",
+  "account_id": "fixture-1",
+  "amount": 25,
+  "transfer_id": "5f6e7d8c-9b0a-4c1d-8e2f-3a4b5c6d7e8f",
+  "release_reason": "voided",
+  "schema_version": 1
+}

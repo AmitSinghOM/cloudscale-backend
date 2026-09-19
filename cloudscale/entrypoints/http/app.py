@@ -13,8 +13,9 @@ import logging
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -30,9 +31,12 @@ from cloudscale.application.query_service import QueryService
 from cloudscale.domain.commands import (
     AccountCommand,
     Deposit,
+    Hold,
     Leg,
     Post,
+    PostHold,
     Transfer,
+    VoidHold,
     Withdraw,
 )
 from cloudscale.domain.errors import DomainError
@@ -171,6 +175,42 @@ class PostingsRequest(BaseModel):
     expected_version: int
 
 
+class HoldRequest(BaseModel):
+    """Reserve funds on the path account for ``target_account_id`` (ADR-0014).
+
+    ``ttl_seconds`` becomes an absolute ``expires_at`` on the server clock,
+    bounded by ``CLOUDSCALE_HOLD_MAX_TTL_SECONDS``. The hold id is the
+    ``command_id``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_id: UUID
+    target_account_id: str
+    amount: int
+    expected_version: int
+    ttl_seconds: int
+
+
+class PostHoldRequest(BaseModel):
+    """Settle a hold; ``amount`` omitted captures the full held amount."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_id: UUID
+    expected_version: int
+    amount: int | None = None
+
+
+class ReleaseHoldRequest(BaseModel):
+    """Void an open hold."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_id: UUID
+    expected_version: int
+
+
 class PostingResponse(BaseModel):
     """One stream an accepted command wrote.
 
@@ -238,6 +278,10 @@ def _command_response(
 class BalanceResponse(BaseModel):
     account_id: str
     balance: int
+    #: Sum of this account's open holds (ADR-0014); ``available`` is what a
+    #: debit may use.
+    held: int
+    available: int
     version: int
     #: Read models are projections of the log; reads can trail writes.
     consistency: str = "eventual"
@@ -263,6 +307,7 @@ def create_app(
     token_verifier: TokenVerifier | None = None,
     readiness_probe: ReadinessProbe | None = None,
     closeables: Sequence[Closeable] = (),
+    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> FastAPI:
     """Build the HTTP app over explicit, injected collaborators.
 
@@ -630,6 +675,129 @@ def create_app(
             result, may_read=lambda target: _may_read(principal, target)
         )
 
+    # -- holds (ADR-0014) ---------------------------------------------------------
+
+    _HOLD_RESPONSES: dict[int | str, dict[str, Any]] = {
+        400: {
+            "description": (
+                "CommandResult with outcome=domain_rejected and error_code "
+                "(hold_not_open, hold_expired, capture_exceeds_hold, same_account, "
+                "amount_out_of_range), or an invalid ttl_seconds."
+            )
+        },
+        409: {
+            "description": (
+                "CommandResult: version_conflict (source stream) or command_id_conflict."
+            )
+        },
+        422: {
+            "description": "CommandResult: insufficient_funds (available, not balance)."
+        },
+        **_AUTH_RESPONSES,
+    }
+
+    @app.post(
+        f"/{API_VERSION}/accounts/{{account_id}}/holds",
+        status_code=201,
+        responses=_HOLD_RESPONSES,
+    )
+    def post_hold(
+        account_id: str,
+        request: HoldRequest,
+        principal: Principal = Depends(authenticated),
+    ) -> JSONResponse:
+        """Reserve funds now for a later posting (ADR-0014). The hold id is the command id.
+
+        Checked against AVAILABLE funds (balance minus open holds). The target
+        learns nothing until the hold is posted; its stream is untouched.
+        """
+        authorize_account(principal, account_id, account_registry)
+        if not 1 <= request.ttl_seconds <= settings.hold_max_ttl_seconds:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"ttl_seconds must be between 1 and {settings.hold_max_ttl_seconds} "
+                    "(CLOUDSCALE_HOLD_MAX_TTL_SECONDS)"
+                ),
+            )
+        expires_at = (clock() + timedelta(seconds=request.ttl_seconds)).isoformat()
+        try:
+            command = Hold(
+                account_id,
+                request.target_account_id,
+                request.amount,
+                request.expected_version,
+                expires_at,
+            )
+        except DomainError as error:
+            raise HTTPException(status_code=400, detail=error.code) from error
+        result = _execute(
+            command,
+            command_id=request.command_id,
+            principal=principal,
+            command_type="hold",
+        )
+        return _command_response(result)
+
+    @app.post(
+        f"/{API_VERSION}/accounts/{{account_id}}/holds/{{hold_id}}/post",
+        status_code=201,
+        responses=_HOLD_RESPONSES,
+    )
+    def post_hold_capture(
+        account_id: str,
+        hold_id: UUID,
+        request: PostHoldRequest,
+        principal: Principal = Depends(authenticated),
+    ) -> JSONResponse:
+        """Settle an open hold: debit the source, credit the hold's target (ADR-0014).
+
+        A smaller ``amount`` captures part and releases the remainder in the
+        same transaction. The target posting's ``committed_version`` is
+        redacted unless the caller may read that account.
+        """
+        authorize_account(principal, account_id, account_registry)
+        try:
+            command = PostHold(
+                account_id, hold_id, request.expected_version, request.amount
+            )
+        except DomainError as error:
+            raise HTTPException(status_code=400, detail=error.code) from error
+        result = _execute(
+            command,
+            command_id=request.command_id,
+            principal=principal,
+            command_type="post_hold",
+        )
+        return _command_response(
+            result, may_read=lambda target: _may_read(principal, target)
+        )
+
+    @app.post(
+        f"/{API_VERSION}/accounts/{{account_id}}/holds/{{hold_id}}/void",
+        status_code=201,
+        responses=_HOLD_RESPONSES,
+    )
+    def post_hold_void(
+        account_id: str,
+        hold_id: UUID,
+        request: ReleaseHoldRequest,
+        principal: Principal = Depends(authenticated),
+    ) -> JSONResponse:
+        """Release an open hold without moving funds (ADR-0014)."""
+        authorize_account(principal, account_id, account_registry)
+        try:
+            command = VoidHold(account_id, hold_id, request.expected_version)
+        except DomainError as error:
+            raise HTTPException(status_code=400, detail=error.code) from error
+        result = _execute(
+            command,
+            command_id=request.command_id,
+            principal=principal,
+            command_type="void_hold",
+        )
+        return _command_response(result)
+
     @app.get(
         f"/{API_VERSION}/accounts/{{account_id}}/balance",
         response_model=BalanceResponse,
@@ -655,6 +823,8 @@ def create_app(
         return BalanceResponse(
             account_id=view.account_id,
             balance=view.balance,
+            held=view.held,
+            available=view.available,
             version=view.version,
         )
 

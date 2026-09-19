@@ -65,6 +65,35 @@ of the debited legs. Debits must equal credits. Success returns the same
 | 400 | `anchor_not_debited` | The path account is not a debited leg. | Anchor on an account whose money leaves. |
 | 400 | `domain_rejected` + a domain code | E.g. `amount_out_of_range` when a credit would overflow. | Fix the request. |
 
+## Holds: `POST /v1/accounts/{account_id}/holds`, `…/holds/{hold_id}/post`, `…/holds/{hold_id}/void` (ADR-0014)
+
+A hold reserves funds on the path account for a later posting to
+`target_account_id`. `held` rises and `available = balance - held` falls;
+`balance` does not move until the hold is posted. Every debit (withdraw,
+transfer, posting set, another hold) is checked against **available**. The
+hold id is the `command_id` of the hold request. `ttl_seconds` becomes an
+absolute `expires_at` on the server clock (bounded by
+`CLOUDSCALE_HOLD_MAX_TTL_SECONDS`); past it the hold can only be voided or
+expired — the sweeper (`scripts/sweep_holds.py`) expires it. The target
+account sees nothing until the post. `GET …/balance` returns `held` and
+`available`.
+
+| Status | `outcome` / `error_code` | Meaning | Client action |
+|---|---|---|---|
+| 201 | `accepted` (hold) | `HoldPlaced` appended to the source; `committed_version` is the source's. | Keep the `command_id`: it is the `hold_id`. |
+| 201 | `accepted` (post) | `HoldPosted` on the source, `TransferCredited` on the target (a partial capture also appends `HoldReleased`); all in `postings`. | Poll balances as for a transfer. |
+| 201 | `accepted` (void) | `HoldReleased(voided)` appended; `available` restored. | Continue. |
+| 409 | `version_conflict` | `expected_version` ≠ the **source** stream's version. | Re-read, re-decide, resubmit with a new `command_id`. |
+| 409 | `command_id_conflict` | Same `command_id`, different request. | Client bug; mint a new id. |
+| 422 | `insufficient_funds` | Hold amount exceeds **available** funds. | Business rejection. |
+| 400 | `hold_not_open` | No open hold with that id on this account (never placed, already posted, voided or expired). | Do not retry; read the balance. |
+| 400 | `hold_expired` | Post attempted after `expires_at`. | Place a new hold. |
+| 400 | `hold_not_expired` | `ExpireHold` (sweeper) before `expires_at`. | Operator tooling only; void instead. |
+| 400 | `capture_exceeds_hold` | Post `amount` greater than the held amount. | Capture at most the held amount. |
+| 400 | `invalid_expiry` | `expires_at` not a UTC ISO-8601 timestamp (internal; the HTTP layer always produces a valid one). | Report it. |
+| 400 | `same_account` | Source and target are the same account. | Fix the request. |
+| 400 | `ttl_seconds` out of range | Detail names the bound and the variable. | Lower the TTL. |
+
 ### Domain error codes (400 unless noted)
 
 | `error_code` | Meaning |
@@ -82,6 +111,11 @@ of the debited legs. Debits must equal credits. Success returns the same
 | `duplicate_account` | A posting set names one account in more than one leg. |
 | `too_many_legs` | A posting set has more than 16 legs. |
 | `anchor_not_debited` | A posting set's anchor (path account) is not a debited leg. |
+| `hold_not_open` | The named hold does not exist on this account or is no longer open. |
+| `hold_expired` | The hold's `expires_at` has passed; it can only be voided or expired. |
+| `hold_not_expired` | An expire was attempted before `expires_at`. |
+| `capture_exceeds_hold` | A post named more than the held amount. |
+| `invalid_expiry` | `expires_at` is not a UTC ISO-8601 timestamp. |
 | `unknown_command` | `type` is not `deposit` or `withdraw`. |
 | `unknown_event` | Stream holds an event type the aggregate cannot fold (report it). |
 | `domain_error` | Base code; only seen if a new rule forgot its own code. |

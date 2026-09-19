@@ -98,7 +98,7 @@ class SqliteEventStore:
                 "ALTER TABLE events ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
             )
         # Transfer legs (ADR-0011) pair on the row; NULL for every other type.
-        for column in ("transfer_id", "counterparty"):
+        for column in ("transfer_id", "counterparty", "expires_at", "release_reason"):
             if column not in columns:
                 self._conn.execute(f"ALTER TABLE events ADD COLUMN {column} TEXT")
         self._conn.commit()
@@ -134,7 +134,8 @@ class SqliteEventStore:
                 self._conn.execute(
                     "INSERT INTO events "
                     "(event_id, stream, seq, type, account_id, amount, schema_version, "
-                    "transfer_id, counterparty) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "transfer_id, counterparty, expires_at, release_reason) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         event_id,
                         stream,
@@ -145,6 +146,8 @@ class SqliteEventStore:
                         _stamp_for(event),
                         event.get("transfer_id"),
                         event.get("counterparty"),
+                        event.get("expires_at"),
+                        event.get("release_reason"),
                     ),
                 )
                 self._conn.commit()
@@ -161,7 +164,7 @@ class SqliteEventStore:
         """Return all events in ``stream`` in append (seq) order."""
         with self._lock:
             rows = self._conn.execute(
-                "SELECT event_id, stream, seq, type, account_id, amount, schema_version, transfer_id, counterparty "
+                "SELECT event_id, stream, seq, type, account_id, amount, schema_version, transfer_id, counterparty, expires_at, release_reason "
                 "FROM events WHERE stream = ? ORDER BY seq ASC",
                 (stream,),
             ).fetchall()
@@ -177,7 +180,7 @@ class SqliteEventStore:
             raise ValueError("after_seq must be non-negative")
         with self._lock:
             rows = self._conn.execute(
-                "SELECT event_id, stream, seq, type, account_id, amount, schema_version, transfer_id, counterparty "
+                "SELECT event_id, stream, seq, type, account_id, amount, schema_version, transfer_id, counterparty, expires_at, release_reason "
                 "FROM events WHERE stream = ? AND seq > ? ORDER BY seq ASC",
                 (stream, after_seq),
             ).fetchall()
@@ -191,7 +194,7 @@ class SqliteEventStore:
         ``id`` so the consumer can persist an offset.
         """
         sql = (
-            "SELECT id, event_id, stream, seq, type, account_id, amount, schema_version, transfer_id, counterparty "
+            "SELECT id, event_id, stream, seq, type, account_id, amount, schema_version, transfer_id, counterparty, expires_at, release_reason "
             "FROM events WHERE id > ? ORDER BY id ASC"
         )
         params: tuple = (after_id,)
@@ -230,7 +233,7 @@ class SqliteEventStore:
             e["account_id"] = r["account_id"]
         if r["amount"] is not None:
             e["amount"] = int(r["amount"])
-        for column in ("transfer_id", "counterparty"):
+        for column in ("transfer_id", "counterparty", "expires_at", "release_reason"):
             if column in r.keys() and r[column] is not None:
                 e[column] = r[column]
         return e

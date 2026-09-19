@@ -1,0 +1,13 @@
+{
+  "id": 5,
+  "event_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  "stream": "account-fixture-1",
+  "seq": 4,
+  "type": "HoldPlaced",
+  "account_id": "fixture-1",
+  "amount": 25,
+  "transfer_id": "5f6e7d8c-9b0a-4c1d-8e2f-3a4b5c6d7e8f",
+  "counterparty": "fixture-2",
+  "expires_at": "2026-09-20T12:00:00+00:00",
+  "schema_version": 1
+}

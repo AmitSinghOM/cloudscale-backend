@@ -42,6 +42,7 @@ class StreamSnapshot:
                 "account_id": self.state.account_id,
                 "balance": self.state.balance,
                 "version": self.state.version,
+                "held": self.state.held,
             },
             separators=(",", ":"),
         )
@@ -53,6 +54,7 @@ class StreamSnapshot:
             account_id=data["account_id"],
             balance=int(data["balance"]),
             version=int(data["version"]),
+            held=int(data.get("held", 0)),
         )
 
 

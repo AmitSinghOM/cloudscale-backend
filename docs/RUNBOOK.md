@@ -11,6 +11,7 @@ verified from inside the service (e.g. your alerting stack), it says so.
 | HTTP tier | `uvicorn --factory cloudscale.entrypoints.http.main:build_app` | N replicas (PG tier) | liveness `GET /v1/health`, **readiness `GET /v1/ready`**, `GET /metrics` |
 | Consumer | `python -m cloudscale.entrypoints.consumer_loop` | N replicas, **one leader** | `:CLOUDSCALE_CONSUMER_METRICS_PORT/metrics` |
 | Migrations | `python -m cloudscale.entrypoints.migrate` | once per release | exit code |
+| Hold sweeper | `python scripts/sweep_holds.py --dsn …` | scheduled (cron/Job), any number concurrently | exit code; prints `expired=N skipped=M` |
 
 **Probes.** Point the orchestrator's *liveness* probe at `/v1/health` (process
 up, never touches storage) and its *readiness* probe at `/v1/ready`, which
@@ -255,3 +256,34 @@ Expected trace: standby logs `consumer.lease.acquired`, its
 `cloudscale_consumer_is_leader` goes to 1, lag drains. Verified by a
 two-process kill test during development (`SIGKILL` on the leader; standby
 drained five backlog events within one second).
+
+---
+
+## R11 — Holds: expiry is not happening, or `held` looks wrong
+
+Holds (ADR-0014) reserve funds; a hold past `expires_at` is released only when
+`scripts/sweep_holds.py` runs. Nothing in the fold reads a clock.
+
+1. **Holds never expire.** The sweeper is not scheduled or its DSN is wrong.
+   Run it by hand: `python scripts/sweep_holds.py --dsn <dsn>` (SQLite:
+   `--log <log> --projection <projection>`). Exit 2 means it could not open a
+   migrated database. `expired=0 skipped=0` with open holds visibly past
+   expiry means the consumer is behind (R2): the sweeper reads the `holds`
+   read model.
+2. **`skipped` is high.** Normal under concurrency: a skip is a hold that
+   another sweeper, a post or a void resolved first, or a stream whose
+   version moved between the sweeper's read and its command. The log is the
+   truth: `SELECT COUNT(*) FROM events WHERE type = 'HoldReleased' AND
+   release_reason = 'expired' AND transfer_id = '<hold_id>'` is 0 or 1, never
+   more, because the sweeper's command id is deterministic per hold.
+3. **`held` disagrees with the open holds.** `held` is folded from the
+   source stream's `Hold*` events with `HELD_SIGN`; the `holds` table is a
+   projection of the same events. Rebuild the projection (R7 rebuild
+   procedure) before suspecting the log; then compare `held` against
+   `SELECT SUM(amount) FROM holds WHERE source = ? AND state = 'open'`. If the
+   two agree and a client disagrees, the client is reading `balance` where it
+   should read `available`.
+4. **A post is refused with `hold_expired` but the sweeper has not released
+   it.** Correct: post checks the decision clock, release waits for the
+   sweeper. `available` is restored on the next sweep; void it manually if
+   the funds are needed sooner.

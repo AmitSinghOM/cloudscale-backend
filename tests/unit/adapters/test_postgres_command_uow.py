@@ -24,9 +24,12 @@ from cloudscale.application.command_service import normalize_command  # noqa: E4
 from cloudscale.application.ports import NormalizedCommand  # noqa: E402
 from cloudscale.domain.commands import (  # noqa: E402
     Deposit,
+    Hold,
     Leg,
     Post,
+    PostHold,
     Transfer,
+    VoidHold,
     Withdraw,
 )
 from cloudscale.domain.results import CommandOutcome  # noqa: E402
@@ -570,3 +573,93 @@ def test_post_legs_project_into_every_balance_on_postgres(
         )
     finally:
         feed.close()
+
+
+# -- holds (ADR-0014) ------------------------------------------------------------------
+
+
+def test_hold_lifecycle_on_postgres_and_read_model(
+    throwaway_dsn: str, account: str
+) -> None:
+    from cloudscale.adapters.postgres.projection_store import PostgresProjectionStore
+    from cloudscale.processes.resilient_consumer import ResilientConsumer
+
+    src, dst = f"{account}-src", f"{account}-dst"
+    uow = PostgresCommandUnitOfWork(throwaway_dsn)
+    try:
+        uow.execute(_request(Deposit(src, 100, 0)))
+        hold_id = uuid.uuid4()
+        placed = uow.execute(
+            _request(
+                Hold(src, dst, 40, 1, "2099-01-01T00:00:00+00:00"), command_id=hold_id
+            )
+        )
+        assert placed.outcome is CommandOutcome.ACCEPTED
+        assert _state(throwaway_dsn, src).held == 40
+        hold = _BoundStorageProbe(throwaway_dsn).open_hold(src, hold_id)
+        assert hold is not None and hold.counterparty == dst
+
+        posted = uow.execute(_request(PostHold(src, hold_id, 2, amount=25)))
+        assert posted.outcome is CommandOutcome.ACCEPTED
+        assert {p.account_id: p.committed_version for p in posted.postings} == {
+            dst: 1,
+            src: 4,
+        }
+        state = _state(throwaway_dsn, src)
+        assert (state.balance, state.held, state.available) == (75, 0, 75)
+        assert _state(throwaway_dsn, dst).balance == 25
+    finally:
+        uow.close()
+
+    # The consumer projects held and the per-hold read model.
+    feed = PostgresEventStore(throwaway_dsn)
+    projection = PostgresProjectionStore(throwaway_dsn, consumer=f"holds-{account}")
+    try:
+        ResilientConsumer(feed, projection).run()
+        balance = projection.balance(src)
+        assert (balance["balance"], balance["held"]) == (75, 0)
+        with psycopg.connect(throwaway_dsn) as conn:
+            (state_,) = conn.execute(
+                "SELECT state FROM holds WHERE hold_id = %s", (str(hold_id),)
+            ).fetchone()
+        assert state_ == "posted"
+    finally:
+        projection.close()
+        feed.close()
+
+
+class _BoundStorageProbe:
+    """Read-only access to the unit of work's derivations on a fresh connection."""
+
+    def __init__(self, dsn: str) -> None:
+        self._dsn = dsn
+
+    def open_hold(self, account_id: str, hold_id: UUID):
+        with psycopg.connect(self._dsn, row_factory=psycopg.rows.dict_row) as conn:
+            return _BoundStorage(conn, snapshot_every=0).open_hold(account_id, hold_id)
+
+
+def test_concurrent_post_and_void_of_one_hold_resolve_to_exactly_one_winner(
+    throwaway_dsn: str, account: str
+) -> None:
+    """The hold is derived from the log inside the transaction, so a post and a
+    void racing on the same hold cannot both apply."""
+    src, dst = f"{account}-s", f"{account}-d"
+    seed = PostgresCommandUnitOfWork(throwaway_dsn)
+    seed.execute(_request(Deposit(src, 100, 0)))
+    hold_id = uuid.uuid4()
+    seed.execute(
+        _request(Hold(src, dst, 40, 1, "2099-01-01T00:00:00+00:00"), command_id=hold_id)
+    )
+    seed.close()
+
+    outcomes = _race(
+        throwaway_dsn,
+        [_request(PostHold(src, hold_id, 2)), _request(VoidHold(src, hold_id, 2))],
+        rounds=1,
+    )[0]
+    assert sorted(o.value for o in outcomes) == ["accepted", "version_conflict"]
+    state = _state(throwaway_dsn, src)
+    assert state.held == 0
+    # Either the post won (balance 60, dst 40) or the void won (100, 0) -- never both.
+    assert (state.balance, _state(throwaway_dsn, dst).balance) in {(60, 40), (100, 0)}

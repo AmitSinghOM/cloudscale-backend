@@ -85,6 +85,36 @@ class AnchorNotDebitedError(DomainError):
     code = "anchor_not_debited"
 
 
+class HoldNotOpenError(DomainError):
+    """The named hold does not exist on this stream or is no longer open (ADR-0014)."""
+
+    code = "hold_not_open"
+
+
+class HoldExpiredError(DomainError):
+    """The hold's ``expires_at`` has passed; it can only be expired or voided (ADR-0014)."""
+
+    code = "hold_expired"
+
+
+class HoldNotExpiredError(DomainError):
+    """``ExpireHold`` before ``expires_at``; use ``VoidHold`` instead (ADR-0014)."""
+
+    code = "hold_not_expired"
+
+
+class CaptureExceedsHoldError(DomainError):
+    """``PostHold.amount`` is greater than the amount held (ADR-0014)."""
+
+    code = "capture_exceeds_hold"
+
+
+class InvalidExpiryError(DomainError):
+    """``expires_at`` is not a UTC ISO-8601 timestamp (ADR-0014)."""
+
+    code = "invalid_expiry"
+
+
 class UnknownCommandError(DomainError):
     """The aggregate received an unsupported command type."""
 
@@ -101,13 +131,18 @@ __all__ = [
     "AccountIdentityMismatchError",
     "AmountOutOfRangeError",
     "AnchorNotDebitedError",
+    "CaptureExceedsHoldError",
     "DomainError",
     "DuplicateAccountError",
+    "HoldExpiredError",
+    "HoldNotExpiredError",
+    "HoldNotOpenError",
     "InsufficientFundsError",
     "InvalidAccountIdError",
     "InvalidAccountStateError",
     "InvalidAmountError",
     "InvalidExpectedVersionError",
+    "InvalidExpiryError",
     "SameAccountError",
     "TooManyLegsError",
     "UnbalancedPostingError",

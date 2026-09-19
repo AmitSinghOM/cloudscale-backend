@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import Literal
+from uuid import UUID
 
 from .errors import (
     AmountOutOfRangeError,
@@ -12,6 +14,7 @@ from .errors import (
     InvalidAccountIdError,
     InvalidAmountError,
     InvalidExpectedVersionError,
+    InvalidExpiryError,
     SameAccountError,
     TooManyLegsError,
     UnbalancedPostingError,
@@ -168,16 +171,113 @@ class Post:
         return self.postings
 
 
-AccountCommand = Deposit | Withdraw | Transfer | Post
+def _validate_expires_at(value: object) -> None:
+    if not isinstance(value, str) or not value:
+        raise InvalidExpiryError("expires_at must be a UTC ISO-8601 string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise InvalidExpiryError("expires_at must be a UTC ISO-8601 string") from error
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise InvalidExpiryError("expires_at must be UTC")
+
+
+def _validate_uuid(value: object, field_name: str) -> None:
+    if not isinstance(value, UUID):
+        raise InvalidAccountIdError(f"{field_name} must be a UUID")
+
+
+@dataclass(frozen=True, slots=True)
+class Hold:
+    """Reserve ``amount`` on ``account_id`` for a later posting to the target (ADR-0014).
+
+    ``expires_at`` is absolute UTC text: the HTTP layer converts a TTL using
+    its clock so the domain never reads one. The hold id is the command id.
+    """
+
+    account_id: str
+    target_account_id: str
+    amount: int
+    expected_version: int
+    expires_at: str
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_account_id(self.target_account_id)
+        if self.account_id == self.target_account_id:
+            raise SameAccountError("a hold needs two different accounts")
+        _validate_amount(self.amount)
+        _validate_expected_version(self.expected_version)
+        _validate_expires_at(self.expires_at)
+
+
+@dataclass(frozen=True, slots=True)
+class PostHold:
+    """Settle an open hold: debit the reserved funds and credit the target (ADR-0014).
+
+    ``amount`` defaults to the full held amount; a smaller capture releases
+    the remainder in the same transaction.
+    """
+
+    account_id: str
+    hold_id: UUID
+    expected_version: int
+    amount: int | None = None
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_uuid(self.hold_id, "hold_id")
+        _validate_expected_version(self.expected_version)
+        if self.amount is not None:
+            _validate_amount(self.amount)
+
+
+@dataclass(frozen=True, slots=True)
+class VoidHold:
+    """Release an open hold without moving funds (the payer cancelled)."""
+
+    account_id: str
+    hold_id: UUID
+    expected_version: int
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_uuid(self.hold_id, "hold_id")
+        _validate_expected_version(self.expected_version)
+
+
+@dataclass(frozen=True, slots=True)
+class ExpireHold:
+    """Release an open hold whose ``expires_at`` has passed (the sweeper's command)."""
+
+    account_id: str
+    hold_id: UUID
+    expected_version: int
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_uuid(self.hold_id, "hold_id")
+        _validate_expected_version(self.expected_version)
+
+
+HoldCommand = Hold | PostHold | VoidHold | ExpireHold
+AccountCommand = (
+    Deposit | Withdraw | Transfer | Post | Hold | PostHold | VoidHold | ExpireHold
+)
 
 __all__ = [
     "MAX_LEGS",
     "AccountCommand",
     "Deposit",
     "Direction",
+    "ExpireHold",
+    "Hold",
+    "HoldCommand",
+    "Leg",
     "MAX_SIGNED_BIGINT",
     "Post",
-    "Leg",
+    "PostHold",
     "Transfer",
+    "VoidHold",
     "Withdraw",
 ]

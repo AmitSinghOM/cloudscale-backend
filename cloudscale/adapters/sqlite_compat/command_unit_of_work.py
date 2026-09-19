@@ -21,7 +21,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from cloudscale.adapters.compat import legacy_event_to_domain, transfer_leg_fields
+from cloudscale.adapters.compat import event_row_fields, legacy_event_to_domain
 from cloudscale.application.command_execution import execute_command_decision
 from cloudscale.application.ports import NormalizedCommand
 from cloudscale.application.snapshots import (
@@ -32,8 +32,19 @@ from cloudscale.application.snapshots import (
     log_snapshot_rejected,
     snapshot_rejection,
 )
-from cloudscale.domain.account import AccountState, fold
-from cloudscale.domain.events import AccountEvent, EventEnvelope
+from cloudscale.domain.account import (
+    AccountState,
+    OpenHold,
+    fold,
+    open_hold_from_events,
+)
+from cloudscale.domain.events import (
+    AccountEvent,
+    EventEnvelope,
+    HoldPlaced,
+    HoldPosted,
+    HoldReleased,
+)
 from cloudscale.domain.upcasting import upcast
 from cloudscale.domain.results import CommandResult
 
@@ -114,7 +125,8 @@ def _add_created_at_if_missing(conn: sqlite3.Connection) -> None:
             "ALTER TABLE events ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
         )
     # Transfer legs (ADR-0011) pair with each other on the row; NULL elsewhere.
-    for column in ("transfer_id", "counterparty"):
+    # Holds (ADR-0014) add their expiry and release reason the same way.
+    for column in ("transfer_id", "counterparty", "expires_at", "release_reason"):
         if column not in event_columns:
             conn.execute(f"ALTER TABLE events ADD COLUMN {column} TEXT")
 
@@ -126,11 +138,19 @@ def _stream_name(account_id: str) -> str:
 
 _SELECT_FROM_SEQ = (
     "SELECT seq, event_id, type, account_id, amount, transfer_id, counterparty, "
-    "schema_version FROM events WHERE stream = ? AND seq >= ? ORDER BY seq ASC"
+    "expires_at, release_reason, schema_version FROM events "
+    "WHERE stream = ? AND seq >= ? ORDER BY seq ASC"
 )
 _SELECT_ALL = (
     "SELECT seq, event_id, type, account_id, amount, transfer_id, counterparty, "
-    "schema_version FROM events WHERE stream = ? ORDER BY seq ASC"
+    "expires_at, release_reason, schema_version FROM events "
+    "WHERE stream = ? ORDER BY seq ASC"
+)
+_SELECT_HOLD = (
+    "SELECT type, account_id, amount, transfer_id, counterparty, expires_at, "
+    "release_reason, schema_version FROM events "
+    "WHERE stream = ? AND transfer_id = ? AND type IN "
+    "('HoldPlaced', 'HoldReleased', 'HoldPosted') ORDER BY seq ASC"
 )
 
 
@@ -213,6 +233,21 @@ class SqliteCommandUnitOfWork:
         self._tracker.folded(account_id, state, 0)
         return state
 
+    def open_hold(self, account_id: str, hold_id: UUID) -> OpenHold | None:
+        """Derive the open hold from this stream's own hold events (ADR-0014)."""
+        rows = self._conn.execute(
+            _SELECT_HOLD, (_stream_name(account_id), str(hold_id))
+        ).fetchall()
+        events = [legacy_event_to_domain(upcast(dict(r))) for r in rows]
+        return open_hold_from_events(
+            hold_id,
+            [
+                e
+                for e in events
+                if isinstance(e, (HoldPlaced, HoldReleased, HoldPosted))
+            ],
+        )
+
     def _read_snapshot(self, stream: str) -> StreamSnapshot | None:
         row = self._conn.execute(
             "SELECT seq, state_json, state_version, anchor_event_id "
@@ -248,12 +283,12 @@ class SqliteCommandUnitOfWork:
         )
 
     def append_event(self, envelope: EventEnvelope, event: AccountEvent) -> None:
-        transfer_id, counterparty = transfer_leg_fields(event)
+        transfer_id, counterparty, expires_at, reason = event_row_fields(event)
         self._conn.execute(
             "INSERT INTO events "
             "(event_id, stream, seq, type, account_id, amount, schema_version, "
-            "transfer_id, counterparty) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "transfer_id, counterparty, expires_at, release_reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(envelope.event_id),
                 _stream_name(event.account_id),
@@ -264,6 +299,8 @@ class SqliteCommandUnitOfWork:
                 envelope.schema_version,
                 transfer_id,
                 counterparty,
+                expires_at,
+                reason,
             ),
         )
         self._conn.execute(

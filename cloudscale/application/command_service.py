@@ -8,12 +8,32 @@ from collections.abc import Callable
 from typing import Final
 from uuid import UUID, uuid4
 
-from cloudscale.domain.commands import AccountCommand, Deposit, Post, Transfer, Withdraw
+from cloudscale.domain.commands import (
+    AccountCommand,
+    Deposit,
+    ExpireHold,
+    Hold,
+    Post,
+    PostHold,
+    Transfer,
+    VoidHold,
+    Withdraw,
+)
 from cloudscale.domain.results import CommandResult
 
 from .ports import CommandUnitOfWork, NormalizedCommand
 
 COMMAND_SCHEMA_VERSION: Final = 1
+_COMMAND_TYPES = (
+    Deposit,
+    Withdraw,
+    Transfer,
+    Post,
+    Hold,
+    PostHold,
+    VoidHold,
+    ExpireHold,
+)
 
 
 def canonical_command_payload(
@@ -26,8 +46,8 @@ def canonical_command_payload(
     metadata can change on a retry without changing the business request.
     """
 
-    if not isinstance(command, (Deposit, Withdraw, Transfer, Post)):
-        raise TypeError("command must be Deposit, Withdraw, Transfer or Post")
+    if not isinstance(command, _COMMAND_TYPES):
+        raise TypeError("command must be an AccountCommand")
     if not isinstance(issuer, str) or issuer == "":
         raise ValueError("issuer must be a non-empty string")
     if not isinstance(subject, str) or subject == "":
@@ -52,6 +72,15 @@ def canonical_command_payload(
             }
             for leg in command.postings
         ]
+    elif isinstance(command, Hold):
+        normalized["amount"] = command.amount
+        normalized["target_account_id"] = command.target_account_id
+        normalized["expires_at"] = command.expires_at
+    elif isinstance(command, PostHold):
+        normalized["hold_id"] = str(command.hold_id)
+        normalized["amount"] = command.amount  # None = capture the full hold
+    elif isinstance(command, (VoidHold, ExpireHold)):
+        normalized["hold_id"] = str(command.hold_id)
     else:
         normalized["amount"] = command.amount
     if isinstance(command, Transfer):

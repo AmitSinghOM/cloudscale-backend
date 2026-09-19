@@ -26,13 +26,28 @@ transaction so the fold can never go stale between read and append.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from cloudscale.domain.account import AccountState, decide, decide_postings
-from cloudscale.domain.commands import Post, Transfer
+from cloudscale.domain.account import (
+    AccountState,
+    OpenHold,
+    decide,
+    decide_hold,
+    decide_post_hold,
+    decide_postings,
+    decide_release_hold,
+)
+from cloudscale.domain.commands import (
+    ExpireHold,
+    Hold,
+    Post,
+    PostHold,
+    Transfer,
+    VoidHold,
+)
 from cloudscale.domain.errors import DomainError, InsufficientFundsError
 from cloudscale.domain.events import AccountEvent, EventEnvelope
 from cloudscale.domain.results import CommandOutcome, CommandResult, Posting
@@ -41,11 +56,15 @@ from .ports import NormalizedCommand
 
 
 class CommandDecisionStorage(Protocol):
-    """The four storage operations a command decision needs."""
+    """The storage operations a command decision needs."""
 
     def stored_result(self, command_id: UUID) -> CommandResult | None: ...
 
     def fold_stream(self, account_id: str) -> AccountState: ...
+
+    def open_hold(self, account_id: str, hold_id: UUID) -> OpenHold | None:
+        """The open hold derived from ``account_id``'s own events (ADR-0014)."""
+        ...
 
     def append_event(self, envelope: EventEnvelope, event: AccountEvent) -> None: ...
 
@@ -88,8 +107,9 @@ def execute_command_decision(
             created_at=clock(),
         )
 
+    occurred_at = clock()
     try:
-        legs = _decide_legs(storage, request, state)
+        legs = _decide_legs(storage, request, state, now=occurred_at)
     except DomainError as error:
         outcome, http_status = _rejection_for(error)
         return _persisted_rejection(
@@ -99,11 +119,10 @@ def execute_command_decision(
             error_code=error.code,
             http_status=http_status,
             current_version=state.version,
-            created_at=clock(),
+            created_at=occurred_at,
         )
 
-    occurred_at = clock()
-    postings: list[Posting] = []
+    postings: dict[str, Posting] = {}
     addressed: EventEnvelope | None = None
     for event, stream_version in legs:
         envelope = EventEnvelope.from_domain_event(
@@ -116,7 +135,11 @@ def execute_command_decision(
             command_id=request.command_id,
         )
         storage.append_event(envelope, event)
-        postings.append(Posting(event.account_id, envelope.event_id, stream_version))
+        # One posting per stream: when a command writes a stream twice (a
+        # partial hold capture, ADR-0014) the posting names the last event.
+        postings[event.account_id] = Posting(
+            event.account_id, envelope.event_id, stream_version
+        )
         if event.account_id == request.command.account_id:
             addressed = envelope
     if addressed is None:  # pragma: no cover - every command writes its own stream
@@ -134,14 +157,18 @@ def execute_command_decision(
         error_code=None,
         http_status=201,
         created_at=occurred_at,
-        postings=tuple(postings),
+        postings=tuple(postings.values()),
     )
     storage.persist_result(result)
     return result
 
 
 def _decide_legs(
-    storage: CommandDecisionStorage, request: NormalizedCommand, state: AccountState
+    storage: CommandDecisionStorage,
+    request: NormalizedCommand,
+    state: AccountState,
+    *,
+    now: datetime,
 ) -> list[tuple[AccountEvent, int]]:
     """Return the ``(event, stream_version)`` legs a valid command appends.
 
@@ -160,10 +187,43 @@ def _decide_legs(
         for leg in command.legs():
             if leg.account_id not in states:
                 states[leg.account_id] = storage.fold_stream(leg.account_id)
-        events = decide_postings(states, command, transfer_id=request.command_id)
-        legs = [(event, states[event.account_id].version + 1) for event in events]
-        return sorted(legs, key=lambda leg: leg[0].account_id)
+        events: tuple[AccountEvent, ...] = decide_postings(
+            states, command, transfer_id=request.command_id
+        )
+        return _number_legs(states, events)
+    if isinstance(command, Hold):
+        return [
+            (decide_hold(state, command, hold_id=request.command_id), state.version + 1)
+        ]
+    if isinstance(command, PostHold):
+        hold = storage.open_hold(command.account_id, command.hold_id)
+        # The target is known only from the hold itself; fold it once found.
+        target_id = hold.counterparty if hold is not None else command.account_id
+        states = {command.account_id: state}
+        if hold is not None:
+            states[target_id] = storage.fold_stream(target_id)
+        events = decide_post_hold(state, states[target_id], hold, command, now=now)
+        return _number_legs(states, events)
+    if isinstance(command, (VoidHold, ExpireHold)):
+        hold = storage.open_hold(command.account_id, command.hold_id)
+        released = decide_release_hold(state, hold, command, now=now)
+        return [(released, state.version + 1)]
     return [(decide(state, command), state.version + 1)]
+
+
+def _number_legs(
+    states: Mapping[str, AccountState], events: tuple[AccountEvent, ...]
+) -> list[tuple[AccountEvent, int]]:
+    """Assign each event its stream version (several may hit one stream) and sort.
+
+    ``sorted`` is stable, so two events on one stream keep their decision order.
+    """
+    next_version = {account: s.version for account, s in states.items()}
+    legs: list[tuple[AccountEvent, int]] = []
+    for event in events:
+        next_version[event.account_id] += 1
+        legs.append((event, next_version[event.account_id]))
+    return sorted(legs, key=lambda leg: leg[0].account_id)
 
 
 def _rejection_for(error: DomainError) -> tuple[CommandOutcome, int]:

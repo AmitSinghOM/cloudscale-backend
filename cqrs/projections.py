@@ -9,14 +9,14 @@ from __future__ import annotations
 
 from typing import Dict, List
 
-from cloudscale.domain.events import BALANCE_SIGN
+from cloudscale.domain.events import BALANCE_SIGN, HELD_SIGN
 
 
 class BalanceProjection:
-    """Folds account events into a ``{account_id, balance, version}`` dict."""
+    """Folds account events into a ``{account_id, balance, held, version}`` dict."""
 
     def initial(self) -> Dict:
-        return {"account_id": None, "balance": 0, "version": 0}
+        return {"account_id": None, "balance": 0, "held": 0, "version": 0}
 
     def apply(self, state: Dict, event: dict) -> Dict:
         """Return the next read-model state after applying ``event``."""
@@ -26,6 +26,7 @@ class BalanceProjection:
 
         # Unknown event types move nothing so projections stay forward-compatible.
         state["balance"] += BALANCE_SIGN.get(str(etype), 0) * event.get("amount", 0)
+        state["held"] += HELD_SIGN.get(str(etype), 0) * event.get("amount", 0)
 
         state["version"] += 1
         return state
