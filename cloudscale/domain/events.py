@@ -11,6 +11,7 @@ from types import MappingProxyType
 from typing import Literal, cast
 from uuid import UUID
 
+from .upcasting import CURRENT_SCHEMA_VERSION
 from .commands import (
     MAX_SIGNED_BIGINT,
     _validate_account_id,
@@ -205,17 +206,26 @@ class EventEnvelope:
         correlation_id: UUID,
         causation_id: UUID,
         command_id: UUID,
-        schema_version: int = 1,
+        schema_version: int | None = None,
     ) -> EventEnvelope:
-        """Protect one typed Account event with caller-assigned identities."""
+        """Protect one typed Account event with caller-assigned identities.
+
+        ``schema_version`` defaults to the shape this build writes for the
+        event's type (``CURRENT_SCHEMA_VERSION``, ADR-0009). It must never be
+        a literal: readers upcast *from* the stored stamp, so a writer that
+        stamps v1 on a v2-shaped payload corrupts every later fold.
+        """
 
         if not isinstance(event, (Deposited, Withdrawn)):
             raise ValueError("event must be Deposited or Withdrawn")
+        event_type = _event_type(event)
+        if schema_version is None:
+            schema_version = CURRENT_SCHEMA_VERSION[event_type]
         return cls(
             event_id=event_id,
             stream_id=event.account_id,
             stream_version=stream_version,
-            event_type=_event_type(event),
+            event_type=event_type,
             occurred_at=occurred_at,
             correlation_id=correlation_id,
             causation_id=causation_id,
