@@ -180,6 +180,67 @@ def test_dead_letter_and_redrive_roundtrip(
         projection.close()
 
 
+def test_concurrent_redrives_of_one_letter_apply_it_exactly_once(
+    throwaway_dsn: str, stream: str, consumer_name: str
+) -> None:
+    """Two operators (or two ``dlq.py redrive --all``) racing on the same letter.
+
+    The old shape read the payload, applied, then deleted: both racers read the
+    row and both applied. The claim is now the DELETE itself, so the loser sees
+    NOT_FOUND. Repeated because the race is timing-dependent.
+    """
+    import threading
+
+    parked = PostgresProjectionStore(throwaway_dsn, consumer=consumer_name)
+    racers = [
+        PostgresProjectionStore(throwaway_dsn, consumer=consumer_name, pool_max=1)
+        for _ in range(2)
+    ]
+    try:
+        for round_no in range(1, 6):
+            event = _deposit(stream, 10)
+            event["id"] = round_no
+            assert parked.dead_letter(event, ValueError("transient"), 3)
+
+            barrier = threading.Barrier(2)
+            outcomes: list[RedriveOutcome] = []
+            lock = threading.Lock()
+
+            def race(
+                store: PostgresProjectionStore, event_id: str = event["event_id"]
+            ) -> None:
+                barrier.wait()
+                outcome = store.redrive(event_id)
+                with lock:
+                    outcomes.append(outcome)
+
+            threads = [threading.Thread(target=race, args=(s,)) for s in racers]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+
+            assert sorted(o.value for o in outcomes) == sorted(
+                [RedriveOutcome.APPLIED.value, RedriveOutcome.NOT_FOUND.value]
+            ), outcomes
+            # The module-scoped database also holds other tests' letters
+            # (the roundtrip test parks a deliberately poisonous one), so
+            # check this event's letter specifically.
+            remaining = [
+                letter
+                for letter in parked.dead_letters()
+                if letter["event_id"] == event["event_id"]
+            ]
+            assert remaining == [], "the winner must have removed the letter"
+            assert parked.balance(stream)["balance"] == 10 * round_no, (
+                "the event was applied more than once"
+            )
+    finally:
+        parked.close()
+        for store in racers:
+            store.close()
+
+
 def test_writes_are_visible_to_a_second_connection_after_reads(
     throwaway_dsn: str, stream: str, consumer_name: str
 ) -> None:

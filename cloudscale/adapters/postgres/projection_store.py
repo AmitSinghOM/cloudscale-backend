@@ -176,20 +176,26 @@ class PostgresProjectionStore:
         return int(row["n"]) if row else 0
 
     def redrive(self, event_id: str) -> RedriveOutcome:
+        """Re-apply one parked event exactly once, even under concurrent redrives.
+
+        The letter is *claimed* by ``DELETE … RETURNING`` inside the same
+        transaction as the balance mutation: a second operator (or a second
+        ``dlq.py redrive --all``) racing on the same event blocks on the row
+        lock, then sees no row and reports ``NOT_FOUND`` instead of applying
+        the event a second time. A failed apply rolls the claim back, so the
+        letter stays parked and its attempt count is bumped.
+        """
         with self._pool.connection() as conn:
-            row = conn.execute(
-                "SELECT payload FROM dead_letters WHERE event_id = %s",
-                (event_id,),
-            ).fetchone()
-            if row is None:
-                return RedriveOutcome.NOT_FOUND
-            event = json.loads(row["payload"])
             try:
                 with conn.transaction():
+                    row = conn.execute(
+                        "DELETE FROM dead_letters WHERE event_id = %s RETURNING payload",
+                        (event_id,),
+                    ).fetchone()
+                    if row is None:
+                        return RedriveOutcome.NOT_FOUND
+                    event = json.loads(row["payload"])
                     self._apply_to_balance(conn, adapt_legacy_event(event))
-                    conn.execute(
-                        "DELETE FROM dead_letters WHERE event_id = %s", (event_id,)
-                    )
                 return RedriveOutcome.APPLIED
             except psycopg.OperationalError:
                 raise
