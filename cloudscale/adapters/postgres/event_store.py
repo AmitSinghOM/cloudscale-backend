@@ -31,6 +31,7 @@ import psycopg
 
 from cloudscale.adapters.postgres import schema
 from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
+from cloudscale.domain.upcasting import CURRENT_SCHEMA_VERSION
 from cqrs import ConcurrencyError
 
 _SCHEMA = schema.EVENTS + schema.OUTBOX
@@ -80,7 +81,12 @@ class PostgresEventStore:
                             event.get("type"),
                             event.get("account_id"),
                             event.get("amount"),
-                            int(event.get("schema_version", 1)),
+                            int(
+                                event.get("schema_version")
+                                # Absent stamp: the caller wrote the CURRENT shape for this
+                                # type (ADR-0009); unknown types keep the legacy 1.
+                                or CURRENT_SCHEMA_VERSION.get(str(event.get("type")), 1)
+                            ),
                         ),
                     )
             except psycopg.errors.UniqueViolation as exc:

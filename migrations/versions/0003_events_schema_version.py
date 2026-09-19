@@ -28,4 +28,23 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Dropping the column erases the only record of which shape each event was
+    # written in; a later re-upgrade would relabel every row v1 and readers
+    # would upcast v2 payloads as v1 -- the guess ADR-0009 forbids. Refuse
+    # unless nothing would be lost (every row is v1). Fail closed (ADR-0007).
+    op.execute(
+        """
+        DO $$
+        DECLARE newer BIGINT;
+        BEGIN
+            SELECT COUNT(*) INTO newer FROM events WHERE schema_version <> 1;
+            IF newer > 0 THEN
+                RAISE EXCEPTION
+                    'refusing to drop events.schema_version: % row(s) carry a '
+                    'version other than 1; downgrading would lose the shape '
+                    'they were written in', newer;
+            END IF;
+        END $$;
+        """
+    )
     op.execute("ALTER TABLE events DROP COLUMN IF EXISTS schema_version")

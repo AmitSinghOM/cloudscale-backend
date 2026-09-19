@@ -20,6 +20,8 @@ import threading
 import uuid
 from typing import List, Optional
 
+from cloudscale.domain.upcasting import CURRENT_SCHEMA_VERSION
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS events (
@@ -122,7 +124,12 @@ class SqliteEventStore:
                         event.get("type"),
                         event.get("account_id"),
                         event.get("amount"),
-                        int(event.get("schema_version", 1)),
+                        int(
+                            event.get("schema_version")
+                            # Absent stamp: the caller wrote the CURRENT shape for this
+                            # type (ADR-0009); unknown types keep the legacy 1.
+                            or CURRENT_SCHEMA_VERSION.get(str(event.get("type")), 1)
+                        ),
                     ),
                 )
                 self._conn.commit()
