@@ -6,8 +6,11 @@ integrator; the commit history says how.
 
 ## [Unreleased]
 
-Developer experience: from clone to a correct first integration without
-reading source.
+## [0.7.0] — 2026-09-19
+
+Double-entry transfers (ADR-0011), three four-role review passes with every
+finding fixed under a test, and the developer-experience surface: from clone
+to a correct first integration without reading source.
 
 ### Added
 - Double-entry transfers (ADR-0011): `POST /v1/accounts/{account_id}/transfers`
@@ -23,6 +26,22 @@ reading source.
   `examples/python_client.py` gains `transfer()` and a `DomainRejected`
   exception, and its walkthrough moves funds between two accounts and
   checks conservation; the quickstart smoke test asserts the transfer output.
+- `make dev` / `make token` / `make stop`: API + consumer on the SQLite tier
+  with a fixed local-only secret; `make token ARGS=--curl` prints a
+  paste-ready deposit. `make dev` refuses to start if the port is taken.
+- `compose.yaml`: production-shaped stack (PostgreSQL 17 → Alembic migrate →
+  API + consumer, `migrations` mode). CI brings it up and asserts
+  `/v1/ready`, an accepted deposit, and the balance read model.
+- `docs/CONFIGURATION.md`: every `CLOUDSCALE_*` variable with default and
+  production value; a test fails the build on undocumented or stale entries.
+- `docs/API_ERRORS.md`: every status and error code with the correct client
+  action; a test fails the build if a domain code or outcome is missing.
+- `docs/openapi.json`: the committed HTTP contract; a test fails the build
+  when the running app's schema drifts from it.
+- `examples/python_client.py`: copy-paste client showing same-`command_id`
+  retry, 409 handling, and read-your-write polling; exercised against a real
+  server by `tests/smoke/`.
+- `make help`; `.devcontainer/` for Codespaces / VS Code.
 
 ### Fixed
 - `docs/API_ERRORS.md`, `docs/ARCHITECTURE.md` and the OpenAPI contract promised
@@ -51,24 +70,6 @@ reading source.
   honours issuer/audience and bounds `--minutes`; startup warning when the
   public dev secret runs in production mode; plus five low-severity items.
 - `check_fresh_tree.sh` now works from inside a monorepo.
-
-### Added
-- `make dev` / `make token` / `make stop`: API + consumer on the SQLite tier
-  with a fixed local-only secret; `make token ARGS=--curl` prints a
-  paste-ready deposit. `make dev` refuses to start if the port is taken.
-- `compose.yaml`: production-shaped stack (PostgreSQL 17 → Alembic migrate →
-  API + consumer, `migrations` mode). CI brings it up and asserts
-  `/v1/ready`, an accepted deposit, and the balance read model.
-- `docs/CONFIGURATION.md`: every `CLOUDSCALE_*` variable with default and
-  production value; a test fails the build on undocumented or stale entries.
-- `docs/API_ERRORS.md`: every status and error code with the correct client
-  action; a test fails the build if a domain code or outcome is missing.
-- `docs/openapi.json`: the committed HTTP contract; a test fails the build
-  when the running app's schema drifts from it.
-- `examples/python_client.py`: copy-paste client showing same-`command_id`
-  retry, 409 handling, and read-your-write polling; exercised against a real
-  server by `tests/smoke/`.
-- `make help`; `.devcontainer/` for Codespaces / VS Code.
 
 ## [0.6.0] — 2026-09-13
 
@@ -144,7 +145,8 @@ fold (29.6× hot-path throughput).
 Phases 0–2: hexagonal core, idempotent command unit of work, resilient
 consumer with retry, circuit breaker and dead-letter redrive.
 
-[Unreleased]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.4.0...v0.5.0

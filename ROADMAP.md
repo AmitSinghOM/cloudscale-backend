@@ -321,13 +321,19 @@ a 30-day availability window; backup/restore rehearsal; live (restart-free)
 admin revocation; consumer partitioning by account hash; alert routing to a
 pager; independent penetration test; static security lint (`ruff` S rules).
 
-## Phase 6 — Longevity (seven-year horizon)  ·  🚧 started 2026-09-13 · v0.6.0 tagged
+## Phase 6 — Longevity (seven-year horizon)  ·  🚧 started 2026-09-13 · v0.6.0 tagged · v0.7.0 tagged 2026-09-19
 
 Governed by `docs/LONGEVITY.md`. The structure landed first (charter,
 ADR-0001..0010 reconstructing existing decisions, `CONTRIBUTING.md`,
 `AGENTS.md`, `CODEOWNERS`, `CHANGELOG.md`, governance-consistency tests).
 What follows turns each remaining *policy* item into an *enforced* one.
 
+- [x] **Double-entry transfers** (ADR-0011, 2026-09-19) — the first
+      capability added under the charter's ADR-before-code rule. Two
+      postings in one transaction, legs in account order (deadlock proven
+      and prevented on PostgreSQL), conservation as a Hypothesis property,
+      Alembic `0004` with a guarded downgrade. Released as v0.7.0 with the
+      three review passes recorded under `docs/reviews/`.
 - [x] **Longevity structure** (2026-09-13) — as above; ADR index and status
       lines checked by `tests/architecture/test_governance_docs.py`.
 - [x] **Event upcasters** (ADR-0009, 2026-09-13) — `domain/upcasting.py`

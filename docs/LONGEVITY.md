@@ -120,4 +120,7 @@ year after its target date is either enforced, given a new dated plan with
 a written reason, or removed. Aspirations that nobody enforces are deleted,
 not carried.
 
-*Adopted 2026-09-13 at v0.5.1; reviewed at v0.6.0 the same day (four policy items became enforced).*
+*Adopted 2026-09-13 at v0.5.1; reviewed at v0.6.0 the same day (four policy items became enforced);
+reviewed at v0.7.0 on 2026-09-19 (no item past its target date; the "public contract change
+references an ADR" item was relabelled from enforced to policy with a dated plan, and ADR-0011
+was written before its code as that policy requires).*
