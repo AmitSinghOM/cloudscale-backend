@@ -408,6 +408,12 @@ def create_app(
             # deploy). Not a client error and not transient storage: the fix
             # is redeploying the newer build. 503 tells the client to retry
             # later; the account is frozen, never corrupted (RUNBOOK R1).
+            # The request log and metrics only see "503": name the cause here
+            # so operators can tell this from a storage outage.
+            _LOGGER.error(
+                "event schema newer than this build; redeploy the newer build",
+                extra={"account_id": account_id, "error": str(error)[:500]},
+            )
             raise HTTPException(
                 status_code=503,
                 detail="command path unavailable (event schema newer than this build)",

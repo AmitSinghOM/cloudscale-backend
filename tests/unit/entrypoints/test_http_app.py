@@ -289,10 +289,16 @@ def test_end_to_end_command_to_consumer_to_query(stack: _Stack) -> None:
     }
 
 
-def test_future_schema_event_in_stream_maps_to_503_not_500(stack: _Stack) -> None:
+def test_future_schema_event_in_stream_maps_to_503_not_500(
+    stack: _Stack, caplog
+) -> None:
     """A rolled-back deploy leaves newer-schema events in the log. The command
-    path must say 'retry later' (503), never leak a 500 (ADR-0009, RUNBOOK R1)."""
+    path must say 'retry later' (503), never leak a 500 (ADR-0009, RUNBOOK R1),
+    and must tell operators WHY -- the request log and metrics only see 503."""
+    import logging
     import sqlite3
+
+    caplog.set_level(logging.ERROR, logger="cloudscale.http")
 
     conn = sqlite3.connect(stack.log_path)
     conn.execute(
@@ -308,6 +314,9 @@ def test_future_schema_event_in_stream_maps_to_503_not_500(stack: _Stack) -> Non
     assert response.status_code == 503
     assert "newer than this build" in response.json()["detail"]
     assert int(response.headers["Retry-After"]) >= 1
+    [record] = [r for r in caplog.records if "schema newer" in r.getMessage()]
+    assert record.levelno == logging.ERROR
+    assert record.account_id == "acct-9"  # type: ignore[attr-defined]
 
 
 def test_public_dev_secret_in_production_mode_is_warned_not_refused() -> None:
