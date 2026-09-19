@@ -55,10 +55,12 @@ def _unauthorized(detail: str) -> HTTPException:
     )
 
 
-def _rejected(request: Request, reason: str, **fields: object) -> None:
-    """Operator-side record of an authentication/authorization rejection.
+def _reject(
+    request: Request, reason: str, detail: str = _INVALID_TOKEN, **fields: object
+) -> HTTPException:
+    """Record an authentication rejection and build the 401 to raise for it.
 
-    The client always sees the same fixed 401 message (no oracle); the
+    The client always sees a fixed message (``detail``, no oracle); the
     operator log carries a short controlled-vocabulary ``reason`` -- the
     parser's exception class name (``ExpiredSignatureError``,
     ``InvalidIssuerError``, ...) or one of ``missing_bearer``,
@@ -78,6 +80,7 @@ def _rejected(request: Request, reason: str, **fields: object) -> None:
             **fields,
         },
     )
+    return _unauthorized(detail)
 
 
 def _get_settings(request: Request) -> HttpSettings:
@@ -119,8 +122,7 @@ def authenticate(
     authorization = request.headers.get("Authorization", "")
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
-        _rejected(request, "missing_bearer")
-        raise _unauthorized("missing bearer token")
+        raise _reject(request, "missing_bearer", detail="missing bearer token")
     required = ["sub", "exp", "iss", "iat"]
     if settings.jwt_audience is not None:
         required.append("aud")
@@ -132,18 +134,15 @@ def authenticate(
         # One fixed message to the client: never echo the parser's exception
         # class. The operator log gets the class name (e.g. ExpiredSignatureError,
         # InvalidIssuerError) -- it names the failure family, not the token.
-        _rejected(request, type(error).__name__)
-        raise _unauthorized(_INVALID_TOKEN) from error
+        raise _reject(request, type(error).__name__) from error
 
     lifetime = _int_claim(claims, "exp") - _int_claim(claims, "iat")
     if lifetime > settings.jwt_max_lifetime_seconds:
-        _rejected(request, "lifetime_exceeded", lifetime_seconds=lifetime)
-        raise _unauthorized(_INVALID_TOKEN)
+        raise _reject(request, "lifetime_exceeded", lifetime_seconds=lifetime)
 
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject:
-        _rejected(request, "missing_subject")
-        raise _unauthorized(_INVALID_TOKEN)
+        raise _reject(request, "missing_subject")
     scope_value = claims.get("scope", "")
     if not isinstance(scope_value, str):
         raise _unauthorized("token claim 'scope' must be a string")
@@ -152,12 +151,15 @@ def authenticate(
     if ADMIN_SCOPE in scopes:
         jti = claims.get("jti")
         if not isinstance(jti, str) or not jti:
-            _rejected(request, "admin_without_jti", subject=subject)
-            raise _unauthorized("admin-scoped tokens must carry a jti")
+            raise _reject(
+                request,
+                "admin_without_jti",
+                detail="admin-scoped tokens must carry a jti",
+                subject=subject,
+            )
         if jti in settings.jwt_revoked_jtis:
             # A revoked admin token still in use is a security event, not noise.
-            _rejected(request, "revoked", subject=subject, jti=jti)
-            raise _unauthorized(_INVALID_TOKEN)
+            raise _reject(request, "revoked", subject=subject, jti=jti)
 
     return Principal(
         issuer=str(claims["iss"]),
