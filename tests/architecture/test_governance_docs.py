@@ -87,3 +87,12 @@ def test_governance_documents_exist() -> None:
         "docs/adr/TEMPLATE.md",
     ):
         assert (ROOT / relative).is_file(), relative
+
+
+def test_upcasting_module_names_the_snapshot_state_version_rule() -> None:
+    """ADR-0012: an upcaster that changes fold semantics must bump
+    CURRENT_STATE_VERSION. The rule lives where the author of such a step
+    will read it -- the upcasting module's docstring -- and this test keeps
+    it there."""
+    text = (ROOT / "cloudscale" / "domain" / "upcasting.py").read_text()
+    assert "CURRENT_STATE_VERSION" in text and "ADR-0012" in text

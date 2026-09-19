@@ -81,7 +81,7 @@ upcasting module's docstring so the second rule is not forgotten.
 **Operations.** `scripts/snapshots.py <sqlite-path|postgresql-dsn>
 {stats | drop <stream> | drop --all}` dispatches on the DSN from day one
 and, on PostgreSQL, refuses to run against an unmigrated database (the
-review-4 rule for `dlq.py`). Dropping is always safe. `RUNBOOK.md` R7:
+review-4 rule for `dlq.py`). Dropping is always safe. `RUNBOOK.md` R10:
 if a balance disagrees with a full replay, drop the snapshot and re-read;
 if the disagreement persists it is not the snapshot.
 
@@ -118,8 +118,36 @@ if the disagreement persists it is not the snapshot.
 ## Depth benchmark
 
 `scripts/bench_depth.py` executes one `Withdraw(1)` against a stream of
-depth *d* after warming it, 200 samples per point, and reports p50/p99
-with `CLOUDSCALE_SNAPSHOT_EVERY=0` and `=100`. Numbers recorded at commit
-time on the development host (single process, PostgreSQL 17 local):
+depth *d* after seeding it, 200 samples per point, and reports p50/p99
+with `CLOUDSCALE_SNAPSHOT_EVERY=0` and `=100`. Recorded 2026-09-19 at
+commit time on the development host (Apple silicon, single process,
+PostgreSQL 17.10 local, host load ~5/core from concurrent work — absolute
+numbers are indicative; the *shape* is the evidence):
 
-BENCHMARK_TABLE_PLACEHOLDER
+| Tier | snapshot_every | depth | p50 ms | p99 ms |
+|---|---:|---:|---:|---:|
+| SQLite | 0 | 1 | 0.644 | 1.615 |
+| SQLite | 0 | 1,001 | 4.405 | 6.271 |
+| SQLite | 0 | 2,000 | 8.070 | 10.826 |
+| SQLite | 0 | 20,000 | 75.010 | 108.500 |
+| SQLite | 100 | 1 | 0.454 | 1.108 |
+| SQLite | 100 | 1,001 | 0.424 | 0.930 |
+| SQLite | 100 | 2,000 | 0.434 | 0.800 |
+| SQLite | 100 | 20,000 | 0.471 | 4.452 |
+| PostgreSQL | 0 | 1 | 2.032 | 9.072 |
+| PostgreSQL | 0 | 1,001 | 7.798 | 19.848 |
+| PostgreSQL | 0 | 2,000 | 12.130 | 32.519 |
+| PostgreSQL | 0 | 20,000 | not run | not run |
+| PostgreSQL | 100 | 1 | 1.291 | 2.473 |
+| PostgreSQL | 100 | 1,001 | 1.352 | 1.981 |
+| PostgreSQL | 100 | 2,000 | 1.256 | 1.941 |
+| PostgreSQL | 100 | 20,000 | 1.289 | 2.203 |
+
+Reading: without snapshots the command path is linear in depth on both
+tiers (SQLite 117× from depth 1 to 20,000; PostgreSQL 6× to 2,000), and
+seeding is quadratic — the SQLite `every=0` run took 13 min 17 s of which
+almost all was seeding 20,000 events, versus 11.6 s for the same run with
+snapshots. The PostgreSQL `every=0` cell at depth 20,000 was not run: its
+seeding alone projects to over 30 minutes (~2×10⁸ row reads over the
+wire) and would measure the same quadratic already shown at 2,000. With
+`every=100`, p50 is flat within noise at every depth on both tiers.

@@ -127,6 +127,7 @@ under `evidence/<sha>/`; targets and alerts in `docs/SLO.md`.
 | Add a command type | `domain/commands.py`, `domain/account.py`, `application/command_execution.py` | ADR; `docs/API_ERRORS.md`; `docs/openapi.json` regenerates |
 | Add an event type | `domain/events.py` (type, payload, `BALANCE_SIGN`), `domain/upcasting.py` (`CURRENT_SCHEMA_VERSION`), `adapters/compat.py`, a `tests/fixtures/events/<Type>.v1.json` | every balance projection reads `BALANCE_SIGN`; the corpus test fails until the fixture exists |
 | Change an event's shape | bump `CURRENT_SCHEMA_VERSION`, register an upcaster, add the fixture | ADR-0009; the corpus test tells you what is missing |
+| Change `AccountState` or how an existing event folds | bump `CURRENT_STATE_VERSION` in `domain/account.py` | ADR-0012; stale snapshots are discarded and refolded, never upcast |
 | Add a table or column | `adapters/postgres/schema.py` **and** a new Alembic revision, bump `CURRENT_REVISION` | parity test asserts both paths match |
 | Add a setting | `HttpSettings` or `os.environ` | `docs/CONFIGURATION.md` (test enforces) |
 | Add a projection | implement `apply(event) -> bool` + `dead_letter(...)` | consumer name → own lease |

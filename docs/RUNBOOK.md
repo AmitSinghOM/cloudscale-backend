@@ -217,10 +217,33 @@ derived:
 - `outbox` + `events.published` — rebuildable: truncate `outbox`, set
   `published = false`, the relay republishes in id order.
 - `dead_letters`, `accounts`, `rate_limit_buckets` — small; include in backups.
+- `stream_snapshots` — a cache (ADR-0012). Safe to exclude or truncate; a
+  restore from a different dump is detected per stream (anchor mismatch is
+  logged at WARNING and the stream is refolded from `events`).
 
 Use `pg_dump` of the whole database at a consistent snapshot; restore with
 `pg_restore`, then `migrate current` to confirm the revision matches the
 build before starting processes in `migrations` mode.
+
+---
+
+## R10 — A balance disagrees with a full replay
+
+Symptom: a `GET .../balance` or a command decision disagrees with what a
+hand fold of `events` for that stream says.
+
+1. Drop the stream's snapshot and re-read:
+   `python scripts/snapshots.py <log-path-or-dsn> drop <account_id>`.
+   The next fold is a full fold from `seq = 1` and writes a fresh snapshot.
+2. If the disagreement persists, the snapshot was not the cause. Look at
+   the log itself (`events` ordering, a stuck consumer per R2, a dead
+   letter per R3) — do not edit `stream_snapshots` by hand, and never edit
+   `events`.
+3. `grep snapshot.rejected` in the API log tells you *why* a snapshot was
+   discarded (state-version change, anchor mismatch after a restore,
+   truncation). A steady stream of rejections for one account means every
+   command on it is paying a full fold; `stats` shows whether snapshots are
+   being written at all (`CLOUDSCALE_SNAPSHOT_EVERY=0` disables writing).
 
 ---
 
