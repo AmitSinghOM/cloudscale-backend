@@ -39,6 +39,20 @@ _SCHEMA = schema.EVENTS + schema.OUTBOX
 _RELAY_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('cloudscale_outbox_relay'))"
 
 
+def _stamp_for(event: dict) -> int:
+    """schema_version to store for ``event``.
+
+    Absent means the caller wrote the CURRENT shape for this type (ADR-0009);
+    unknown types keep the legacy 1. A present value is stored as given --
+    never "corrected" -- so an invalid stamp surfaces at read time instead of
+    being silently relabelled.
+    """
+    stamp = event.get("schema_version")
+    if stamp is None:
+        return CURRENT_SCHEMA_VERSION.get(str(event.get("type")), 1)
+    return int(stamp)
+
+
 class PostgresEventStore:
     """Durable, append-only event log on PostgreSQL with an outbox feed."""
 
@@ -81,12 +95,7 @@ class PostgresEventStore:
                             event.get("type"),
                             event.get("account_id"),
                             event.get("amount"),
-                            int(
-                                event.get("schema_version")
-                                # Absent stamp: the caller wrote the CURRENT shape for this
-                                # type (ADR-0009); unknown types keep the legacy 1.
-                                or CURRENT_SCHEMA_VERSION.get(str(event.get("type")), 1)
-                            ),
+                            _stamp_for(event),
                         ),
                     )
             except psycopg.errors.UniqueViolation as exc:
