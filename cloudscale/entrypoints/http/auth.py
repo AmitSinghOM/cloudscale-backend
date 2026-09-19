@@ -18,6 +18,7 @@ Anything else is 403.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import jwt
@@ -26,6 +27,8 @@ from fastapi import Depends, HTTPException, Request
 from cloudscale.application.ports import AccountRegistry
 from cloudscale.entrypoints.http.settings import HttpSettings
 from cloudscale.entrypoints.http.verifiers import TokenVerifier
+
+_LOGGER = logging.getLogger("cloudscale.http.auth")
 
 ADMIN_SCOPE = "accounts:admin"
 _INVALID_TOKEN = "invalid or expired bearer token"  # noqa: S105 — error message, not a secret
@@ -49,6 +52,28 @@ def _unauthorized(detail: str) -> HTTPException:
         status_code=401,
         detail=detail,
         headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+def _rejected(request: Request, reason: str, **fields: object) -> None:
+    """Operator-side record of an authentication/authorization rejection.
+
+    The client always sees the same fixed 401 message (no oracle); the
+    operator log carries a short controlled-vocabulary ``reason`` -- never
+    the token or the parser's message -- so a spike of ``expired`` (client
+    clocks), ``issuer_mismatch`` (a rotation gone wrong) or ``revoked``
+    (a revoked admin token still in use) can be told apart. Volume is
+    bounded by the pre-auth client rate limit, which runs before this code.
+    """
+    client = request.client
+    _LOGGER.warning(
+        "auth.rejected",
+        extra={
+            "reason": reason,
+            "route": request.url.path,
+            "client": client.host if client else None,
+            **fields,
+        },
     )
 
 
@@ -91,6 +116,7 @@ def authenticate(
     authorization = request.headers.get("Authorization", "")
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
+        _rejected(request, "missing_bearer")
         raise _unauthorized("missing bearer token")
     required = ["sub", "exp", "iss", "iat"]
     if settings.jwt_audience is not None:
@@ -100,15 +126,20 @@ def authenticate(
             token.strip(), required_claims=required, audience=settings.jwt_audience
         )
     except jwt.InvalidTokenError as error:
-        # One fixed message: never echo the parser's exception class.
+        # One fixed message to the client: never echo the parser's exception
+        # class. The operator log gets the class name (e.g. ExpiredSignatureError,
+        # InvalidIssuerError) -- it names the failure family, not the token.
+        _rejected(request, type(error).__name__)
         raise _unauthorized(_INVALID_TOKEN) from error
 
     lifetime = _int_claim(claims, "exp") - _int_claim(claims, "iat")
     if lifetime > settings.jwt_max_lifetime_seconds:
+        _rejected(request, "lifetime_exceeded", lifetime_seconds=lifetime)
         raise _unauthorized(_INVALID_TOKEN)
 
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject:
+        _rejected(request, "missing_subject")
         raise _unauthorized(_INVALID_TOKEN)
     scope_value = claims.get("scope", "")
     if not isinstance(scope_value, str):
@@ -118,8 +149,11 @@ def authenticate(
     if ADMIN_SCOPE in scopes:
         jti = claims.get("jti")
         if not isinstance(jti, str) or not jti:
+            _rejected(request, "admin_without_jti", subject=subject)
             raise _unauthorized("admin-scoped tokens must carry a jti")
         if jti in settings.jwt_revoked_jtis:
+            # A revoked admin token still in use is a security event, not noise.
+            _rejected(request, "revoked", subject=subject, jti=jti)
             raise _unauthorized(_INVALID_TOKEN)
 
     return Principal(
@@ -152,6 +186,10 @@ def authorize_account(
         return
     if registry is not None and registry.owner_of(account_id) == principal.subject:
         return
+    _LOGGER.warning(
+        "authz.denied",
+        extra={"subject": principal.subject, "account_id": account_id},
+    )
     raise HTTPException(
         status_code=403, detail="principal is not authorized for this account"
     )
