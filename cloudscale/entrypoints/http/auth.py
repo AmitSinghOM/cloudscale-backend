@@ -59,11 +59,14 @@ def _rejected(request: Request, reason: str, **fields: object) -> None:
     """Operator-side record of an authentication/authorization rejection.
 
     The client always sees the same fixed 401 message (no oracle); the
-    operator log carries a short controlled-vocabulary ``reason`` -- never
-    the token or the parser's message -- so a spike of ``expired`` (client
-    clocks), ``issuer_mismatch`` (a rotation gone wrong) or ``revoked``
-    (a revoked admin token still in use) can be told apart. Volume is
-    bounded by the pre-auth client rate limit, which runs before this code.
+    operator log carries a short controlled-vocabulary ``reason`` -- the
+    parser's exception class name (``ExpiredSignatureError``,
+    ``InvalidIssuerError``, ...) or one of ``missing_bearer``,
+    ``lifetime_exceeded``, ``missing_subject``, ``admin_without_jti``,
+    ``revoked`` -- never the token or the parser's message -- so a spike of
+    expiries (client clocks), issuer mismatches (a rotation gone wrong) or a
+    revoked admin token still in use can be told apart. Volume is bounded by
+    the pre-auth client rate limit, which runs before this code.
     """
     client = request.client
     _LOGGER.warning(

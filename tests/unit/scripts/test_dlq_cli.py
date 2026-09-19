@@ -20,9 +20,12 @@ import pytest
 
 psycopg = pytest.importorskip("psycopg")
 
+from alembic import command  # noqa: E402
+
 from cloudscale.adapters.postgres.projection_store import (  # noqa: E402
     PostgresProjectionStore,
 )
+from cloudscale.entrypoints.migrate import alembic_config  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[3]
 DLQ = ROOT / "scripts" / "dlq.py"
@@ -60,9 +63,16 @@ def _dlq(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _migrate(dsn: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CLOUDSCALE_PG_DSN", dsn)
+    command.upgrade(alembic_config(), "head")
+
+
 def test_operator_can_list_show_and_redrive_on_the_postgres_tier(
-    fresh_dsn: str,
+    fresh_dsn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    _migrate(fresh_dsn, monkeypatch)
+    monkeypatch.setenv("CLOUDSCALE_PG_SCHEMA", "migrations")
     store = PostgresProjectionStore(fresh_dsn, pool_max=1)
     try:
         parked = store.dead_letter(
@@ -102,3 +112,19 @@ def test_operator_can_list_show_and_redrive_on_the_postgres_tier(
 def test_missing_sqlite_path_is_still_reported_as_not_found(tmp_path: Path) -> None:
     result = _dlq(str(tmp_path / "absent.db"), "list")
     assert result.returncode == 2 and "database not found" in result.stderr
+
+
+def test_cli_never_creates_schema_in_an_unmigrated_database(
+    fresh_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0007: an operator tool pointed at the wrong (empty) database must
+    refuse, not quietly create the whole schema there under its credentials."""
+    monkeypatch.delenv("CLOUDSCALE_PG_SCHEMA", raising=False)
+    result = _dlq(fresh_dsn, "list")
+    assert result.returncode == 2
+    assert "not a migrated cloudscale database" in result.stderr
+    with psycopg.connect(fresh_dsn) as conn:
+        tables = conn.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public'"
+        ).fetchone()
+    assert tables is not None and tables[0] == 0, "the tool created tables"

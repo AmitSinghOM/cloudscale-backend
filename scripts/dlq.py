@@ -18,6 +18,7 @@ letter that fails again stays parked with an incremented attempt count.
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import sys
 from pathlib import Path
@@ -27,6 +28,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from cloudscale.adapters.postgres.pool import SchemaNotMigratedError  # noqa: E402
 from cloudscale.adapters.sqlite_compat.dead_letter_store import (  # noqa: E402
     DeadLetteringProjectionStore,
     RedriveOutcome,
@@ -144,6 +146,13 @@ def _is_postgres(target: str) -> bool:
 def _open_store(target: str, consumer: str) -> DeadLetterQueue:
     """The projection store for ``target``: PostgreSQL by DSN, SQLite by path."""
     if _is_postgres(target):
+        # An operator tool must never create schema (ADR-0007: Alembic is the
+        # only way schema reaches production). The adapter's default mode is
+        # ``auto`` (CREATE ... IF NOT EXISTS under the operator's credentials);
+        # force ``migrations`` unless the operator set it explicitly, so a
+        # mistyped DSN fails with SchemaNotMigratedError instead of quietly
+        # growing a full schema in the wrong database.
+        os.environ.setdefault("CLOUDSCALE_PG_SCHEMA", "migrations")
         from cloudscale.adapters.postgres.projection_store import (
             PostgresProjectionStore,
         )
@@ -160,6 +169,9 @@ def main(arguments: Sequence[str] | None = None) -> int:
         store = _open_store(args.db_path, args.consumer)
     except FileNotFoundError:
         print(f"database not found: {args.db_path}", file=sys.stderr)
+        return EXIT_NOT_FOUND
+    except SchemaNotMigratedError as error:
+        print(f"not a migrated cloudscale database: {error}", file=sys.stderr)
         return EXIT_NOT_FOUND
     try:
         if args.command == "list":
