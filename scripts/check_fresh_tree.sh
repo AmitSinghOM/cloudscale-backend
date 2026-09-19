@@ -33,7 +33,8 @@ make install-dev > install.log 2>&1 || { echo "INSTALL FAILED; see $work/install
 echo "== make check"
 if make check > check.log 2>&1; then
   tail -1 check.log
-  echo "fresh tree OK ($work)"
+  echo "fresh tree OK (export removed)"
+  cd / && rm -rf "$work"
 else
   echo "CHECK FAILED; see $work/check.log"
   grep -E "^E  |FAILED|error" check.log | head -10
