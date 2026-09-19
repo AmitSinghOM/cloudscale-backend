@@ -10,6 +10,14 @@ Developer experience: from clone to a correct first integration without
 reading source.
 
 ### Fixed
+- Review 4 (operator tooling, logging, supply chain, redrive; `docs/reviews/2026-09-19-review4-operators.md`):
+  `scripts/dlq.py` works on the PostgreSQL tier by DSN (RUNBOOK R1 was unexecutable in
+  production) and never creates schema; PostgreSQL redrive claims the letter atomically
+  so concurrent redrives cannot double-apply; authentication and authorization
+  rejections are logged for operators with a controlled vocabulary (client message
+  unchanged); every shipped fixed secret is a known development secret, enforced by a
+  test; all GitHub Actions pinned by commit SHA; `check_fresh_tree.sh` removes its
+  export on success.
 - Review 3 (longevity range v0.5.1..v0.6.0, `docs/reviews/2026-09-19-longevity-review.md`):
   event writers stamp `schema_version` from `CURRENT_SCHEMA_VERSION` instead of a
   literal 1 (the first real schema bump would otherwise have corrupted every
