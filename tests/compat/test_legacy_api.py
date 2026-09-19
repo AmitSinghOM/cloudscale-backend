@@ -131,6 +131,7 @@ def test_sqlite_adapters_preserve_feed_dedupe_and_checkpoint_semantics() -> None
         assert projection_store.balance("a1") == {
             "account_id": "a1",
             "balance": 40,
+            "held": 0,
             "version": 1,
         }
     finally:

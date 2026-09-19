@@ -1,13 +1,22 @@
 """Immutable commands accepted by the Account aggregate."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass
+from typing import Literal
+from uuid import UUID
 
 from .errors import (
     AmountOutOfRangeError,
+    AnchorNotDebitedError,
+    DuplicateAccountError,
     InvalidAccountIdError,
     InvalidAmountError,
     InvalidExpectedVersionError,
+    InvalidExpiryError,
     SameAccountError,
+    TooManyLegsError,
+    UnbalancedPostingError,
 )
 
 MAX_SIGNED_BIGINT = 2**63 - 1
@@ -74,7 +83,8 @@ class Transfer:
     ``account_id`` is the source — the stream whose funds are at risk and the
     only one whose ``expected_version`` the caller supplies. The target is
     guarded by the storage's ``UNIQUE (stream, seq)`` inside the same
-    transaction.
+    transaction. A transfer is the two-leg case of :class:`Post` (ADR-0013);
+    :meth:`legs` gives that view so one decision function serves both.
     """
 
     account_id: str
@@ -90,7 +100,179 @@ class Transfer:
         _validate_amount(self.amount)
         _validate_expected_version(self.expected_version)
 
+    def legs(self) -> tuple[Leg, Leg]:
+        return (
+            Leg(self.account_id, self.amount, "debit"),
+            Leg(self.target_account_id, self.amount, "credit"),
+        )
 
-AccountCommand = Deposit | Withdraw | Transfer
 
-__all__ = ["AccountCommand", "Deposit", "MAX_SIGNED_BIGINT", "Transfer", "Withdraw"]
+#: Public limit on legs per posting set (ADR-0013). Documented in API_ERRORS.
+MAX_LEGS = 16
+
+Direction = Literal["debit", "credit"]
+
+
+@dataclass(frozen=True, slots=True)
+class Leg:
+    """One leg of a posting set: which account, how much, which way (ADR-0013)."""
+
+    account_id: str
+    amount: int
+    direction: Direction
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_amount(self.amount)
+        if self.direction not in ("debit", "credit"):
+            raise InvalidAmountError("direction must be 'debit' or 'credit'")
+
+
+@dataclass(frozen=True, slots=True)
+class Post:
+    """Request to commit a balanced set of 2..MAX_LEGS postings atomically (ADR-0013).
+
+    ``account_id`` is the anchor: the caller's authorized account, the only
+    one whose ``expected_version`` is supplied, and it must be debited — money
+    leaves the anchor, so a caller cannot move funds between accounts it does
+    not own by naming its own account as a decorative leg.
+    """
+
+    account_id: str
+    postings: tuple[Leg, ...]
+    expected_version: int
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_expected_version(self.expected_version)
+        if not isinstance(self.postings, tuple):
+            object.__setattr__(self, "postings", tuple(self.postings))
+        if len(self.postings) < 2:
+            raise UnbalancedPostingError("a posting set needs at least two legs")
+        if len(self.postings) > MAX_LEGS:
+            raise TooManyLegsError(f"a posting set may have at most {MAX_LEGS} legs")
+        accounts = [leg.account_id for leg in self.postings]
+        if len(set(accounts)) != len(accounts):
+            raise DuplicateAccountError("each account may appear in one leg only")
+        debits = sum(leg.amount for leg in self.postings if leg.direction == "debit")
+        credits = sum(leg.amount for leg in self.postings if leg.direction == "credit")
+        if debits != credits:
+            raise UnbalancedPostingError(
+                f"debits {debits} != credits {credits}; a posting set must balance"
+            )
+        if not any(
+            leg.account_id == self.account_id and leg.direction == "debit"
+            for leg in self.postings
+        ):
+            raise AnchorNotDebitedError("the anchor account must be a debited leg")
+
+    def legs(self) -> tuple[Leg, ...]:
+        return self.postings
+
+
+def _validate_ttl_seconds(value: object) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise InvalidExpiryError("ttl_seconds must be a positive integer")
+
+
+def _validate_uuid(value: object, field_name: str) -> None:
+    if not isinstance(value, UUID):
+        raise InvalidAccountIdError(f"{field_name} must be a UUID")
+
+
+@dataclass(frozen=True, slots=True)
+class Hold:
+    """Reserve ``amount`` on ``account_id`` for a later posting to the target (ADR-0014).
+
+    ``ttl_seconds`` is the caller's intent and is what the idempotency hash
+    covers, so a retry with the same command id is a replay. The decision
+    turns it into an absolute ``expires_at`` from the decision clock, once;
+    the fold never reads a clock. The hold id is the command id.
+    """
+
+    account_id: str
+    target_account_id: str
+    amount: int
+    expected_version: int
+    ttl_seconds: int
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_account_id(self.target_account_id)
+        if self.account_id == self.target_account_id:
+            raise SameAccountError("a hold needs two different accounts")
+        _validate_amount(self.amount)
+        _validate_expected_version(self.expected_version)
+        _validate_ttl_seconds(self.ttl_seconds)
+
+
+@dataclass(frozen=True, slots=True)
+class PostHold:
+    """Settle an open hold: debit the reserved funds and credit the target (ADR-0014).
+
+    ``amount`` defaults to the full held amount; a smaller capture releases
+    the remainder in the same transaction.
+    """
+
+    account_id: str
+    hold_id: UUID
+    expected_version: int
+    amount: int | None = None
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_uuid(self.hold_id, "hold_id")
+        _validate_expected_version(self.expected_version)
+        if self.amount is not None:
+            _validate_amount(self.amount)
+
+
+@dataclass(frozen=True, slots=True)
+class VoidHold:
+    """Release an open hold without moving funds (the payer cancelled)."""
+
+    account_id: str
+    hold_id: UUID
+    expected_version: int
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_uuid(self.hold_id, "hold_id")
+        _validate_expected_version(self.expected_version)
+
+
+@dataclass(frozen=True, slots=True)
+class ExpireHold:
+    """Release an open hold whose ``expires_at`` has passed (the sweeper's command)."""
+
+    account_id: str
+    hold_id: UUID
+    expected_version: int
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_uuid(self.hold_id, "hold_id")
+        _validate_expected_version(self.expected_version)
+
+
+HoldCommand = Hold | PostHold | VoidHold | ExpireHold
+AccountCommand = (
+    Deposit | Withdraw | Transfer | Post | Hold | PostHold | VoidHold | ExpireHold
+)
+
+__all__ = [
+    "MAX_LEGS",
+    "AccountCommand",
+    "Deposit",
+    "Direction",
+    "ExpireHold",
+    "Hold",
+    "HoldCommand",
+    "Leg",
+    "MAX_SIGNED_BIGINT",
+    "Post",
+    "PostHold",
+    "Transfer",
+    "VoidHold",
+    "Withdraw",
+]

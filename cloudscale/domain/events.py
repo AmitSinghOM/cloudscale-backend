@@ -82,18 +82,125 @@ class TransferCredited:
         _validate_transfer_leg(self)
 
 
-AccountEvent = Deposited | Withdrawn | TransferDebited | TransferCredited
-EventType = Literal["Deposited", "Withdrawn", "TransferDebited", "TransferCredited"]
+def _validate_expires_at(value: object) -> None:
+    """``expires_at`` is stored as text so the fold never parses a clock value."""
+    if not isinstance(value, str) or not value:
+        raise ValueError("expires_at must be a UTC ISO-8601 string")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError("expires_at must be UTC")
+
+
+HoldReleaseReason = Literal["voided", "expired", "partial"]
+_HOLD_RELEASE_REASONS: frozenset[str] = frozenset({"voided", "expired", "partial"})
+
+
+@dataclass(frozen=True, slots=True)
+class HoldPlaced:
+    """Funds reserved on an account for a later posting to ``counterparty`` (ADR-0014).
+
+    ``hold_id`` is the command id of the ``Hold`` and becomes the
+    ``transfer_id`` of the eventual posting. ``held`` rises; ``balance`` is
+    untouched; ``available = balance - held`` falls.
+    """
+
+    account_id: str
+    amount: int
+    hold_id: UUID
+    counterparty: str
+    expires_at: str
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_amount(self.amount)
+        _validate_uuid(self.hold_id, "hold_id")
+        _validate_account_id(self.counterparty)
+        if self.counterparty == self.account_id:
+            raise ValueError("a hold's counterparty must be a different account")
+        _validate_expires_at(self.expires_at)
+
+
+@dataclass(frozen=True, slots=True)
+class HoldReleased:
+    """Reserved funds returned to ``available`` without moving (ADR-0014).
+
+    ``reason`` is ``voided`` (the payer cancelled), ``expired`` (the sweeper
+    ran past ``expires_at``) or ``partial`` (a post captured less than held).
+    """
+
+    account_id: str
+    amount: int
+    hold_id: UUID
+    reason: HoldReleaseReason
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_amount(self.amount)
+        _validate_uuid(self.hold_id, "hold_id")
+        if self.reason not in _HOLD_RELEASE_REASONS:
+            raise ValueError("reason must be voided, expired or partial")
+
+
+@dataclass(frozen=True, slots=True)
+class HoldPosted:
+    """Reserved funds left the account as the debit leg of the hold's posting (ADR-0014).
+
+    Paired with a ``TransferCredited`` on ``counterparty`` whose
+    ``transfer_id`` is this ``hold_id``. Both ``balance`` and ``held`` fall.
+    """
+
+    account_id: str
+    amount: int
+    hold_id: UUID
+    counterparty: str
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_amount(self.amount)
+        _validate_uuid(self.hold_id, "hold_id")
+        _validate_account_id(self.counterparty)
+        if self.counterparty == self.account_id:
+            raise ValueError("a hold's counterparty must be a different account")
+
+
+AccountEvent = (
+    Deposited
+    | Withdrawn
+    | TransferDebited
+    | TransferCredited
+    | HoldPlaced
+    | HoldReleased
+    | HoldPosted
+)
+EventType = Literal[
+    "Deposited",
+    "Withdrawn",
+    "TransferDebited",
+    "TransferCredited",
+    "HoldPlaced",
+    "HoldReleased",
+    "HoldPosted",
+]
 _EVENT_TYPES: dict[type, EventType] = {
     Deposited: "Deposited",
     Withdrawn: "Withdrawn",
     TransferDebited: "TransferDebited",
     TransferCredited: "TransferCredited",
+    HoldPlaced: "HoldPlaced",
+    HoldReleased: "HoldReleased",
+    HoldPosted: "HoldPosted",
 }
 _TRANSFER_PAYLOAD_KEYS = frozenset(
     {"account_id", "amount", "transfer_id", "counterparty"}
 )
 _CASH_PAYLOAD_KEYS = frozenset({"account_id", "amount"})
+_HOLD_PLACED_PAYLOAD_KEYS = frozenset(
+    {"account_id", "amount", "hold_id", "counterparty", "expires_at"}
+)
+_HOLD_RELEASED_PAYLOAD_KEYS = frozenset({"account_id", "amount", "hold_id", "reason"})
+_HOLD_POSTED_PAYLOAD_KEYS = frozenset(
+    {"account_id", "amount", "hold_id", "counterparty"}
+)
 
 #: Direction each event type moves the balance of ``account_id``. Every
 #: balance projection (typed fold, PostgreSQL and SQLite consumers, legacy
@@ -104,6 +211,23 @@ BALANCE_SIGN: Mapping[str, int] = MappingProxyType(
         "Withdrawn": -1,
         "TransferCredited": 1,
         "TransferDebited": -1,
+        "HoldPlaced": 0,
+        "HoldReleased": 0,
+        "HoldPosted": -1,
+    }
+)
+
+#: Direction each event type moves the ``held`` amount of ``account_id``
+#: (ADR-0014). One table per projected quantity; ``available`` is derived.
+HELD_SIGN: Mapping[str, int] = MappingProxyType(
+    {
+        "Deposited": 0,
+        "Withdrawn": 0,
+        "TransferCredited": 0,
+        "TransferDebited": 0,
+        "HoldPlaced": 1,
+        "HoldReleased": -1,
+        "HoldPosted": -1,
     }
 )
 
@@ -220,6 +344,16 @@ def _event_payload(event: AccountEvent) -> dict[str, object]:
     if isinstance(event, (TransferDebited, TransferCredited)):
         payload["transfer_id"] = str(event.transfer_id)
         payload["counterparty"] = event.counterparty
+    elif isinstance(event, HoldPlaced):
+        payload["hold_id"] = str(event.hold_id)
+        payload["counterparty"] = event.counterparty
+        payload["expires_at"] = event.expires_at
+    elif isinstance(event, HoldReleased):
+        payload["hold_id"] = str(event.hold_id)
+        payload["reason"] = event.reason
+    elif isinstance(event, HoldPosted):
+        payload["hold_id"] = str(event.hold_id)
+        payload["counterparty"] = event.counterparty
     return payload
 
 
@@ -331,11 +465,46 @@ class EventEnvelope:
                 transfer_id=transfer_id,
                 counterparty=counterparty,
             )
+        if self.event_type in ("HoldPlaced", "HoldReleased", "HoldPosted"):
+            return self._hold_event(account_id, amount)
         if set(self.payload) != _CASH_PAYLOAD_KEYS:
             raise ValueError("v1 payload must contain exactly account_id and amount")
         if self.event_type == "Deposited":
             return Deposited(account_id=account_id, amount=amount)
         return Withdrawn(account_id=account_id, amount=amount)
+
+    def _hold_event(self, account_id: str, amount: int) -> AccountEvent:
+        expected = {
+            "HoldPlaced": _HOLD_PLACED_PAYLOAD_KEYS,
+            "HoldReleased": _HOLD_RELEASED_PAYLOAD_KEYS,
+            "HoldPosted": _HOLD_POSTED_PAYLOAD_KEYS,
+        }[self.event_type]
+        if set(self.payload) != expected:
+            raise ValueError(
+                f"v1 {self.event_type} payload must contain exactly {sorted(expected)}"
+            )
+        hold_id = _decode_uuid(self.payload["hold_id"], "hold_id")
+        if self.event_type == "HoldPlaced":
+            return HoldPlaced(
+                account_id=account_id,
+                amount=amount,
+                hold_id=hold_id,
+                counterparty=cast(str, self.payload["counterparty"]),
+                expires_at=cast(str, self.payload["expires_at"]),
+            )
+        if self.event_type == "HoldReleased":
+            return HoldReleased(
+                account_id=account_id,
+                amount=amount,
+                hold_id=hold_id,
+                reason=cast(HoldReleaseReason, self.payload["reason"]),
+            )
+        return HoldPosted(
+            account_id=account_id,
+            amount=amount,
+            hold_id=hold_id,
+            counterparty=cast(str, self.payload["counterparty"]),
+        )
 
     def to_dict(self) -> dict[str, object]:
         """Return the complete v1 wire/storage representation."""
@@ -405,10 +574,15 @@ class EventEnvelope:
 
 __all__ = [
     "BALANCE_SIGN",
+    "HELD_SIGN",
     "AccountEvent",
     "Deposited",
     "EventEnvelope",
     "EventType",
+    "HoldPlaced",
+    "HoldPosted",
+    "HoldReleaseReason",
+    "HoldReleased",
     "TransferCredited",
     "TransferDebited",
     "Withdrawn",

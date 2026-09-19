@@ -1,0 +1,12 @@
+{
+  "id": 7,
+  "event_id": "3c4d5e6f-7a8b-4c9d-8e0f-2a3b4c5d6e7f",
+  "stream": "account-fixture-1",
+  "seq": 6,
+  "type": "HoldPosted",
+  "account_id": "fixture-1",
+  "amount": 25,
+  "transfer_id": "6a7b8c9d-0e1f-4a2b-8c3d-4e5f6a7b8c9d",
+  "counterparty": "fixture-2",
+  "schema_version": 1
+}

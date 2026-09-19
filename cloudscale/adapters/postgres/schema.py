@@ -15,7 +15,7 @@ information_schema is identical.
 from __future__ import annotations
 
 #: Alembic revision the adapters require in ``migrations`` schema mode.
-CURRENT_REVISION = "0004_events_transfer_columns"
+CURRENT_REVISION = "0006_holds"
 
 EVENTS = """
 CREATE TABLE IF NOT EXISTS events (
@@ -32,6 +32,10 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS published BOOLEAN NOT NULL DEFAULT f
 ALTER TABLE events ADD COLUMN IF NOT EXISTS schema_version INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS transfer_id TEXT;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS counterparty TEXT;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS expires_at TEXT;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS release_reason TEXT;
+CREATE INDEX IF NOT EXISTS events_stream_transfer_idx ON events (stream, transfer_id)
+    WHERE transfer_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS events_unpublished_idx ON events (id) WHERE NOT published;
 """
 
@@ -65,12 +69,33 @@ CREATE TABLE IF NOT EXISTS event_envelopes (
 );
 """
 
+#: ADR-0012: at most one verified-cache row per stream; never the source of record.
+SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS stream_snapshots (
+    stream          TEXT PRIMARY KEY,
+    seq             BIGINT NOT NULL,
+    state_json      TEXT NOT NULL,
+    state_version   INTEGER NOT NULL,
+    anchor_event_id TEXT NOT NULL
+);
+"""
+
 PROJECTION = """
 CREATE TABLE IF NOT EXISTS balances (
     account_id TEXT PRIMARY KEY,
     balance    BIGINT NOT NULL DEFAULT 0,
     version    BIGINT NOT NULL DEFAULT 0
 );
+ALTER TABLE balances ADD COLUMN IF NOT EXISTS held BIGINT NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS holds (
+    hold_id    TEXT PRIMARY KEY,
+    source     TEXT NOT NULL,
+    target     TEXT NOT NULL,
+    amount     BIGINT NOT NULL,
+    expires_at TEXT NOT NULL,
+    state      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS holds_open_expiry_idx ON holds (expires_at) WHERE state = 'open';
 CREATE TABLE IF NOT EXISTS processed_events (
     event_id TEXT PRIMARY KEY
 );
@@ -106,7 +131,7 @@ CREATE TABLE IF NOT EXISTS rate_limit_buckets (
 """
 
 #: Every statement group, in dependency order (outbox references events).
-ALL = (EVENTS, OUTBOX, COMMAND_RESULTS, PROJECTION, ACCOUNTS, RATE_LIMIT)
+ALL = (EVENTS, OUTBOX, COMMAND_RESULTS, SNAPSHOTS, PROJECTION, ACCOUNTS, RATE_LIMIT)
 
 __all__ = [
     "ACCOUNTS",
@@ -117,4 +142,5 @@ __all__ = [
     "OUTBOX",
     "PROJECTION",
     "RATE_LIMIT",
+    "SNAPSHOTS",
 ]

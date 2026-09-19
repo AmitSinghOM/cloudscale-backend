@@ -287,3 +287,67 @@ def test_shared_limiter_disabled_at_zero(
         assert limiter.try_acquire("anyone") == (True, 0.0)
     finally:
         limiter.close()
+
+
+def test_0005_snapshots_table_round_trips_and_is_safe_to_drop(
+    fresh_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Snapshots are derived data (ADR-0012): the downgrade needs no guard."""
+    _upgrade(fresh_dsn, monkeypatch)
+
+    def _has_table() -> bool:
+        with psycopg.connect(fresh_dsn) as conn:
+            return (
+                conn.execute("SELECT to_regclass('stream_snapshots')").fetchone()[0]
+                is not None
+            )
+
+    assert _has_table()
+    with psycopg.connect(fresh_dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO stream_snapshots VALUES ('account-a', 3, '{}', 1, 'e-3')"
+        )
+    command.downgrade(alembic_config(), "0004_events_transfer_columns")
+    assert not _has_table()
+    command.upgrade(alembic_config(), "head")
+    assert _has_table()
+    with psycopg.connect(fresh_dsn) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM stream_snapshots").fetchone()[0] == 0
+
+
+def test_downgrade_0006_refuses_while_hold_events_exist(
+    fresh_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropping expires_at/release_reason would make hold events unfoldable (ADR-0014)."""
+    _upgrade(fresh_dsn, monkeypatch)
+
+    def _events_columns() -> set[str]:
+        with psycopg.connect(fresh_dsn) as conn:
+            return {
+                row[0]
+                for row in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'events'"
+                ).fetchall()
+            }
+
+    assert {"expires_at", "release_reason"} <= _events_columns()
+    with psycopg.connect(fresh_dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO events (event_id, stream, seq, type, account_id, amount, "
+            "schema_version, transfer_id, counterparty, expires_at) VALUES "
+            "('hold-1', 'account-a', 1, 'HoldPlaced', 'a', 5, 1, 'h-1', 'b', "
+            "'2099-01-01T00:00:00+00:00')"
+        )
+    with pytest.raises(Exception, match="hold event"):
+        command.downgrade(alembic_config(), "0005_stream_snapshots")
+    assert {"expires_at", "release_reason"} <= _events_columns(), "guard keeps columns"
+
+    with psycopg.connect(fresh_dsn, autocommit=True) as conn:
+        conn.execute("DELETE FROM events WHERE event_id = 'hold-1'")
+    command.downgrade(alembic_config(), "0005_stream_snapshots")
+    assert not ({"expires_at", "release_reason"} & _events_columns())
+    with psycopg.connect(fresh_dsn) as conn:
+        assert conn.execute("SELECT to_regclass('holds')").fetchone()[0] is None
+    command.upgrade(alembic_config(), "head")
+    assert {"expires_at", "release_reason"} <= _events_columns()

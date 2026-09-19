@@ -14,6 +14,10 @@ Rules that keep the source of record safe:
 * A version newer than this build understands is an error, never a guess.
 * Until a type needs its first step, the registry for it is empty and
   ``upcast`` is the identity plus a version stamp.
+* A step that changes how an already-stored event *folds* (not just its
+  shape) invalidates every stream snapshot (ADR-0012): bump
+  ``CURRENT_STATE_VERSION`` in ``domain/account.py`` in the same change so
+  readers discard the stale snapshots and refold from the log.
 
 This module is domain code: standard library only.
 """
@@ -42,6 +46,9 @@ CURRENT_SCHEMA_VERSION: Final[dict[str, int]] = {
     "Withdrawn": 1,
     "TransferDebited": 1,
     "TransferCredited": 1,
+    "HoldPlaced": 1,
+    "HoldReleased": 1,
+    "HoldPosted": 1,
 }
 
 _REGISTRY: dict[tuple[str, int], Upcaster] = {}

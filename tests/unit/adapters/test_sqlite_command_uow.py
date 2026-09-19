@@ -19,7 +19,18 @@ from cloudscale.adapters.sqlite_compat.command_unit_of_work import (
 )
 from cloudscale.application.command_service import normalize_command
 from cloudscale.application.ports import NormalizedCommand
-from cloudscale.domain.commands import Deposit, Transfer, Withdraw
+from cloudscale.domain.account import CURRENT_STATE_VERSION
+from cloudscale.domain.commands import (
+    Deposit,
+    ExpireHold,
+    Hold,
+    Leg,
+    Post,
+    PostHold,
+    Transfer,
+    VoidHold,
+    Withdraw,
+)
 from cloudscale.domain.results import CommandOutcome
 from cqrs import SqliteEventStore
 
@@ -298,3 +309,404 @@ def test_transfer_rejections_persist_without_touching_either_stream(
     assert uow.fold_stream("dst").version == 0
     # Persisted: the same command_id replays the rejection.
     assert uow.execute(request) == result
+
+
+# -- N-leg postings (ADR-0013) ---------------------------------------------------------
+
+
+def test_post_appends_every_leg_atomically_in_account_order(
+    uow: SqliteCommandUnitOfWork, db_path: str
+) -> None:
+    uow.execute(_request(Deposit("payer", 100, 0)))
+    command_id = uuid4()
+    command = Post(
+        "payer",
+        (
+            Leg("payer", 100, "debit"),
+            Leg("merchant", 97, "credit"),
+            Leg("fees", 3, "credit"),
+        ),
+        1,
+    )
+    result = uow.execute(_request(command, command_id=command_id))
+
+    assert result.outcome is CommandOutcome.ACCEPTED
+    assert result.account_id == "payer" and result.committed_version == 2
+    assert [p.account_id for p in result.postings] == ["fees", "merchant", "payer"]
+    assert {p.committed_version for p in result.postings} == {1, 1, 2}
+
+    feed = SqliteEventStore(db_path)
+    try:
+        legs = [e for e in feed.read_all(0) if e["type"].startswith("Transfer")]
+        assert len(legs) == 3
+        assert {e["transfer_id"] for e in legs} == {str(command_id)}
+    finally:
+        feed.close()
+
+    assert uow.fold_stream("payer").balance == 0
+    assert uow.fold_stream("merchant").balance == 97
+    assert uow.fold_stream("fees").balance == 3
+
+
+def test_post_with_one_underfunded_leg_appends_nothing_anywhere(
+    uow: SqliteCommandUnitOfWork,
+) -> None:
+    uow.execute(_request(Deposit("a", 10, 0)))
+    uow.execute(_request(Deposit("b", 5, 0)))
+    request = _request(
+        Post(
+            "a",
+            (Leg("a", 10, "debit"), Leg("b", 6, "debit"), Leg("c", 16, "credit")),
+            1,
+        )
+    )
+    result = uow.execute(request)
+    assert result.outcome is CommandOutcome.INSUFFICIENT_FUNDS
+    assert result.http_status == 422
+    assert uow.fold_stream("a").version == 1
+    assert uow.fold_stream("b").version == 1
+    assert uow.fold_stream("c").version == 0
+    assert uow.execute(request) == result  # persisted rejection replays
+
+
+def test_post_reordered_legs_under_the_same_command_id_is_a_conflict(
+    uow: SqliteCommandUnitOfWork,
+) -> None:
+    uow.execute(_request(Deposit("a", 10, 0)))
+    command_id = uuid4()
+    legs = (Leg("a", 10, "debit"), Leg("b", 4, "credit"), Leg("c", 6, "credit"))
+    first = uow.execute(_request(Post("a", legs, 1), command_id=command_id))
+    assert first.outcome is CommandOutcome.ACCEPTED
+    replay = uow.execute(_request(Post("a", legs, 1), command_id=command_id))
+    assert replay == first
+    reordered = uow.execute(
+        _request(Post("a", (legs[0], legs[2], legs[1]), 1), command_id=command_id)
+    )
+    assert reordered.outcome is CommandOutcome.COMMAND_ID_CONFLICT
+    assert uow.fold_stream("b").version == 1  # nothing re-applied
+
+
+def test_post_and_transfer_are_interchangeable_on_the_log(
+    uow: SqliteCommandUnitOfWork, db_path: str
+) -> None:
+    uow.execute(_request(Deposit("x", 50, 0)))
+    uow.execute(_request(Transfer("x", "y", 20, 1)))
+    uow.execute(_request(Post("x", (Leg("x", 20, "debit"), Leg("y", 20, "credit")), 2)))
+    assert uow.fold_stream("x").balance == 10
+    assert uow.fold_stream("y").balance == 40
+    feed = SqliteEventStore(db_path)
+    try:
+        types = [e["type"] for e in feed.read("account-y")]
+        assert types == ["TransferCredited", "TransferCredited"]
+    finally:
+        feed.close()
+
+
+# -- stream snapshots (ADR-0012) ------------------------------------------------------
+
+
+def _snapshot_row(db_path: str, account: str):
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            "SELECT seq, state_json, state_version, anchor_event_id "
+            "FROM stream_snapshots WHERE stream = ?",
+            (f"account-{account}",),
+        ).fetchone()
+
+
+def _run(uow: SqliteCommandUnitOfWork, account: str, n: int, amount: int = 1) -> int:
+    version = uow.fold_stream(account).version
+    for _ in range(n):
+        result = uow.execute(_request(Deposit(account, amount, version)))
+        assert result.outcome is CommandOutcome.ACCEPTED
+        version = result.committed_version or 0
+    return version
+
+
+def test_snapshot_written_every_n_events_inside_the_command_transaction(
+    db_path: str,
+) -> None:
+    uow = SqliteCommandUnitOfWork(db_path, snapshot_every=4)
+    try:
+        account = "acct-snap-a"
+        _run(uow, account, 3)
+        assert _snapshot_row(db_path, account) is None  # 3 < 4
+        _run(uow, account, 1)
+        row = _snapshot_row(db_path, account)
+        assert row is not None and row[0] == 4
+        _run(uow, account, 5)  # 9 events: snapshot advanced to 8
+        row = _snapshot_row(db_path, account)
+        assert row[0] == 8
+        # The snapshot anchors on the real event at seq 8.
+        with sqlite3.connect(db_path) as conn:
+            (event_id,) = conn.execute(
+                "SELECT event_id FROM events WHERE stream = ? AND seq = 8",
+                (f"account-{account}",),
+            ).fetchone()
+        assert row[3] == event_id
+        # And the fold it produces equals the fold of the whole stream.
+        assert uow.fold_stream(account).balance == 9
+    finally:
+        uow.close()
+
+
+def test_fold_from_snapshot_equals_full_fold_and_serves_the_next_decision(
+    db_path: str,
+) -> None:
+    fast = SqliteCommandUnitOfWork(db_path, snapshot_every=2)
+    try:
+        account = "acct-snap-b"
+        version = _run(fast, account, 7, amount=10)
+        withdraw = fast.execute(_request(Withdraw(account, 65, version)))
+        assert withdraw.outcome is CommandOutcome.ACCEPTED
+        rejected = fast.execute(
+            _request(Withdraw(account, 6, withdraw.committed_version or 0))
+        )
+        assert rejected.outcome is CommandOutcome.INSUFFICIENT_FUNDS  # 70-65 = 5
+    finally:
+        fast.close()
+    # A reader with snapshots disabled folds the full stream and agrees.
+    plain = SqliteCommandUnitOfWork(db_path, snapshot_every=0)
+    try:
+        assert plain.fold_stream(account).balance == 5
+    finally:
+        plain.close()
+
+
+def test_anchor_mismatch_discards_the_snapshot_and_refolds(
+    db_path: str, caplog
+) -> None:
+    uow = SqliteCommandUnitOfWork(db_path, snapshot_every=2)
+    try:
+        account = "acct-snap-c"
+        _run(uow, account, 4, amount=5)
+        with sqlite3.connect(db_path) as conn:
+            # Simulate a restore from a different log: the anchor id differs and
+            # the cached balance is wrong. Only the log may be believed.
+            conn.execute(
+                "UPDATE stream_snapshots SET anchor_event_id = 'not-the-event', "
+                'state_json = \'{"account_id":"acct-snap-c","balance":999,'
+                '"version":4}\' WHERE stream = ?',
+                (f"account-{account}",),
+            )
+        with caplog.at_level("WARNING", logger="cloudscale.snapshots"):
+            state = uow.fold_stream(account)
+        assert state.balance == 20 and state.version == 4
+        assert any("anchor mismatch" in r.getMessage() for r in caplog.records)
+    finally:
+        uow.close()
+
+
+def test_stale_state_version_discards_the_snapshot(db_path: str, caplog) -> None:
+    uow = SqliteCommandUnitOfWork(db_path, snapshot_every=1)
+    try:
+        account = "acct-snap-d"
+        _run(uow, account, 2, amount=5)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE stream_snapshots SET state_version = state_version + 1, "
+                'state_json = \'{"account_id":"acct-snap-d","balance":999,'
+                '"version":2}\' WHERE stream = ?',
+                (f"account-{account}",),
+            )
+        with caplog.at_level("WARNING", logger="cloudscale.snapshots"):
+            assert uow.fold_stream(account).balance == 10
+        assert any("state_version" in r.getMessage() for r in caplog.records)
+        # The next accepted command rewrites a fresh, current-version snapshot.
+        _run(uow, account, 1)
+        row = _snapshot_row(db_path, account)
+        assert row[0] == 3 and row[2] == CURRENT_STATE_VERSION
+    finally:
+        uow.close()
+
+
+def test_snapshot_upsert_is_monotonic(db_path: str) -> None:
+    uow = SqliteCommandUnitOfWork(db_path, snapshot_every=1)
+    try:
+        account = "acct-snap-e"
+        _run(uow, account, 5)
+        assert _snapshot_row(db_path, account)[0] == 5
+        # A lagging writer trying to store seq 3 must not move it backwards.
+        from cloudscale.application.snapshots import StreamSnapshot
+        from cloudscale.domain.account import AccountState
+
+        uow._write_snapshot(
+            f"account-{account}",
+            StreamSnapshot(3, AccountState(account, 3, 3), 1, "old-anchor"),
+        )
+        uow._conn.commit()
+        assert _snapshot_row(db_path, account)[0] == 5
+    finally:
+        uow.close()
+
+
+def test_snapshot_every_zero_disables_writing(db_path: str) -> None:
+    uow = SqliteCommandUnitOfWork(db_path, snapshot_every=0)
+    try:
+        _run(uow, "acct-snap-f", 6)
+        assert _snapshot_row(db_path, "acct-snap-f") is None
+    finally:
+        uow.close()
+
+
+def test_transfer_snapshots_both_streams_independently(db_path: str) -> None:
+    uow = SqliteCommandUnitOfWork(db_path, snapshot_every=2)
+    try:
+        version = _run(uow, "acct-snap-src", 1, amount=100)  # seq 1, no snapshot yet
+        result = uow.execute(
+            _request(Transfer("acct-snap-src", "acct-snap-dst", 40, version))
+        )
+        assert result.outcome is CommandOutcome.ACCEPTED
+        assert _snapshot_row(db_path, "acct-snap-src")[0] == 2  # source hit 2
+        assert _snapshot_row(db_path, "acct-snap-dst") is None  # target at 1
+        assert uow.fold_stream("acct-snap-src").balance == 60
+        assert uow.fold_stream("acct-snap-dst").balance == 40
+    finally:
+        uow.close()
+
+
+# -- holds (ADR-0014) ------------------------------------------------------------------
+
+HOUR = 3600
+
+
+def _uow_with_clock(db_path: str, moments: list) -> SqliteCommandUnitOfWork:
+    """A unit of work whose clock pops from ``moments`` (last one sticks)."""
+    from datetime import datetime
+
+    def clock() -> datetime:
+        return moments.pop(0) if len(moments) > 1 else moments[0]
+
+    return SqliteCommandUnitOfWork(db_path, clock=clock)
+
+
+def test_hold_reserves_available_funds_and_is_derived_from_the_log(
+    uow: SqliteCommandUnitOfWork,
+) -> None:
+    uow.execute(_request(Deposit("src", 100, 0)))
+    hold_id = uuid4()
+    placed = uow.execute(_request(Hold("src", "dst", 40, 1, HOUR), command_id=hold_id))
+    assert placed.outcome is CommandOutcome.ACCEPTED
+    state = uow.fold_stream("src")
+    assert (state.balance, state.held, state.available) == (100, 40, 60)
+    assert uow.fold_stream("dst").version == 0  # the target learns nothing yet
+
+    hold = uow.open_hold("src", hold_id)
+    assert hold is not None and (hold.amount, hold.counterparty) == (40, "dst")
+    assert uow.open_hold("src", uuid4()) is None
+    assert uow.open_hold("dst", hold_id) is None  # a hold lives on its source stream
+
+    # Available, not balance, bounds every later debit.
+    short = uow.execute(_request(Withdraw("src", 61, 2)))
+    assert short.outcome is CommandOutcome.INSUFFICIENT_FUNDS
+    ok = uow.execute(_request(Withdraw("src", 60, 2)))
+    assert ok.outcome is CommandOutcome.ACCEPTED
+
+
+def test_post_hold_moves_reserved_funds_to_the_target_in_one_transaction(
+    uow: SqliteCommandUnitOfWork,
+) -> None:
+    uow.execute(_request(Deposit("src", 100, 0)))
+    hold_id = uuid4()
+    uow.execute(_request(Hold("src", "dst", 40, 1, HOUR), command_id=hold_id))
+    result = uow.execute(_request(PostHold("src", hold_id, 2)))
+    assert result.outcome is CommandOutcome.ACCEPTED
+    assert [(p.account_id, p.committed_version) for p in result.postings] == [
+        ("dst", 1),
+        ("src", 3),
+    ]
+    assert result.committed_version == 3
+    src, dst = uow.fold_stream("src"), uow.fold_stream("dst")
+    assert (src.balance, src.held) == (60, 0)
+    assert dst.balance == 40
+    assert uow.open_hold("src", hold_id) is None
+    # Posting the same hold again is hold_not_open, persisted like any rejection.
+    again = uow.execute(_request(PostHold("src", hold_id, 3)))
+    assert again.outcome is CommandOutcome.DOMAIN_REJECTED
+    assert again.error_code == "hold_not_open"
+
+
+def test_partial_capture_puts_two_events_on_the_source_and_reports_both(
+    uow: SqliteCommandUnitOfWork, db_path: str
+) -> None:
+    uow.execute(_request(Deposit("src", 100, 0)))
+    hold_id = uuid4()
+    uow.execute(_request(Hold("src", "dst", 40, 1, HOUR), command_id=hold_id))
+    result = uow.execute(_request(PostHold("src", hold_id, 2, amount=15)))
+    assert result.outcome is CommandOutcome.ACCEPTED
+    # One posting per stream; the source's names its LAST event (seq 4).
+    assert [(p.account_id, p.committed_version) for p in result.postings] == [
+        ("dst", 1),
+        ("src", 4),
+    ]
+    assert result.committed_version == 4  # the source's last leg
+    src = uow.fold_stream("src")
+    assert (src.balance, src.held, src.available, src.version) == (85, 0, 85, 4)
+    feed = SqliteEventStore(db_path)
+    try:
+        types = [e["type"] for e in feed.read("account-src")]
+        assert types == ["Deposited", "HoldPlaced", "HoldPosted", "HoldReleased"]
+        released = feed.read("account-src")[-1]
+        assert released["release_reason"] == "partial" and released["amount"] == 25
+    finally:
+        feed.close()
+
+
+def test_void_and_expire_release_without_moving_funds(db_path: str) -> None:
+    from datetime import UTC, datetime
+
+    t0 = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+    uow = _uow_with_clock(db_path, [t0])
+    try:
+        uow.execute(_request(Deposit("src", 100, 0)))
+        voided_id, expiring_id = uuid4(), uuid4()
+        uow.execute(_request(Hold("src", "dst", 30, 1, 1800), command_id=voided_id))
+        uow.execute(_request(Hold("src", "dst", 20, 2, 1800), command_id=expiring_id))
+        assert uow.fold_stream("src").held == 50
+
+        voided = uow.execute(_request(VoidHold("src", voided_id, 3)))
+        assert voided.outcome is CommandOutcome.ACCEPTED
+        assert uow.fold_stream("src").held == 20
+
+        # Before expiry the sweeper's command is refused; the clock has not moved.
+        early = uow.execute(_request(ExpireHold("src", expiring_id, 4)))
+        assert early.error_code == "hold_not_expired"
+    finally:
+        uow.close()
+    # A later process (clock past expiry) can expire it; a post is now refused.
+    late = _uow_with_clock(db_path, [t0.replace(hour=13)])
+    try:
+        refused = late.execute(_request(PostHold("src", expiring_id, 4)))
+        assert refused.error_code == "hold_expired"
+        expired = late.execute(_request(ExpireHold("src", expiring_id, 4)))
+        assert expired.outcome is CommandOutcome.ACCEPTED
+        state = late.fold_stream("src")
+        assert (state.balance, state.held, state.available) == (100, 0, 100)
+        assert late.fold_stream("dst").version == 0  # never touched
+    finally:
+        late.close()
+
+
+def test_hold_events_snapshot_and_refold_identically(db_path: str) -> None:
+    fast = SqliteCommandUnitOfWork(db_path, snapshot_every=2)
+    try:
+        fast.execute(_request(Deposit("src", 100, 0)))
+        hold_id = uuid4()
+        fast.execute(
+            _request(
+                Hold("src", "dst", 40, 1, HOUR),
+                command_id=hold_id,
+            )
+        )
+        fast.execute(_request(Withdraw("src", 10, 2)))
+        fast.execute(_request(PostHold("src", hold_id, 3, amount=25)))
+        snap_state = fast.fold_stream("src")
+    finally:
+        fast.close()
+    plain = SqliteCommandUnitOfWork(db_path, snapshot_every=0)
+    try:
+        full = plain.fold_stream("src")
+    finally:
+        plain.close()
+    assert snap_state == full
+    assert (full.balance, full.held, full.version) == (65, 0, 5)

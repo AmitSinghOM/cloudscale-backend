@@ -78,6 +78,15 @@ class HttpSettings(BaseSettings):
     trust_proxy_headers: bool = False
     #: Maximum accepted request body, bytes (commands are ~150 bytes).
     max_body_bytes: int = Field(default=16_384, ge=1)
+
+    #: ADR-0012: write a verified stream snapshot every N events on a stream
+    #: (both tiers). Keeps command latency flat against stream depth. 0
+    #: disables writing; existing snapshots are still read and verified.
+    snapshot_every: int = Field(default=100, ge=0)
+
+    #: ADR-0014: upper bound on a hold's TTL in seconds (default 7 days). A
+    #: request above it is a 400; the sweeper releases holds past expiry.
+    hold_max_ttl_seconds: int = Field(default=7 * 24 * 3600, ge=1)
     #: CORS allowlist. Empty (default) = no cross-origin browser access.
     cors_origins: list[str] = Field(default_factory=list)
 

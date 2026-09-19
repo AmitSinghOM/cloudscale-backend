@@ -32,6 +32,7 @@ class StoreProjectionReader:
             account_id=str(row["account_id"]),
             balance=int(row["balance"]),
             version=int(row["version"]),
+            held=int(row.get("held", 0)),
         )
 
 

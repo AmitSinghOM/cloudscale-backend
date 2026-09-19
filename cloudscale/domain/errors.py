@@ -61,6 +61,60 @@ class SameAccountError(DomainError):
     code = "same_account"
 
 
+class UnbalancedPostingError(DomainError):
+    """A posting set's debits and credits do not sum to the same amount (ADR-0013)."""
+
+    code = "unbalanced"
+
+
+class DuplicateAccountError(DomainError):
+    """A posting set names the same account in more than one leg (ADR-0013)."""
+
+    code = "duplicate_account"
+
+
+class TooManyLegsError(DomainError):
+    """A posting set has more legs than ``MAX_LEGS`` (ADR-0013)."""
+
+    code = "too_many_legs"
+
+
+class AnchorNotDebitedError(DomainError):
+    """The anchor (authorized, version-guarded) account is not debited (ADR-0013)."""
+
+    code = "anchor_not_debited"
+
+
+class HoldNotOpenError(DomainError):
+    """The named hold does not exist on this stream or is no longer open (ADR-0014)."""
+
+    code = "hold_not_open"
+
+
+class HoldExpiredError(DomainError):
+    """The hold's ``expires_at`` has passed; it can only be expired or voided (ADR-0014)."""
+
+    code = "hold_expired"
+
+
+class HoldNotExpiredError(DomainError):
+    """``ExpireHold`` before ``expires_at``; use ``VoidHold`` instead (ADR-0014)."""
+
+    code = "hold_not_expired"
+
+
+class CaptureExceedsHoldError(DomainError):
+    """``PostHold.amount`` is greater than the amount held (ADR-0014)."""
+
+    code = "capture_exceeds_hold"
+
+
+class InvalidExpiryError(DomainError):
+    """``expires_at`` is not a UTC ISO-8601 timestamp (ADR-0014)."""
+
+    code = "invalid_expiry"
+
+
 class UnknownCommandError(DomainError):
     """The aggregate received an unsupported command type."""
 
@@ -76,13 +130,22 @@ class UnknownEventError(DomainError):
 __all__ = [
     "AccountIdentityMismatchError",
     "AmountOutOfRangeError",
+    "AnchorNotDebitedError",
+    "CaptureExceedsHoldError",
     "DomainError",
+    "DuplicateAccountError",
+    "HoldExpiredError",
+    "HoldNotExpiredError",
+    "HoldNotOpenError",
     "InsufficientFundsError",
     "InvalidAccountIdError",
     "InvalidAccountStateError",
     "InvalidAmountError",
     "InvalidExpectedVersionError",
+    "InvalidExpiryError",
     "SameAccountError",
+    "TooManyLegsError",
+    "UnbalancedPostingError",
     "UnknownCommandError",
     "UnknownEventError",
     "VersionOutOfRangeError",

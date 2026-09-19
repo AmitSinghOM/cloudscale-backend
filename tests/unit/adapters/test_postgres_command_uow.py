@@ -22,7 +22,16 @@ from cloudscale.adapters.postgres.command_unit_of_work import (  # noqa: E402
 from cloudscale.adapters.postgres.event_store import PostgresEventStore  # noqa: E402
 from cloudscale.application.command_service import normalize_command  # noqa: E402
 from cloudscale.application.ports import NormalizedCommand  # noqa: E402
-from cloudscale.domain.commands import Deposit, Transfer, Withdraw  # noqa: E402
+from cloudscale.domain.commands import (  # noqa: E402
+    Deposit,
+    Hold,
+    Leg,
+    Post,
+    PostHold,
+    Transfer,
+    VoidHold,
+    Withdraw,
+)
 from cloudscale.domain.results import CommandOutcome  # noqa: E402
 
 _ADMIN_DSN = os.environ.get("CLOUDSCALE_TEST_PG", "postgresql://localhost/postgres")
@@ -195,7 +204,7 @@ def test_cross_instance_command_id_race_persists_exactly_one_result(
 def _state(dsn: str, account_id: str):
     """Fold one stream exactly as the unit of work does, on a fresh connection."""
     with psycopg.connect(dsn, row_factory=psycopg.rows.dict_row) as conn:
-        return _BoundStorage(conn).fold_stream(account_id)
+        return _BoundStorage(conn, snapshot_every=0).fold_stream(account_id)
 
 
 # -- double-entry transfers (ADR-0011) ------------------------------------------------
@@ -322,3 +331,329 @@ def test_target_side_race_self_heals_via_retry_on_fresh_fold(
     assert outcomes == [CommandOutcome.ACCEPTED, CommandOutcome.ACCEPTED]
     assert _state(throwaway_dsn, target).balance == 12
     assert _state(throwaway_dsn, target).version == 2
+
+
+# -- stream snapshots (ADR-0012) ------------------------------------------------------
+
+
+def _snapshot_row(dsn: str, account: str):
+    with psycopg.connect(dsn) as conn:
+        return conn.execute(
+            "SELECT seq, state_json, state_version, anchor_event_id "
+            "FROM stream_snapshots WHERE stream = %s",
+            (f"account-{account}",),
+        ).fetchone()
+
+
+def _run(uow: PostgresCommandUnitOfWork, account: str, n: int, amount: int = 1) -> int:
+    version = _state(uow._pool.conninfo, account).version
+    for _ in range(n):
+        result = uow.execute(_request(Deposit(account, amount, version)))
+        assert result.outcome is CommandOutcome.ACCEPTED
+        version = result.committed_version or 0
+    return version
+
+
+def test_snapshot_written_every_n_events_and_anchored_on_the_log(
+    throwaway_dsn: str, account: str
+) -> None:
+    uow = PostgresCommandUnitOfWork(throwaway_dsn, snapshot_every=4)
+    try:
+        _run(uow, account, 3)
+        assert _snapshot_row(throwaway_dsn, account) is None
+        _run(uow, account, 6)  # 9 events -> snapshot at 8
+        row = _snapshot_row(throwaway_dsn, account)
+        assert row is not None and row[0] == 8
+        with psycopg.connect(throwaway_dsn) as conn:
+            (event_id,) = conn.execute(
+                "SELECT event_id FROM events WHERE stream = %s AND seq = 8",
+                (f"account-{account}",),
+            ).fetchone()
+        assert row[3] == event_id
+        assert _state(throwaway_dsn, account).balance == 9
+    finally:
+        uow.close()
+
+
+def test_fold_from_snapshot_serves_decisions_identically_to_the_full_fold(
+    throwaway_dsn: str, account: str
+) -> None:
+    fast = PostgresCommandUnitOfWork(throwaway_dsn, snapshot_every=2)
+    try:
+        version = _run(fast, account, 7, amount=10)
+        assert _snapshot_row(throwaway_dsn, account)[0] == 6
+        withdraw = fast.execute(_request(Withdraw(account, 65, version)))
+        assert withdraw.outcome is CommandOutcome.ACCEPTED
+        rejected = fast.execute(
+            _request(Withdraw(account, 6, withdraw.committed_version or 0))
+        )
+        assert rejected.outcome is CommandOutcome.INSUFFICIENT_FUNDS
+    finally:
+        fast.close()
+    # _state() folds with snapshots disabled -> full fold from seq 1.
+    assert _state(throwaway_dsn, account).balance == 5
+
+
+def test_anchor_mismatch_discards_the_snapshot_on_postgres(
+    throwaway_dsn: str, account: str, caplog
+) -> None:
+    uow = PostgresCommandUnitOfWork(throwaway_dsn, snapshot_every=2)
+    try:
+        _run(uow, account, 4, amount=5)
+        with psycopg.connect(throwaway_dsn, autocommit=True) as conn:
+            conn.execute(
+                "UPDATE stream_snapshots SET anchor_event_id = 'not-the-event', "
+                "state_json = %s WHERE stream = %s",
+                (
+                    '{"account_id":"%s","balance":999,"version":4}' % account,
+                    f"account-{account}",
+                ),
+            )
+        with caplog.at_level("WARNING", logger="cloudscale.snapshots"):
+            version = _run(uow, account, 1, amount=5)  # decision refolds from the log
+        assert version == 5
+        assert any("anchor mismatch" in r.getMessage() for r in caplog.records)
+        assert _state(throwaway_dsn, account).balance == 25
+    finally:
+        uow.close()
+
+
+def test_snapshot_upsert_is_monotonic_on_postgres(
+    throwaway_dsn: str, account: str
+) -> None:
+    from cloudscale.application.snapshots import StreamSnapshot
+    from cloudscale.domain.account import AccountState
+
+    uow = PostgresCommandUnitOfWork(throwaway_dsn, snapshot_every=1)
+    try:
+        _run(uow, account, 5)
+        assert _snapshot_row(throwaway_dsn, account)[0] == 5
+        with psycopg.connect(throwaway_dsn, row_factory=psycopg.rows.dict_row) as conn:
+            _BoundStorage(conn, snapshot_every=1)._write_snapshot(
+                f"account-{account}",
+                StreamSnapshot(3, AccountState(account, 3, 3), 1, "old-anchor"),
+            )
+            conn.commit()
+        assert _snapshot_row(throwaway_dsn, account)[0] == 5
+    finally:
+        uow.close()
+
+
+def test_snapshot_every_zero_disables_writing_on_postgres(
+    throwaway_dsn: str, account: str
+) -> None:
+    uow = PostgresCommandUnitOfWork(throwaway_dsn, snapshot_every=0)
+    try:
+        _run(uow, account, 6)
+        assert _snapshot_row(throwaway_dsn, account) is None
+    finally:
+        uow.close()
+
+
+def test_concurrent_writers_on_one_deep_stream_keep_snapshot_and_fold_consistent(
+    throwaway_dsn: str, account: str
+) -> None:
+    """Retries refold on a fresh tracker; the snapshot never lies about the log."""
+    uow = PostgresCommandUnitOfWork(throwaway_dsn, snapshot_every=3, pool_max=4)
+    try:
+        _run(uow, account, 5, amount=1)
+        outcomes: list[CommandOutcome] = []
+        lock = threading.Lock()
+
+        def racer() -> None:
+            version = _state(throwaway_dsn, account).version
+            result = uow.execute(_request(Deposit(account, 1, version)))
+            with lock:
+                outcomes.append(result.outcome)
+
+        threads = [threading.Thread(target=racer) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        accepted = outcomes.count(CommandOutcome.ACCEPTED)
+        assert accepted >= 1
+        state = _state(throwaway_dsn, account)
+        assert state.balance == 5 + accepted
+        row = _snapshot_row(throwaway_dsn, account)
+        assert row is not None and row[0] <= state.version
+        # The snapshot's cached state matches the log at its own seq.
+        with psycopg.connect(throwaway_dsn) as conn:
+            (count,) = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE stream = %s AND seq <= %s",
+                (f"account-{account}", row[0]),
+            ).fetchone()
+        assert count == row[0]
+    finally:
+        uow.close()
+
+
+# -- N-leg postings (ADR-0013) ---------------------------------------------------------
+
+
+def test_three_way_cyclic_postings_never_deadlock(
+    throwaway_dsn: str, account: str
+) -> None:
+    """A->{B,C}, B->{C,A}, C->{A,B} racing form a 3-cycle over the same keys.
+
+    Pairwise ordering is not enough for a cycle of three; the total
+    account-id order is. A deadlock would surface as psycopg
+    DeadlockDetected out of the unit of work; the accepted outcomes here are
+    ACCEPTED or a VERSION_CONFLICT on the racer's own anchor version.
+    """
+    a, b, c = (f"{account}-{n}" for n in "abc")
+    seed = PostgresCommandUnitOfWork(throwaway_dsn)
+    for name in (a, b, c):
+        seed.execute(_request(Deposit(name, 1_000, 0)))
+    seed.close()
+
+    def post(anchor: str, x: str, y: str, version: int) -> NormalizedCommand:
+        return _request(
+            Post(
+                anchor,
+                (Leg(anchor, 6, "debit"), Leg(x, 4, "credit"), Leg(y, 2, "credit")),
+                version,
+            )
+        )
+
+    for _ in range(10):
+        va, vb, vc = (_state(throwaway_dsn, n).version for n in (a, b, c))
+        outcomes = _race(
+            throwaway_dsn,
+            [post(a, b, c, va), post(b, c, a, vb), post(c, a, b, vc)],
+            rounds=1,
+        )[0]
+        assert all(
+            o in (CommandOutcome.ACCEPTED, CommandOutcome.VERSION_CONFLICT)
+            for o in outcomes
+        ), outcomes
+        assert CommandOutcome.ACCEPTED in outcomes
+    total = sum(_state(throwaway_dsn, n).balance for n in (a, b, c))
+    assert total == 3_000
+
+
+def test_post_legs_project_into_every_balance_on_postgres(
+    throwaway_dsn: str, account: str
+) -> None:
+    payer, m, f = f"{account}-p", f"{account}-m", f"{account}-f"
+    uow = PostgresCommandUnitOfWork(throwaway_dsn)
+    try:
+        uow.execute(_request(Deposit(payer, 100, 0)))
+        result = uow.execute(
+            _request(
+                Post(
+                    payer,
+                    (
+                        Leg(payer, 100, "debit"),
+                        Leg(m, 97, "credit"),
+                        Leg(f, 3, "credit"),
+                    ),
+                    1,
+                )
+            )
+        )
+        assert result.outcome is CommandOutcome.ACCEPTED
+        assert len(result.postings) == 3
+    finally:
+        uow.close()
+    assert _state(throwaway_dsn, payer).balance == 0
+    assert _state(throwaway_dsn, m).balance == 97
+    assert _state(throwaway_dsn, f).balance == 3
+    feed = PostgresEventStore(throwaway_dsn)
+    try:
+        assert (
+            len(
+                [
+                    e
+                    for e in feed.read(f"account-{payer}")
+                    if e["type"] == "TransferDebited"
+                ]
+            )
+            == 1
+        )
+    finally:
+        feed.close()
+
+
+# -- holds (ADR-0014) ------------------------------------------------------------------
+
+
+def test_hold_lifecycle_on_postgres_and_read_model(
+    throwaway_dsn: str, account: str
+) -> None:
+    from cloudscale.adapters.postgres.projection_store import PostgresProjectionStore
+    from cloudscale.processes.resilient_consumer import ResilientConsumer
+
+    src, dst = f"{account}-src", f"{account}-dst"
+    uow = PostgresCommandUnitOfWork(throwaway_dsn)
+    try:
+        uow.execute(_request(Deposit(src, 100, 0)))
+        hold_id = uuid.uuid4()
+        placed = uow.execute(_request(Hold(src, dst, 40, 1, 3600), command_id=hold_id))
+        assert placed.outcome is CommandOutcome.ACCEPTED
+        assert _state(throwaway_dsn, src).held == 40
+        hold = _BoundStorageProbe(throwaway_dsn).open_hold(src, hold_id)
+        assert hold is not None and hold.counterparty == dst
+
+        posted = uow.execute(_request(PostHold(src, hold_id, 2, amount=25)))
+        assert posted.outcome is CommandOutcome.ACCEPTED
+        assert {p.account_id: p.committed_version for p in posted.postings} == {
+            dst: 1,
+            src: 4,
+        }
+        state = _state(throwaway_dsn, src)
+        assert (state.balance, state.held, state.available) == (75, 0, 75)
+        assert _state(throwaway_dsn, dst).balance == 25
+    finally:
+        uow.close()
+
+    # The consumer projects held and the per-hold read model.
+    feed = PostgresEventStore(throwaway_dsn)
+    projection = PostgresProjectionStore(throwaway_dsn, consumer=f"holds-{account}")
+    try:
+        ResilientConsumer(feed, projection).run()
+        balance = projection.balance(src)
+        assert (balance["balance"], balance["held"]) == (75, 0)
+        with psycopg.connect(throwaway_dsn) as conn:
+            (state_,) = conn.execute(
+                "SELECT state FROM holds WHERE hold_id = %s", (str(hold_id),)
+            ).fetchone()
+        assert state_ == "posted"
+    finally:
+        projection.close()
+        feed.close()
+
+
+class _BoundStorageProbe:
+    """Read-only access to the unit of work's derivations on a fresh connection."""
+
+    def __init__(self, dsn: str) -> None:
+        self._dsn = dsn
+
+    def open_hold(self, account_id: str, hold_id: UUID):
+        with psycopg.connect(self._dsn, row_factory=psycopg.rows.dict_row) as conn:
+            return _BoundStorage(conn, snapshot_every=0).open_hold(account_id, hold_id)
+
+
+def test_concurrent_post_and_void_of_one_hold_resolve_to_exactly_one_winner(
+    throwaway_dsn: str, account: str
+) -> None:
+    """The hold is derived from the log inside the transaction, so a post and a
+    void racing on the same hold cannot both apply."""
+    src, dst = f"{account}-s", f"{account}-d"
+    seed = PostgresCommandUnitOfWork(throwaway_dsn)
+    seed.execute(_request(Deposit(src, 100, 0)))
+    hold_id = uuid.uuid4()
+    seed.execute(_request(Hold(src, dst, 40, 1, 3600), command_id=hold_id))
+    seed.close()
+
+    outcomes = _race(
+        throwaway_dsn,
+        [_request(PostHold(src, hold_id, 2)), _request(VoidHold(src, hold_id, 2))],
+        rounds=1,
+    )[0]
+    assert sorted(o.value for o in outcomes) == ["accepted", "version_conflict"]
+    state = _state(throwaway_dsn, src)
+    assert state.held == 0
+    # Either the post won (balance 60, dst 40) or the void won (100, 0) -- never both.
+    assert (state.balance, _state(throwaway_dsn, dst).balance) in {(60, 40), (100, 0)}

@@ -22,7 +22,7 @@ import sqlite3
 import threading
 from typing import Any, Dict, Iterable
 
-from cloudscale.domain.events import BALANCE_SIGN
+from cloudscale.domain.events import BALANCE_SIGN, HELD_SIGN
 
 
 _SCHEMA = """
@@ -43,7 +43,24 @@ CREATE TABLE IF NOT EXISTS consumer_offset (
     consumer TEXT PRIMARY KEY,
     last_id  INTEGER NOT NULL DEFAULT 0
 );
+
+-- Per-hold read model (ADR-0014): the sweeper reads open holds past expiry.
+CREATE TABLE IF NOT EXISTS holds (
+    hold_id    TEXT PRIMARY KEY,
+    source     TEXT NOT NULL,
+    target     TEXT NOT NULL,
+    amount     INTEGER NOT NULL,
+    expires_at TEXT NOT NULL,
+    state      TEXT NOT NULL
+);
 """
+
+
+def _add_held_if_missing(conn: sqlite3.Connection) -> None:
+    """In-place upgrade for projection files created before holds (ADR-0014)."""
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(balances)")}
+    if "held" not in columns:
+        conn.execute("ALTER TABLE balances ADD COLUMN held INTEGER NOT NULL DEFAULT 0")
 
 
 class IdempotentProjectionStore:
@@ -61,6 +78,7 @@ class IdempotentProjectionStore:
         except sqlite3.OperationalError:
             pass
         self._conn.executescript(_SCHEMA)
+        _add_held_if_missing(self._conn)
         self._conn.execute(
             "INSERT OR IGNORE INTO consumer_offset (consumer, last_id) VALUES (?, 0)",
             (consumer,),
@@ -146,11 +164,41 @@ class IdempotentProjectionStore:
         # Unknown event type: count the version bump (we saw it) but leave the
         # balance untouched (delta 0), matching BalanceProjection semantics.
         delta = BALANCE_SIGN.get(str(etype), 0) * amount
+        held_delta = HELD_SIGN.get(str(etype), 0) * amount
         self._conn.execute(
-            "UPDATE balances SET balance = balance + ?, version = version + 1 "
-            "WHERE account_id = ?",
-            (delta, account_id),
+            "UPDATE balances SET balance = balance + ?, held = held + ?, "
+            "version = version + 1 WHERE account_id = ?",
+            (delta, held_delta, account_id),
         )
+        self._apply_to_holds(str(etype), event)
+
+    def _apply_to_holds(self, etype: str, event: dict) -> None:
+        """Maintain the per-hold read model (ADR-0014)."""
+        hold_id = event.get("transfer_id")
+        if hold_id is None:
+            return
+        if etype == "HoldPlaced":
+            self._conn.execute(
+                "INSERT OR IGNORE INTO holds "
+                "(hold_id, source, target, amount, expires_at, state) "
+                "VALUES (?, ?, ?, ?, ?, 'open')",
+                (
+                    hold_id,
+                    event["account_id"],
+                    event["counterparty"],
+                    int(event["amount"]),
+                    event["expires_at"],
+                ),
+            )
+        elif etype == "HoldPosted":
+            self._conn.execute(
+                "UPDATE holds SET state = 'posted' WHERE hold_id = ?", (hold_id,)
+            )
+        elif etype == "HoldReleased" and event.get("release_reason") != "partial":
+            self._conn.execute(
+                "UPDATE holds SET state = ? WHERE hold_id = ?",
+                (event.get("release_reason"), hold_id),
+            )
 
     # -- query --------------------------------------------------------------
 
@@ -158,16 +206,28 @@ class IdempotentProjectionStore:
         """Return the read model for ``account_id``."""
         with self._lock:
             row = self._conn.execute(
-                "SELECT account_id, balance, version FROM balances WHERE account_id = ?",
+                "SELECT account_id, balance, held, version FROM balances "
+                "WHERE account_id = ?",
                 (account_id,),
             ).fetchone()
         if row is None:
-            return {"account_id": account_id, "balance": 0, "version": 0}
+            return {"account_id": account_id, "balance": 0, "held": 0, "version": 0}
         return {
             "account_id": row["account_id"],
             "balance": int(row["balance"]),
+            "held": int(row["held"]),
             "version": int(row["version"]),
         }
+
+    def open_holds_expired_at(self, now_iso: str) -> list[Dict]:
+        """Open holds whose ``expires_at`` <= ``now_iso`` (the sweeper's query)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT hold_id, source, target, amount, expires_at FROM holds "
+                "WHERE state = 'open' AND expires_at <= ? ORDER BY expires_at ASC",
+                (now_iso,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def run_consumer(

@@ -22,7 +22,7 @@ from cloudscale.adapters.compat import adapt_legacy_event
 from cloudscale.adapters.postgres import schema
 from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cloudscale.adapters.sqlite_compat.dead_letter_store import RedriveOutcome
-from cloudscale.domain.events import BALANCE_SIGN
+from cloudscale.domain.events import BALANCE_SIGN, HELD_SIGN
 
 _SCHEMA = schema.PROJECTION
 
@@ -92,15 +92,49 @@ class PostgresProjectionStore:
         if account_id is None:
             return
         amount = int(event.get("amount") or 0)
-        delta = BALANCE_SIGN.get(str(event.get("type")), 0) * amount
+        event_type = str(event.get("type"))
+        delta = BALANCE_SIGN.get(event_type, 0) * amount
+        held_delta = HELD_SIGN.get(event_type, 0) * amount
         conn.execute(
-            "INSERT INTO balances (account_id, balance, version) "
-            "VALUES (%s, %s, 1) "
+            "INSERT INTO balances (account_id, balance, held, version) "
+            "VALUES (%s, %s, %s, 1) "
             "ON CONFLICT (account_id) DO UPDATE SET "
             "balance = balances.balance + EXCLUDED.balance, "
+            "held = balances.held + EXCLUDED.held, "
             "version = balances.version + 1",
-            (account_id, delta),
+            (account_id, delta, held_delta),
         )
+        self._apply_to_holds(conn, event_type, event)
+
+    @staticmethod
+    def _apply_to_holds(
+        conn: psycopg.Connection[DictRow], event_type: str, event: dict
+    ) -> None:
+        """Maintain the per-hold read model (ADR-0014); the sweeper reads it."""
+        hold_id = event.get("transfer_id")
+        if hold_id is None:
+            return
+        if event_type == "HoldPlaced":
+            conn.execute(
+                "INSERT INTO holds (hold_id, source, target, amount, expires_at, state) "
+                "VALUES (%s, %s, %s, %s, %s, 'open') ON CONFLICT (hold_id) DO NOTHING",
+                (
+                    hold_id,
+                    event["account_id"],
+                    event["counterparty"],
+                    int(event["amount"]),
+                    event["expires_at"],
+                ),
+            )
+        elif event_type == "HoldPosted":
+            conn.execute(
+                "UPDATE holds SET state = 'posted' WHERE hold_id = %s", (hold_id,)
+            )
+        elif event_type == "HoldReleased" and event.get("release_reason") != "partial":
+            conn.execute(
+                "UPDATE holds SET state = %s WHERE hold_id = %s",
+                (event.get("release_reason"), hold_id),
+            )
 
     def _advance_offset(self, conn: psycopg.Connection[DictRow], log_id: int) -> None:
         conn.execute(
@@ -217,17 +251,28 @@ class PostgresProjectionStore:
     def balance(self, account_id: str) -> dict:
         with self._pool.connection() as conn:
             row = conn.execute(
-                "SELECT account_id, balance, version FROM balances "
+                "SELECT account_id, balance, held, version FROM balances "
                 "WHERE account_id = %s",
                 (account_id,),
             ).fetchone()
         if row is None:
-            return {"account_id": account_id, "balance": 0, "version": 0}
+            return {"account_id": account_id, "balance": 0, "held": 0, "version": 0}
         return {
             "account_id": row["account_id"],
             "balance": int(row["balance"]),
+            "held": int(row["held"]),
             "version": int(row["version"]),
         }
+
+    def open_holds_expired_at(self, now_iso: str) -> list[dict]:
+        """Open holds whose ``expires_at`` <= ``now_iso`` (the sweeper's query)."""
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT hold_id, source, target, amount, expires_at FROM holds "
+                "WHERE state = 'open' AND expires_at <= %s ORDER BY expires_at ASC",
+                (now_iso,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     @property
     def metadata(self) -> dict[str, object]:

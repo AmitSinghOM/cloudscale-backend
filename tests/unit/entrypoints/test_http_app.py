@@ -147,6 +147,8 @@ def test_query_returns_the_projected_balance(client: TestClient) -> None:
     assert response.json() == {
         "account_id": "acct-1",
         "balance": 75,
+        "held": 0,
+        "available": 75,
         "version": 1,
         "consistency": "eventual",
     }
@@ -285,6 +287,8 @@ def test_end_to_end_command_to_consumer_to_query(stack: _Stack) -> None:
     assert response.json() == {
         "account_id": "acct-e2e",
         "balance": 380,
+        "held": 0,
+        "available": 380,
         "version": 2,
         "consistency": "eventual",
     }
@@ -461,3 +465,357 @@ def test_transfer_reaches_both_balances_through_the_consumer(
     dst = stack.client.get("/v1/accounts/acct-dst/balance", headers=_auth()).json()
     assert (src["balance"], src["version"]) == (60, 2)
     assert (dst["balance"], dst["version"]) == (40, 1)
+
+
+# -- N-leg postings (ADR-0013) ---------------------------------------------------------
+
+
+def _postings_body(**overrides: object) -> dict:
+    body: dict = {
+        "command_id": str(uuid.uuid4()),
+        "postings": [
+            {"account_id": "acct-src", "amount": 100, "direction": "debit"},
+            {"account_id": "acct-merchant", "amount": 97, "direction": "credit"},
+            {"account_id": "acct-fees", "amount": 3, "direction": "credit"},
+        ],
+        "expected_version": 1,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_post_postings_returns_one_posting_per_leg_and_reaches_every_balance(
+    stack: _Stack, caplog
+) -> None:
+    _seed(stack, "acct-src")
+    caplog.set_level(logging.INFO, logger="cloudscale.audit")
+    body = _postings_body()
+    response = stack.client.post(
+        "/v1/accounts/acct-src/postings", json=body, headers=_auth()
+    )
+    assert response.status_code == 201, response.text
+    result = response.json()
+    assert result["outcome"] == "accepted"
+    assert result["account_id"] == "acct-src" and result["committed_version"] == 2
+    postings = {p["account_id"]: p for p in result["postings"]}
+    assert set(postings) == {"acct-src", "acct-merchant", "acct-fees"}
+    assert postings["acct-src"]["committed_version"] == 2
+    assert postings["acct-merchant"]["committed_version"] == 1
+    [record] = [r for r in caplog.records if getattr(r, "command_type", None) == "post"]
+    assert {p["account_id"] for p in record.postings} == set(postings)
+
+    replay = stack.client.post(
+        "/v1/accounts/acct-src/postings", json=body, headers=_auth()
+    )
+    assert replay.status_code == 201 and replay.json() == result
+
+    stack.run_consumer()
+    balances = {
+        name: stack.client.get(f"/v1/accounts/{name}/balance", headers=_auth()).json()
+        for name in ("acct-src", "acct-merchant", "acct-fees")
+    }
+    assert balances["acct-src"]["balance"] == 0
+    assert balances["acct-merchant"]["balance"] == 97
+    assert balances["acct-fees"]["balance"] == 3
+
+
+def test_post_postings_authorizes_the_anchor_and_redacts_other_legs(
+    stack: _Stack,
+) -> None:
+    _seed(stack, "acct-src")
+    owner_only = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-src'])}"
+    }
+    response = stack.client.post(
+        "/v1/accounts/acct-src/postings", json=_postings_body(), headers=owner_only
+    )
+    assert response.status_code == 201
+    postings = {p["account_id"]: p for p in response.json()["postings"]}
+    assert postings["acct-src"]["committed_version"] == 2
+    assert postings["acct-merchant"]["committed_version"] is None
+    assert postings["acct-fees"]["committed_version"] is None
+
+    # Owning the merchant account does not let you anchor on acct-src.
+    stranger = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-merchant'])}"
+    }
+    denied = stack.client.post(
+        "/v1/accounts/acct-src/postings",
+        json=_postings_body(expected_version=2),
+        headers=stranger,
+    )
+    assert denied.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "legs, code",
+    [
+        (
+            [
+                {"account_id": "acct-src", "amount": 100, "direction": "debit"},
+                {"account_id": "acct-m", "amount": 99, "direction": "credit"},
+            ],
+            "unbalanced",
+        ),
+        (
+            [
+                {"account_id": "acct-src", "amount": 50, "direction": "debit"},
+                {"account_id": "acct-src", "amount": 50, "direction": "credit"},
+            ],
+            "duplicate_account",
+        ),
+        (
+            [
+                {"account_id": "acct-m", "amount": 10, "direction": "debit"},
+                {"account_id": "acct-src", "amount": 10, "direction": "credit"},
+            ],
+            "anchor_not_debited",
+        ),
+        (
+            [{"account_id": "acct-src", "amount": 17, "direction": "debit"}]
+            + [
+                {"account_id": f"acct-c{i}", "amount": 1, "direction": "credit"}
+                for i in range(17)
+            ],
+            "too_many_legs",
+        ),
+    ],
+)
+def test_post_postings_invalid_sets_are_400_with_the_domain_code(
+    stack: _Stack, legs: list, code: str
+) -> None:
+    _seed(stack, "acct-src")
+    response = stack.client.post(
+        "/v1/accounts/acct-src/postings",
+        json=_postings_body(postings=legs),
+        headers=_auth(),
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == code
+
+
+def test_post_postings_business_rejections_map_to_documented_statuses(
+    stack: _Stack,
+) -> None:
+    _seed(stack, "acct-src", amount=10)
+    short = stack.client.post(
+        "/v1/accounts/acct-src/postings",
+        json=_postings_body(
+            postings=[
+                {"account_id": "acct-src", "amount": 11, "direction": "debit"},
+                {"account_id": "acct-m", "amount": 11, "direction": "credit"},
+            ]
+        ),
+        headers=_auth(),
+    )
+    assert short.status_code == 422
+    assert short.json()["error_code"] == "insufficient_funds"
+    assert short.json()["postings"] == []
+
+    stale = stack.client.post(
+        "/v1/accounts/acct-src/postings",
+        json=_postings_body(
+            expected_version=0,
+            postings=[
+                {"account_id": "acct-src", "amount": 1, "direction": "debit"},
+                {"account_id": "acct-m", "amount": 1, "direction": "credit"},
+            ],
+        ),
+        headers=_auth(),
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error_code"] == "version_conflict"
+
+    bad_direction = stack.client.post(
+        "/v1/accounts/acct-src/postings",
+        json=_postings_body(
+            postings=[
+                {"account_id": "acct-src", "amount": 1, "direction": "sideways"},
+                {"account_id": "acct-m", "amount": 1, "direction": "credit"},
+            ]
+        ),
+        headers=_auth(),
+    )
+    assert bad_direction.status_code == 422  # request-shape validation
+
+
+# -- holds (ADR-0014) ------------------------------------------------------------------
+
+
+def _hold_body(**overrides: object) -> dict:
+    body: dict = {
+        "command_id": str(uuid.uuid4()),
+        "target_account_id": "acct-dst",
+        "amount": 40,
+        "expected_version": 1,
+        "ttl_seconds": 3600,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_hold_lifecycle_over_http_place_post_and_balances(stack: _Stack) -> None:
+    _seed(stack, "acct-src")
+    hold = _hold_body()
+    placed = stack.client.post(
+        "/v1/accounts/acct-src/holds", json=hold, headers=_auth()
+    )
+    assert placed.status_code == 201, placed.text
+    assert placed.json()["committed_version"] == 2
+    assert [p["account_id"] for p in placed.json()["postings"]] == ["acct-src"]
+
+    # The retry rule the whole API rests on: the same command_id is a replay,
+    # byte for byte -- even though the decision stamps expires_at from its
+    # clock (found by the independent review; this was a 409 before the fix).
+    replay = stack.client.post(
+        "/v1/accounts/acct-src/holds", json=hold, headers=_auth()
+    )
+    assert replay.status_code == 201
+    assert replay.json() == placed.json()
+    # A different TTL under the same id is a different intent: conflict.
+    changed = stack.client.post(
+        "/v1/accounts/acct-src/holds",
+        json={**hold, "ttl_seconds": 7200},
+        headers=_auth(),
+    )
+    assert changed.status_code == 409
+    assert changed.json()["error_code"] == "command_id_conflict"
+
+    stack.run_consumer()
+    src = stack.client.get("/v1/accounts/acct-src/balance", headers=_auth()).json()
+    assert (src["balance"], src["held"], src["available"]) == (100, 40, 60)
+    # The target has no stream yet: a hold reveals nothing to it.
+    assert (
+        stack.client.get("/v1/accounts/acct-dst/balance", headers=_auth()).status_code
+        == 404
+    )
+
+    # Available, not balance, bounds a withdraw.
+    short = stack.client.post(
+        "/v1/accounts/acct-src/commands",
+        json={
+            "command_id": str(uuid.uuid4()),
+            "type": "withdraw",
+            "amount": 61,
+            "expected_version": 2,
+        },
+        headers=_auth(),
+    )
+    assert short.status_code == 422
+
+    posted = stack.client.post(
+        f"/v1/accounts/acct-src/holds/{hold['command_id']}/post",
+        json={"command_id": str(uuid.uuid4()), "expected_version": 2, "amount": 25},
+        headers=_auth(),
+    )
+    assert posted.status_code == 201, posted.text
+    postings = {
+        p["account_id"]: p["committed_version"] for p in posted.json()["postings"]
+    }
+    assert postings == {"acct-src": 4, "acct-dst": 1}  # partial: post + release on src
+    stack.run_consumer()
+    src = stack.client.get("/v1/accounts/acct-src/balance", headers=_auth()).json()
+    dst = stack.client.get("/v1/accounts/acct-dst/balance", headers=_auth()).json()
+    assert (src["balance"], src["held"], src["available"]) == (75, 0, 75)
+    assert dst["balance"] == 25
+    assert src["balance"] + dst["balance"] == 100
+
+
+def _placed_hold(stack: _Stack) -> dict:
+    _seed(stack, "acct-src")
+    hold = _hold_body()
+    placed = stack.client.post(
+        "/v1/accounts/acct-src/holds", json=hold, headers=_auth()
+    )
+    assert placed.status_code == 201, placed.text
+    return hold
+
+
+def _post_json(stack: _Stack, path: str, body: dict):
+    return stack.client.post(path, json=body, headers=_auth())
+
+
+def test_hold_void_over_http_then_post_is_hold_not_open(stack: _Stack) -> None:
+    hold = _placed_hold(stack)
+    base = f"/v1/accounts/acct-src/holds/{hold['command_id']}"
+    voided = _post_json(
+        stack, f"{base}/void", {"command_id": str(uuid.uuid4()), "expected_version": 2}
+    )
+    assert voided.status_code == 201, voided.text
+    gone = _post_json(
+        stack, f"{base}/post", {"command_id": str(uuid.uuid4()), "expected_version": 3}
+    )
+    assert gone.status_code == 400 and gone.json()["error_code"] == "hold_not_open"
+    unknown = _post_json(
+        stack,
+        f"/v1/accounts/acct-src/holds/{uuid.uuid4()}/void",
+        {"command_id": str(uuid.uuid4()), "expected_version": 3},
+    )
+    assert (
+        unknown.status_code == 400 and unknown.json()["error_code"] == "hold_not_open"
+    )
+
+
+def test_hold_rejections_over_http(stack: _Stack) -> None:
+    hold = _placed_hold(stack)
+    too_much = _post_json(
+        stack,
+        f"/v1/accounts/acct-src/holds/{hold['command_id']}/post",
+        {"command_id": str(uuid.uuid4()), "expected_version": 2, "amount": 41},
+    )
+    assert too_much.status_code == 400
+    assert too_much.json()["error_code"] == "capture_exceeds_hold"
+
+    holds = "/v1/accounts/acct-src/holds"
+    over_available = _post_json(
+        stack, holds, _hold_body(amount=101, expected_version=2)
+    )
+    assert over_available.status_code == 422
+    assert over_available.json()["error_code"] == "insufficient_funds"
+
+    same = _post_json(
+        stack, holds, _hold_body(target_account_id="acct-src", expected_version=2)
+    )
+    assert same.status_code == 400 and same.json()["detail"] == "same_account"
+
+    ttl = _post_json(stack, holds, _hold_body(ttl_seconds=10**9, expected_version=2))
+    assert ttl.status_code == 400
+    assert "CLOUDSCALE_HOLD_MAX_TTL_SECONDS" in ttl.json()["detail"]
+
+
+def test_hold_routes_authorize_the_source_and_redact_the_target(stack: _Stack) -> None:
+    _seed(stack, "acct-src")
+    owner_only = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-src'])}"
+    }
+    hold = _hold_body()
+    assert (
+        stack.client.post(
+            "/v1/accounts/acct-src/holds", json=hold, headers=owner_only
+        ).status_code
+        == 201
+    )
+    posted = stack.client.post(
+        f"/v1/accounts/acct-src/holds/{hold['command_id']}/post",
+        json={"command_id": str(uuid.uuid4()), "expected_version": 2},
+        headers=owner_only,
+    )
+    assert posted.status_code == 201
+    postings = {
+        p["account_id"]: p["committed_version"] for p in posted.json()["postings"]
+    }
+    assert postings == {"acct-src": 3, "acct-dst": None}  # target redacted
+
+    stranger = {"Authorization": f"Bearer {_token(scope=None, accounts=['acct-dst'])}"}
+    denied_hold = stack.client.post(
+        "/v1/accounts/acct-src/holds",
+        json=_hold_body(expected_version=3),
+        headers=stranger,
+    )
+    assert denied_hold.status_code == 403
+    denied_void = stack.client.post(
+        f"/v1/accounts/acct-src/holds/{uuid.uuid4()}/void",
+        json={"command_id": str(uuid.uuid4()), "expected_version": 3},
+        headers=stranger,
+    )
+    assert denied_void.status_code == 403

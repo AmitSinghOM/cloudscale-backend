@@ -20,6 +20,7 @@ from cloudscale.domain.upcasting import (
     upcast,
 )
 from cloudscale.processes.resilient_consumer import ResilientConsumer
+from cloudscale.domain.events import BALANCE_SIGN, HELD_SIGN
 from cqrs import BalanceProjection, SqliteEventStore
 
 FIXTURES = Path(__file__).resolve().parents[2] / "fixtures" / "events"
@@ -66,7 +67,9 @@ def test_every_fixture_upcasts_and_folds_through_the_projection(
     projection = BalanceProjection()
     state = projection.apply(projection.initial(), current)
     assert state["account_id"] == row["account_id"]
-    assert abs(state["balance"]) == row["amount"]
+    # Each type moves exactly the quantities its sign tables say (ADR-0014).
+    assert state["balance"] == BALANCE_SIGN[event_type] * row["amount"]
+    assert state["held"] == HELD_SIGN[event_type] * row["amount"]
     # Identity fields pass through untouched.
     for key in ("id", "event_id", "stream", "seq"):
         assert current[key] == row[key]

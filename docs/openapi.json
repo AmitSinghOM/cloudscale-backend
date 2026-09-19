@@ -7,6 +7,10 @@
             "title": "Account Id",
             "type": "string"
           },
+          "available": {
+            "title": "Available",
+            "type": "integer"
+          },
           "balance": {
             "title": "Balance",
             "type": "integer"
@@ -16,6 +20,10 @@
             "title": "Consistency",
             "type": "string"
           },
+          "held": {
+            "title": "Held",
+            "type": "integer"
+          },
           "version": {
             "title": "Version",
             "type": "integer"
@@ -24,6 +32,8 @@
         "required": [
           "account_id",
           "balance",
+          "held",
+          "available",
           "version"
         ],
         "title": "BalanceResponse",
@@ -96,6 +106,132 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "HoldRequest": {
+        "additionalProperties": false,
+        "description": "Reserve funds on the path account for ``target_account_id`` (ADR-0014).\n\n``ttl_seconds`` (bounded by ``CLOUDSCALE_HOLD_MAX_TTL_SECONDS``) is part of\nthe idempotent request; the decision stamps the absolute ``expires_at``\nfrom its clock. The hold id is the ``command_id``.",
+        "properties": {
+          "amount": {
+            "title": "Amount",
+            "type": "integer"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "expected_version": {
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "target_account_id": {
+            "title": "Target Account Id",
+            "type": "string"
+          },
+          "ttl_seconds": {
+            "title": "Ttl Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command_id",
+          "target_account_id",
+          "amount",
+          "expected_version",
+          "ttl_seconds"
+        ],
+        "title": "HoldRequest",
+        "type": "object"
+      },
+      "LegRequest": {
+        "additionalProperties": false,
+        "description": "One leg of a posting set (ADR-0013).",
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "string"
+          },
+          "amount": {
+            "title": "Amount",
+            "type": "integer"
+          },
+          "direction": {
+            "enum": [
+              "debit",
+              "credit"
+            ],
+            "title": "Direction",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "amount",
+          "direction"
+        ],
+        "title": "LegRequest",
+        "type": "object"
+      },
+      "PostHoldRequest": {
+        "additionalProperties": false,
+        "description": "Settle a hold; ``amount`` omitted captures the full held amount.",
+        "properties": {
+          "amount": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amount"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "expected_version": {
+            "title": "Expected Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command_id",
+          "expected_version"
+        ],
+        "title": "PostHoldRequest",
+        "type": "object"
+      },
+      "PostingsRequest": {
+        "additionalProperties": false,
+        "description": "Commit 2..MAX_LEGS balanced legs atomically; the path account is the anchor.\n\nThe anchor must be one of the debited legs and is the only stream whose\n``expected_version`` the caller supplies. Validation (balance, duplicate\naccounts, leg count, anchor debited) is the domain's; failures are 400s\nwith the domain code.",
+        "properties": {
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "expected_version": {
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "postings": {
+            "items": {
+              "$ref": "#/components/schemas/LegRequest"
+            },
+            "title": "Postings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "command_id",
+          "postings",
+          "expected_version"
+        ],
+        "title": "PostingsRequest",
+        "type": "object"
+      },
       "ReadyResponse": {
         "properties": {
           "checks": {
@@ -132,6 +268,27 @@
           "account_id"
         ],
         "title": "RegisterAccountRequest",
+        "type": "object"
+      },
+      "ReleaseHoldRequest": {
+        "additionalProperties": false,
+        "description": "Void an open hold.",
+        "properties": {
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "expected_version": {
+            "title": "Expected Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command_id",
+          "expected_version"
+        ],
+        "title": "ReleaseHoldRequest",
         "type": "object"
       },
       "TransferRequest": {
@@ -405,6 +562,282 @@
           }
         ],
         "summary": "Post Command"
+      }
+    },
+    "/v1/accounts/{account_id}/holds": {
+      "post": {
+        "description": "Reserve funds now for a later posting (ADR-0014). The hold id is the command id.\n\nChecked against AVAILABLE funds (balance minus open holds). The target\nlearns nothing until the hold is posted; its stream is untouched.",
+        "operationId": "post_hold_v1_accounts__account_id__holds_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HoldRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "CommandResult with outcome=domain_rejected and error_code (hold_not_open, hold_expired, capture_exceeds_hold, same_account, amount_out_of_range), or an invalid ttl_seconds."
+          },
+          "401": {
+            "description": "Missing, invalid or expired bearer token (fixed message)."
+          },
+          "403": {
+            "description": "Token valid but not authorized for this account."
+          },
+          "409": {
+            "description": "CommandResult: version_conflict (source stream) or command_id_conflict."
+          },
+          "422": {
+            "description": "CommandResult: insufficient_funds (available, not balance)."
+          },
+          "429": {
+            "description": "Rate limit exceeded; honour Retry-After."
+          },
+          "503": {
+            "description": "Command path unavailable; retry with the SAME command_id after Retry-After."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Post Hold"
+      }
+    },
+    "/v1/accounts/{account_id}/holds/{hold_id}/post": {
+      "post": {
+        "description": "Settle an open hold: debit the source, credit the hold's target (ADR-0014).\n\nA smaller ``amount`` captures part and releases the remainder in the\nsame transaction. The target posting's ``committed_version`` is\nredacted unless the caller may read that account.",
+        "operationId": "post_hold_capture_v1_accounts__account_id__holds__hold_id__post_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "hold_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Hold Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostHoldRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "CommandResult with outcome=domain_rejected and error_code (hold_not_open, hold_expired, capture_exceeds_hold, same_account, amount_out_of_range), or an invalid ttl_seconds."
+          },
+          "401": {
+            "description": "Missing, invalid or expired bearer token (fixed message)."
+          },
+          "403": {
+            "description": "Token valid but not authorized for this account."
+          },
+          "409": {
+            "description": "CommandResult: version_conflict (source stream) or command_id_conflict."
+          },
+          "422": {
+            "description": "CommandResult: insufficient_funds (available, not balance)."
+          },
+          "429": {
+            "description": "Rate limit exceeded; honour Retry-After."
+          },
+          "503": {
+            "description": "Command path unavailable; retry with the SAME command_id after Retry-After."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Post Hold Capture"
+      }
+    },
+    "/v1/accounts/{account_id}/holds/{hold_id}/void": {
+      "post": {
+        "description": "Release an open hold without moving funds (ADR-0014).",
+        "operationId": "post_hold_void_v1_accounts__account_id__holds__hold_id__void_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "hold_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Hold Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseHoldRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "CommandResult with outcome=domain_rejected and error_code (hold_not_open, hold_expired, capture_exceeds_hold, same_account, amount_out_of_range), or an invalid ttl_seconds."
+          },
+          "401": {
+            "description": "Missing, invalid or expired bearer token (fixed message)."
+          },
+          "403": {
+            "description": "Token valid but not authorized for this account."
+          },
+          "409": {
+            "description": "CommandResult: version_conflict (source stream) or command_id_conflict."
+          },
+          "422": {
+            "description": "CommandResult: insufficient_funds (available, not balance)."
+          },
+          "429": {
+            "description": "Rate limit exceeded; honour Retry-After."
+          },
+          "503": {
+            "description": "Command path unavailable; retry with the SAME command_id after Retry-After."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Post Hold Void"
+      }
+    },
+    "/v1/accounts/{account_id}/postings": {
+      "post": {
+        "description": "Commit a balanced N-leg posting set in one transaction (ADR-0013).\n\nAuthorization is on the anchor (the path account), which must be a\ndebited leg. Every other leg's ``committed_version`` is redacted unless\nthe caller may read that account.",
+        "operationId": "post_postings_v1_accounts__account_id__postings_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "CommandResult with outcome=domain_rejected and error_code, or an invalid posting set: unbalanced, duplicate_account, too_many_legs, anchor_not_debited."
+          },
+          "401": {
+            "description": "Missing, invalid or expired bearer token (fixed message)."
+          },
+          "403": {
+            "description": "Token valid but not authorized for this account."
+          },
+          "409": {
+            "description": "CommandResult: version_conflict (anchor stream) or command_id_conflict."
+          },
+          "422": {
+            "description": "CommandResult: insufficient_funds on a debited leg."
+          },
+          "429": {
+            "description": "Rate limit exceeded; honour Retry-After."
+          },
+          "503": {
+            "description": "Command path unavailable; retry with the SAME command_id after Retry-After."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Post Postings"
       }
     },
     "/v1/accounts/{account_id}/transfers": {

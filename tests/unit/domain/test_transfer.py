@@ -26,12 +26,14 @@ from cloudscale.domain.errors import (
 )
 from cloudscale.domain.events import (
     BALANCE_SIGN,
+    HELD_SIGN,
     Deposited,
     EventEnvelope,
     TransferCredited,
     TransferDebited,
 )
 from cloudscale.domain.results import CommandOutcome, CommandResult, Posting
+from cloudscale.domain.upcasting import CURRENT_SCHEMA_VERSION
 
 TID = UUID("0b8e6f2c-9d4a-4b7e-8c1f-2a3b4c5d6e7f")
 
@@ -157,7 +159,12 @@ def test_balance_sign_table_covers_every_event_type() -> None:
         "Withdrawn": -1,
         "TransferCredited": 1,
         "TransferDebited": -1,
+        "HoldPlaced": 0,
+        "HoldReleased": 0,
+        "HoldPosted": -1,
     }
+    # Every event type has exactly one entry in each sign table (ADR-0014).
+    assert set(HELD_SIGN) == set(BALANCE_SIGN) == set(CURRENT_SCHEMA_VERSION)
 
 
 # -- envelope ------------------------------------------------------------------------

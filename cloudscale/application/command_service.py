@@ -8,12 +8,32 @@ from collections.abc import Callable
 from typing import Final
 from uuid import UUID, uuid4
 
-from cloudscale.domain.commands import AccountCommand, Deposit, Transfer, Withdraw
+from cloudscale.domain.commands import (
+    AccountCommand,
+    Deposit,
+    ExpireHold,
+    Hold,
+    Post,
+    PostHold,
+    Transfer,
+    VoidHold,
+    Withdraw,
+)
 from cloudscale.domain.results import CommandResult
 
 from .ports import CommandUnitOfWork, NormalizedCommand
 
 COMMAND_SCHEMA_VERSION: Final = 1
+_COMMAND_TYPES = (
+    Deposit,
+    Withdraw,
+    Transfer,
+    Post,
+    Hold,
+    PostHold,
+    VoidHold,
+    ExpireHold,
+)
 
 
 def canonical_command_payload(
@@ -26,8 +46,8 @@ def canonical_command_payload(
     metadata can change on a retry without changing the business request.
     """
 
-    if not isinstance(command, (Deposit, Withdraw, Transfer)):
-        raise TypeError("command must be Deposit, Withdraw or Transfer")
+    if not isinstance(command, _COMMAND_TYPES):
+        raise TypeError("command must be an AccountCommand")
     if not isinstance(issuer, str) or issuer == "":
         raise ValueError("issuer must be a non-empty string")
     if not isinstance(subject, str) or subject == "":
@@ -35,15 +55,13 @@ def canonical_command_payload(
 
     normalized: dict[str, object] = {
         "account_id": command.account_id,
-        "amount": command.amount,
         "expected_version": command.expected_version,
         "issuer": issuer,
         "schema_version": COMMAND_SCHEMA_VERSION,
         "subject": subject,
         "type": type(command).__name__,
+        **_command_specific_fields(command),
     }
-    if isinstance(command, Transfer):
-        normalized["target_account_id"] = command.target_account_id
     return json.dumps(
         normalized,
         allow_nan=False,
@@ -51,6 +69,42 @@ def canonical_command_payload(
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
+
+
+def _command_specific_fields(command: AccountCommand) -> dict[str, object]:
+    """The business fields that distinguish one intent from another."""
+    if isinstance(command, Post):
+        # Leg order is part of the request: the same set in a different order
+        # is a different intent under the same command_id (conflict, not replay).
+        return {
+            "postings": [
+                {
+                    "account_id": leg.account_id,
+                    "amount": leg.amount,
+                    "direction": leg.direction,
+                }
+                for leg in command.postings
+            ]
+        }
+    if isinstance(command, Hold):
+        # The caller's TTL, not the server-stamped expires_at: a retry with the
+        # same command_id must hash identically to be the replay the docs promise.
+        return {
+            "amount": command.amount,
+            "target_account_id": command.target_account_id,
+            "ttl_seconds": command.ttl_seconds,
+        }
+    if isinstance(command, PostHold):
+        # None = capture the full hold; a stated amount is a different intent.
+        return {"hold_id": str(command.hold_id), "amount": command.amount}
+    if isinstance(command, (VoidHold, ExpireHold)):
+        return {"hold_id": str(command.hold_id)}
+    if isinstance(command, Transfer):
+        return {
+            "amount": command.amount,
+            "target_account_id": command.target_account_id,
+        }
+    return {"amount": command.amount}
 
 
 def command_request_hash(canonical_payload: bytes) -> bytes:

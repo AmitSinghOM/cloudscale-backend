@@ -87,8 +87,9 @@ class PostgresEventStore:
                     conn.execute(
                         "INSERT INTO events "
                         "(event_id, stream, seq, type, account_id, amount, "
-                        "schema_version, transfer_id, counterparty) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                        "schema_version, transfer_id, counterparty, expires_at, "
+                        "release_reason) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (
                             event_id,
                             stream,
@@ -99,6 +100,8 @@ class PostgresEventStore:
                             _stamp_for(event),
                             event.get("transfer_id"),
                             event.get("counterparty"),
+                            event.get("expires_at"),
+                            event.get("release_reason"),
                         ),
                     )
             except psycopg.errors.UniqueViolation as exc:
@@ -152,7 +155,7 @@ class PostgresEventStore:
             raise ValueError("after_seq must be non-negative")
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT event_id, stream, seq, type, account_id, amount, schema_version, transfer_id, counterparty "
+                "SELECT event_id, stream, seq, type, account_id, amount, schema_version, transfer_id, counterparty, expires_at, release_reason "
                 "FROM events WHERE stream = %s AND seq > %s ORDER BY seq ASC",
                 (stream, after_seq),
             ).fetchall()
@@ -168,7 +171,7 @@ class PostgresEventStore:
         self.relay_outbox()
         sql = (
             "SELECT o.position, e.event_id, e.stream, e.seq, e.type, "
-            "e.account_id, e.amount, e.schema_version, e.transfer_id, e.counterparty FROM outbox o "
+            "e.account_id, e.amount, e.schema_version, e.transfer_id, e.counterparty, e.expires_at, e.release_reason FROM outbox o "
             "JOIN events e ON e.event_id = o.event_id "
             "WHERE o.position > %s ORDER BY o.position ASC"
         )
@@ -207,7 +210,7 @@ class PostgresEventStore:
             event["account_id"] = row["account_id"]
         if row["amount"] is not None:
             event["amount"] = int(row["amount"])
-        for column in ("transfer_id", "counterparty"):
+        for column in ("transfer_id", "counterparty", "expires_at", "release_reason"):
             if row.get(column) is not None:
                 event[column] = row[column]
         return event

@@ -122,6 +122,7 @@ def _expected_replays(
         assert legacy_state == {
             "account_id": typed_state.account_id,
             "balance": typed_state.balance,
+            "held": typed_state.held,
             "version": typed_state.version,
         }
         expected[account_id] = legacy_state

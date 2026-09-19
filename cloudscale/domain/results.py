@@ -64,6 +64,11 @@ class BalanceView:
     account_id: str
     balance: int
     version: int
+    held: int = 0
+
+    @property
+    def available(self) -> int:
+        return self.balance - self.held
 
     def __post_init__(self) -> None:
         _validate_account_id(self.account_id)
@@ -76,6 +81,12 @@ class BalanceView:
             raise ValueError(
                 "balance must be a non-negative, non-Boolean signed-BIGINT integer"
             )
+        if (
+            not isinstance(self.held, int)
+            or isinstance(self.held, bool)
+            or self.held < 0
+        ):
+            raise ValueError("held must be a non-negative, non-Boolean integer")
         _validate_current_version(self.version)
 
 
