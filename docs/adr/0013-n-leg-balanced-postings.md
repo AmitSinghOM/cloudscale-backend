@@ -39,7 +39,7 @@ Forces:
 ## Decision
 
 A `Post(account_id, postings, expected_version)` command carries 2 to
-`MAX_LEGS = 16` `Posting(account_id, amount, direction)` legs. Command
+`MAX_LEGS = 16` `Leg(account_id, amount, direction)` legs. Command
 validation rejects: unequal debit and credit totals (`unbalanced`), any
 account named twice (`duplicate_account`), more than `MAX_LEGS` legs
 (`too_many_legs`), fewer than two legs, and an anchor that is not among the
@@ -49,7 +49,9 @@ and `_require_credit_fits` to each credited account, and `_require_next_version`
 to all; one failing leg rejects the whole command, persisted under the
 `command_id` exactly as a rejected transfer is. The events are the existing
 `TransferDebited` / `TransferCredited` at schema version 1; for N > 2,
-`counterparty` is the anchor account (the payer), which is what a statement
+`counterparty` on every non-anchor leg is the anchor account (the payer),
+and on the anchor's own leg it is the largest credited payee (first in leg
+order on ties) — an event may not name itself — which is what a statement
 line shows. Legs are appended in ascending account-id order — the total
 order that prevents lock cycles of any length, not only pairs.
 `Transfer` becomes the two-leg convenience and is unchanged for clients.

@@ -16,8 +16,9 @@ Contract implemented here (see ``application.ports.CommandUnitOfWork``):
   domain rejections are persisted WITHOUT appending;
 - an accepted command appends exactly one enveloped event and persists the
   accepted result — except a ``Transfer`` (ADR-0011), which appends exactly
-  two (debit on the source stream, credit on the target stream) and records
-  both as ``postings``.
+  two (debit on the source stream, credit on the target stream), and a
+  ``Post`` (ADR-0013) appends one per leg; every leg is recorded in
+  ``postings``.
 
 The caller MUST invoke :func:`execute_command_decision` inside one atomic
 transaction so the fold can never go stale between read and append.
@@ -30,8 +31,8 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from cloudscale.domain.account import AccountState, decide, decide_transfer
-from cloudscale.domain.commands import Transfer
+from cloudscale.domain.account import AccountState, decide, decide_postings
+from cloudscale.domain.commands import Post, Transfer
 from cloudscale.domain.errors import DomainError, InsufficientFundsError
 from cloudscale.domain.events import AccountEvent, EventEnvelope
 from cloudscale.domain.results import CommandOutcome, CommandResult, Posting
@@ -144,24 +145,23 @@ def _decide_legs(
 ) -> list[tuple[AccountEvent, int]]:
     """Return the ``(event, stream_version)`` legs a valid command appends.
 
-    Single-account commands yield one leg. A ``Transfer`` (ADR-0011) folds the
-    target too and yields the debit and credit legs, **sorted by account id**:
-    two opposite-direction transfers then wait on one ``(stream, seq)`` key
-    instead of deadlocking on each other's uncommitted insert. The target has
-    no client-supplied version; its invariants are checked on this fresh fold
+    Single-account commands yield one leg. A ``Transfer`` (ADR-0011) or a
+    ``Post`` (ADR-0013) folds every other named stream too and yields one leg
+    per posting, **sorted by account id**: that total order means concurrent
+    posting sets over overlapping accounts wait on one ``(stream, seq)`` key
+    instead of forming a lock cycle of any length. Non-anchor streams have no
+    client-supplied version; their invariants are checked on this fresh fold
     and a concurrent writer is caught by ``UNIQUE (stream, seq)`` inside the
     same transaction (the unit of work retries on a fresh fold).
     """
     command = request.command
-    if isinstance(command, Transfer):
-        target = storage.fold_stream(command.target_account_id)
-        debit, credit = decide_transfer(
-            state, target, command, transfer_id=request.command_id
-        )
-        legs: list[tuple[AccountEvent, int]] = [
-            (debit, state.version + 1),
-            (credit, target.version + 1),
-        ]
+    if isinstance(command, (Transfer, Post)):
+        states: dict[str, AccountState] = {command.account_id: state}
+        for leg in command.legs():
+            if leg.account_id not in states:
+                states[leg.account_id] = storage.fold_stream(leg.account_id)
+        events = decide_postings(states, command, transfer_id=request.command_id)
+        legs = [(event, states[event.account_id].version + 1) for event in events]
         return sorted(legs, key=lambda leg: leg[0].account_id)
     return [(decide(state, command), state.version + 1)]
 

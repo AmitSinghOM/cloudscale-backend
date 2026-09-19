@@ -22,7 +22,13 @@ from cloudscale.adapters.postgres.command_unit_of_work import (  # noqa: E402
 from cloudscale.adapters.postgres.event_store import PostgresEventStore  # noqa: E402
 from cloudscale.application.command_service import normalize_command  # noqa: E402
 from cloudscale.application.ports import NormalizedCommand  # noqa: E402
-from cloudscale.domain.commands import Deposit, Transfer, Withdraw  # noqa: E402
+from cloudscale.domain.commands import (  # noqa: E402
+    Deposit,
+    Leg,
+    Post,
+    Transfer,
+    Withdraw,
+)
 from cloudscale.domain.results import CommandOutcome  # noqa: E402
 
 _ADMIN_DSN = os.environ.get("CLOUDSCALE_TEST_PG", "postgresql://localhost/postgres")
@@ -477,3 +483,90 @@ def test_concurrent_writers_on_one_deep_stream_keep_snapshot_and_fold_consistent
         assert count == row[0]
     finally:
         uow.close()
+
+
+# -- N-leg postings (ADR-0013) ---------------------------------------------------------
+
+
+def test_three_way_cyclic_postings_never_deadlock(
+    throwaway_dsn: str, account: str
+) -> None:
+    """A->{B,C}, B->{C,A}, C->{A,B} racing form a 3-cycle over the same keys.
+
+    Pairwise ordering is not enough for a cycle of three; the total
+    account-id order is. A deadlock would surface as psycopg
+    DeadlockDetected out of the unit of work; the accepted outcomes here are
+    ACCEPTED or a VERSION_CONFLICT on the racer's own anchor version.
+    """
+    a, b, c = (f"{account}-{n}" for n in "abc")
+    seed = PostgresCommandUnitOfWork(throwaway_dsn)
+    for name in (a, b, c):
+        seed.execute(_request(Deposit(name, 1_000, 0)))
+    seed.close()
+
+    def post(anchor: str, x: str, y: str, version: int) -> NormalizedCommand:
+        return _request(
+            Post(
+                anchor,
+                (Leg(anchor, 6, "debit"), Leg(x, 4, "credit"), Leg(y, 2, "credit")),
+                version,
+            )
+        )
+
+    for _ in range(10):
+        va, vb, vc = (_state(throwaway_dsn, n).version for n in (a, b, c))
+        outcomes = _race(
+            throwaway_dsn,
+            [post(a, b, c, va), post(b, c, a, vb), post(c, a, b, vc)],
+            rounds=1,
+        )[0]
+        assert all(
+            o in (CommandOutcome.ACCEPTED, CommandOutcome.VERSION_CONFLICT)
+            for o in outcomes
+        ), outcomes
+        assert CommandOutcome.ACCEPTED in outcomes
+    total = sum(_state(throwaway_dsn, n).balance for n in (a, b, c))
+    assert total == 3_000
+
+
+def test_post_legs_project_into_every_balance_on_postgres(
+    throwaway_dsn: str, account: str
+) -> None:
+    payer, m, f = f"{account}-p", f"{account}-m", f"{account}-f"
+    uow = PostgresCommandUnitOfWork(throwaway_dsn)
+    try:
+        uow.execute(_request(Deposit(payer, 100, 0)))
+        result = uow.execute(
+            _request(
+                Post(
+                    payer,
+                    (
+                        Leg(payer, 100, "debit"),
+                        Leg(m, 97, "credit"),
+                        Leg(f, 3, "credit"),
+                    ),
+                    1,
+                )
+            )
+        )
+        assert result.outcome is CommandOutcome.ACCEPTED
+        assert len(result.postings) == 3
+    finally:
+        uow.close()
+    assert _state(throwaway_dsn, payer).balance == 0
+    assert _state(throwaway_dsn, m).balance == 97
+    assert _state(throwaway_dsn, f).balance == 3
+    feed = PostgresEventStore(throwaway_dsn)
+    try:
+        assert (
+            len(
+                [
+                    e
+                    for e in feed.read(f"account-{payer}")
+                    if e["type"] == "TransferDebited"
+                ]
+            )
+            == 1
+        )
+    finally:
+        feed.close()

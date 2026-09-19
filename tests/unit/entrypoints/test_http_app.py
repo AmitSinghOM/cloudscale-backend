@@ -461,3 +461,175 @@ def test_transfer_reaches_both_balances_through_the_consumer(
     dst = stack.client.get("/v1/accounts/acct-dst/balance", headers=_auth()).json()
     assert (src["balance"], src["version"]) == (60, 2)
     assert (dst["balance"], dst["version"]) == (40, 1)
+
+
+# -- N-leg postings (ADR-0013) ---------------------------------------------------------
+
+
+def _postings_body(**overrides: object) -> dict:
+    body: dict = {
+        "command_id": str(uuid.uuid4()),
+        "postings": [
+            {"account_id": "acct-src", "amount": 100, "direction": "debit"},
+            {"account_id": "acct-merchant", "amount": 97, "direction": "credit"},
+            {"account_id": "acct-fees", "amount": 3, "direction": "credit"},
+        ],
+        "expected_version": 1,
+    }
+    body.update(overrides)
+    return body
+
+
+def test_post_postings_returns_one_posting_per_leg_and_reaches_every_balance(
+    stack: _Stack, caplog
+) -> None:
+    _seed(stack, "acct-src")
+    caplog.set_level(logging.INFO, logger="cloudscale.audit")
+    body = _postings_body()
+    response = stack.client.post(
+        "/v1/accounts/acct-src/postings", json=body, headers=_auth()
+    )
+    assert response.status_code == 201, response.text
+    result = response.json()
+    assert result["outcome"] == "accepted"
+    assert result["account_id"] == "acct-src" and result["committed_version"] == 2
+    postings = {p["account_id"]: p for p in result["postings"]}
+    assert set(postings) == {"acct-src", "acct-merchant", "acct-fees"}
+    assert postings["acct-src"]["committed_version"] == 2
+    assert postings["acct-merchant"]["committed_version"] == 1
+    [record] = [r for r in caplog.records if getattr(r, "command_type", None) == "post"]
+    assert {p["account_id"] for p in record.postings} == set(postings)
+
+    replay = stack.client.post(
+        "/v1/accounts/acct-src/postings", json=body, headers=_auth()
+    )
+    assert replay.status_code == 201 and replay.json() == result
+
+    stack.run_consumer()
+    balances = {
+        name: stack.client.get(f"/v1/accounts/{name}/balance", headers=_auth()).json()
+        for name in ("acct-src", "acct-merchant", "acct-fees")
+    }
+    assert balances["acct-src"]["balance"] == 0
+    assert balances["acct-merchant"]["balance"] == 97
+    assert balances["acct-fees"]["balance"] == 3
+
+
+def test_post_postings_authorizes_the_anchor_and_redacts_other_legs(
+    stack: _Stack,
+) -> None:
+    _seed(stack, "acct-src")
+    owner_only = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-src'])}"
+    }
+    response = stack.client.post(
+        "/v1/accounts/acct-src/postings", json=_postings_body(), headers=owner_only
+    )
+    assert response.status_code == 201
+    postings = {p["account_id"]: p for p in response.json()["postings"]}
+    assert postings["acct-src"]["committed_version"] == 2
+    assert postings["acct-merchant"]["committed_version"] is None
+    assert postings["acct-fees"]["committed_version"] is None
+
+    # Owning the merchant account does not let you anchor on acct-src.
+    stranger = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-merchant'])}"
+    }
+    denied = stack.client.post(
+        "/v1/accounts/acct-src/postings",
+        json=_postings_body(expected_version=2),
+        headers=stranger,
+    )
+    assert denied.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "legs, code",
+    [
+        (
+            [
+                {"account_id": "acct-src", "amount": 100, "direction": "debit"},
+                {"account_id": "acct-m", "amount": 99, "direction": "credit"},
+            ],
+            "unbalanced",
+        ),
+        (
+            [
+                {"account_id": "acct-src", "amount": 50, "direction": "debit"},
+                {"account_id": "acct-src", "amount": 50, "direction": "credit"},
+            ],
+            "duplicate_account",
+        ),
+        (
+            [
+                {"account_id": "acct-m", "amount": 10, "direction": "debit"},
+                {"account_id": "acct-src", "amount": 10, "direction": "credit"},
+            ],
+            "anchor_not_debited",
+        ),
+        (
+            [{"account_id": "acct-src", "amount": 17, "direction": "debit"}]
+            + [
+                {"account_id": f"acct-c{i}", "amount": 1, "direction": "credit"}
+                for i in range(17)
+            ],
+            "too_many_legs",
+        ),
+    ],
+)
+def test_post_postings_invalid_sets_are_400_with_the_domain_code(
+    stack: _Stack, legs: list, code: str
+) -> None:
+    _seed(stack, "acct-src")
+    response = stack.client.post(
+        "/v1/accounts/acct-src/postings",
+        json=_postings_body(postings=legs),
+        headers=_auth(),
+    )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"] == code
+
+
+def test_post_postings_business_rejections_map_to_documented_statuses(
+    stack: _Stack,
+) -> None:
+    _seed(stack, "acct-src", amount=10)
+    short = stack.client.post(
+        "/v1/accounts/acct-src/postings",
+        json=_postings_body(
+            postings=[
+                {"account_id": "acct-src", "amount": 11, "direction": "debit"},
+                {"account_id": "acct-m", "amount": 11, "direction": "credit"},
+            ]
+        ),
+        headers=_auth(),
+    )
+    assert short.status_code == 422
+    assert short.json()["error_code"] == "insufficient_funds"
+    assert short.json()["postings"] == []
+
+    stale = stack.client.post(
+        "/v1/accounts/acct-src/postings",
+        json=_postings_body(
+            expected_version=0,
+            postings=[
+                {"account_id": "acct-src", "amount": 1, "direction": "debit"},
+                {"account_id": "acct-m", "amount": 1, "direction": "credit"},
+            ],
+        ),
+        headers=_auth(),
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error_code"] == "version_conflict"
+
+    bad_direction = stack.client.post(
+        "/v1/accounts/acct-src/postings",
+        json=_postings_body(
+            postings=[
+                {"account_id": "acct-src", "amount": 1, "direction": "sideways"},
+                {"account_id": "acct-m", "amount": 1, "direction": "credit"},
+            ]
+        ),
+        headers=_auth(),
+    )
+    assert bad_direction.status_code == 422  # request-shape validation

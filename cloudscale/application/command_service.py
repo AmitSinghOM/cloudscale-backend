@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Final
 from uuid import UUID, uuid4
 
-from cloudscale.domain.commands import AccountCommand, Deposit, Transfer, Withdraw
+from cloudscale.domain.commands import AccountCommand, Deposit, Post, Transfer, Withdraw
 from cloudscale.domain.results import CommandResult
 
 from .ports import CommandUnitOfWork, NormalizedCommand
@@ -26,8 +26,8 @@ def canonical_command_payload(
     metadata can change on a retry without changing the business request.
     """
 
-    if not isinstance(command, (Deposit, Withdraw, Transfer)):
-        raise TypeError("command must be Deposit, Withdraw or Transfer")
+    if not isinstance(command, (Deposit, Withdraw, Transfer, Post)):
+        raise TypeError("command must be Deposit, Withdraw, Transfer or Post")
     if not isinstance(issuer, str) or issuer == "":
         raise ValueError("issuer must be a non-empty string")
     if not isinstance(subject, str) or subject == "":
@@ -35,13 +35,25 @@ def canonical_command_payload(
 
     normalized: dict[str, object] = {
         "account_id": command.account_id,
-        "amount": command.amount,
         "expected_version": command.expected_version,
         "issuer": issuer,
         "schema_version": COMMAND_SCHEMA_VERSION,
         "subject": subject,
         "type": type(command).__name__,
     }
+    if isinstance(command, Post):
+        # Leg order is part of the request: the same set in a different order
+        # is a different intent under the same command_id (conflict, not replay).
+        normalized["postings"] = [
+            {
+                "account_id": leg.account_id,
+                "amount": leg.amount,
+                "direction": leg.direction,
+            }
+            for leg in command.postings
+        ]
+    else:
+        normalized["amount"] = command.amount
     if isinstance(command, Transfer):
         normalized["target_account_id"] = command.target_account_id
     return json.dumps(

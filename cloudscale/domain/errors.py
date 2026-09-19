@@ -61,6 +61,30 @@ class SameAccountError(DomainError):
     code = "same_account"
 
 
+class UnbalancedPostingError(DomainError):
+    """A posting set's debits and credits do not sum to the same amount (ADR-0013)."""
+
+    code = "unbalanced"
+
+
+class DuplicateAccountError(DomainError):
+    """A posting set names the same account in more than one leg (ADR-0013)."""
+
+    code = "duplicate_account"
+
+
+class TooManyLegsError(DomainError):
+    """A posting set has more legs than ``MAX_LEGS`` (ADR-0013)."""
+
+    code = "too_many_legs"
+
+
+class AnchorNotDebitedError(DomainError):
+    """The anchor (authorized, version-guarded) account is not debited (ADR-0013)."""
+
+    code = "anchor_not_debited"
+
+
 class UnknownCommandError(DomainError):
     """The aggregate received an unsupported command type."""
 
@@ -76,13 +100,17 @@ class UnknownEventError(DomainError):
 __all__ = [
     "AccountIdentityMismatchError",
     "AmountOutOfRangeError",
+    "AnchorNotDebitedError",
     "DomainError",
+    "DuplicateAccountError",
     "InsufficientFundsError",
     "InvalidAccountIdError",
     "InvalidAccountStateError",
     "InvalidAmountError",
     "InvalidExpectedVersionError",
     "SameAccountError",
+    "TooManyLegsError",
+    "UnbalancedPostingError",
     "UnknownCommandError",
     "UnknownEventError",
     "VersionOutOfRangeError",

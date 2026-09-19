@@ -27,7 +27,14 @@ from pydantic import BaseModel, ConfigDict
 from cloudscale.application.command_service import CommandService
 from cloudscale.application.ports import AccountRegistry, RegistrationOutcome
 from cloudscale.application.query_service import QueryService
-from cloudscale.domain.commands import AccountCommand, Deposit, Transfer, Withdraw
+from cloudscale.domain.commands import (
+    AccountCommand,
+    Deposit,
+    Leg,
+    Post,
+    Transfer,
+    Withdraw,
+)
 from cloudscale.domain.errors import DomainError
 from cloudscale.domain.results import CommandResult
 from cloudscale.domain.upcasting import UnknownSchemaVersionError
@@ -135,6 +142,32 @@ class TransferRequest(BaseModel):
     command_id: UUID
     target_account_id: str
     amount: int
+    expected_version: int
+
+
+class LegRequest(BaseModel):
+    """One leg of a posting set (ADR-0013)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: str
+    amount: int
+    direction: Literal["debit", "credit"]
+
+
+class PostingsRequest(BaseModel):
+    """Commit 2..MAX_LEGS balanced legs atomically; the path account is the anchor.
+
+    The anchor must be one of the debited legs and is the only stream whose
+    ``expected_version`` the caller supplies. Validation (balance, duplicate
+    accounts, leg count, anchor debited) is the domain's; failures are 400s
+    with the domain code.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_id: UUID
+    postings: list[LegRequest]
     expected_version: int
 
 
@@ -538,6 +571,60 @@ def create_app(
             command_id=request.command_id,
             principal=principal,
             command_type="transfer",
+        )
+        return _command_response(
+            result, may_read=lambda target: _may_read(principal, target)
+        )
+
+    @app.post(
+        f"/{API_VERSION}/accounts/{{account_id}}/postings",
+        status_code=201,
+        responses={
+            400: {
+                "description": (
+                    "CommandResult with outcome=domain_rejected and error_code, or "
+                    "an invalid posting set: unbalanced, duplicate_account, "
+                    "too_many_legs, anchor_not_debited."
+                )
+            },
+            409: {
+                "description": (
+                    "CommandResult: version_conflict (anchor stream) or "
+                    "command_id_conflict."
+                )
+            },
+            422: {"description": "CommandResult: insufficient_funds on a debited leg."},
+            **_AUTH_RESPONSES,
+        },
+    )
+    def post_postings(
+        account_id: str,
+        request: PostingsRequest,
+        principal: Principal = Depends(authenticated),
+    ) -> JSONResponse:
+        """Commit a balanced N-leg posting set in one transaction (ADR-0013).
+
+        Authorization is on the anchor (the path account), which must be a
+        debited leg. Every other leg's ``committed_version`` is redacted unless
+        the caller may read that account.
+        """
+        authorize_account(principal, account_id, account_registry)
+        try:
+            command = Post(
+                account_id,
+                tuple(
+                    Leg(leg.account_id, leg.amount, leg.direction)
+                    for leg in request.postings
+                ),
+                request.expected_version,
+            )
+        except DomainError as error:
+            raise HTTPException(status_code=400, detail=error.code) from error
+        result = _execute(
+            command,
+            command_id=request.command_id,
+            principal=principal,
+            command_type="post",
         )
         return _command_response(
             result, may_read=lambda target: _may_read(principal, target)

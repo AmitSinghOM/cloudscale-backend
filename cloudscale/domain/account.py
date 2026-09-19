@@ -1,10 +1,18 @@
 """Pure state transition and decision functions for the Account aggregate."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
-from .commands import MAX_SIGNED_BIGINT, AccountCommand, Deposit, Transfer, Withdraw
+from .commands import (
+    MAX_SIGNED_BIGINT,
+    AccountCommand,
+    Deposit,
+    Leg,
+    Post,
+    Transfer,
+    Withdraw,
+)
 from .errors import (
     AccountIdentityMismatchError,
     AmountOutOfRangeError,
@@ -128,35 +136,75 @@ def decide_transfer(
 ) -> tuple[TransferDebited, TransferCredited]:
     """Return the debit and credit legs of a valid transfer (ADR-0011).
 
-    Pure: both states are folded by the caller inside the transaction that
-    will append both legs. The debit is checked against the source balance
-    and the credit against the target's headroom, so applying either leg can
-    never violate an aggregate invariant.
+    The two-leg case of :func:`decide_postings`; kept as a typed convenience
+    so callers get the pair in (debit, credit) order.
     """
 
     if not isinstance(command, Transfer):
         raise UnknownCommandError(f"unsupported command type: {type(command).__name__}")
-
-    _require_matching_identity(source, command.account_id)
-    _require_matching_identity(target, command.target_account_id)
-    _require_next_version(source)
-    _require_next_version(target)
-    _require_funds(source, command.amount, "transfer")
-    _require_credit_fits(target, command.amount, "transfer")
-
-    debit = TransferDebited(
-        account_id=command.account_id,
-        amount=command.amount,
-        transfer_id=transfer_id,
-        counterparty=command.target_account_id,
-    )
-    credit = TransferCredited(
-        account_id=command.target_account_id,
-        amount=command.amount,
-        transfer_id=transfer_id,
-        counterparty=command.account_id,
-    )
+    states = {command.account_id: source, command.target_account_id: target}
+    events = decide_postings(states, command, transfer_id=transfer_id)
+    by_account = {event.account_id: event for event in events}
+    debit = by_account[command.account_id]
+    credit = by_account[command.target_account_id]
+    if not isinstance(debit, TransferDebited) or not isinstance(
+        credit, TransferCredited
+    ):  # pragma: no cover - Transfer.legs() fixes the directions
+        raise UnknownCommandError("transfer legs have unexpected directions")
     return debit, credit
+
+
+def decide_postings(
+    states: Mapping[str, AccountState],
+    command: Transfer | Post,
+    *,
+    transfer_id: UUID,
+) -> tuple[TransferDebited | TransferCredited, ...]:
+    """Return one leg event per posting of a valid, balanced set (ADR-0013).
+
+    Pure: every named stream's state is folded by the caller inside the
+    transaction that will append every leg. Each debited account must have
+    the funds and each credited account the headroom; one failing leg rejects
+    the whole set. ``counterparty`` is the other account for two legs and
+    the anchor (the payer) for more, except the anchor's own leg, which
+    names its largest credited payee. Events are returned in the command's
+    leg order; the caller sorts by account id before appending.
+    """
+
+    if not isinstance(command, (Transfer, Post)):
+        raise UnknownCommandError(f"unsupported command type: {type(command).__name__}")
+    legs = command.legs()
+    for leg in legs:
+        state = states[leg.account_id]
+        _require_matching_identity(state, leg.account_id)
+        _require_next_version(state)
+        if leg.direction == "debit":
+            _require_funds(state, leg.amount, "posting")
+        else:
+            _require_credit_fits(state, leg.amount, "posting")
+
+    def counterparty_for(leg: Leg) -> str:
+        if len(legs) == 2:
+            return next(other.account_id for other in legs if other is not leg)
+        if leg.account_id != command.account_id:
+            return command.account_id  # every other leg points at the payer
+        # The anchor's own leg names its primary payee: the largest credit,
+        # first in leg order on ties. Deterministic, and what a statement shows.
+        credits = [other for other in legs if other.direction == "credit"]
+        return max(credits, key=lambda c: c.amount).account_id
+
+    events: list[TransferDebited | TransferCredited] = []
+    for leg in legs:
+        kind = TransferDebited if leg.direction == "debit" else TransferCredited
+        events.append(
+            kind(
+                account_id=leg.account_id,
+                amount=leg.amount,
+                transfer_id=transfer_id,
+                counterparty=counterparty_for(leg),
+            )
+        )
+    return tuple(events)
 
 
 def apply(state: AccountState, event: AccountEvent) -> AccountState:
@@ -201,6 +249,7 @@ __all__ = [
     "AccountState",
     "apply",
     "decide",
+    "decide_postings",
     "decide_transfer",
     "fold",
 ]

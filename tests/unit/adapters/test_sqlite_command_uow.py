@@ -19,7 +19,7 @@ from cloudscale.adapters.sqlite_compat.command_unit_of_work import (
 )
 from cloudscale.application.command_service import normalize_command
 from cloudscale.application.ports import NormalizedCommand
-from cloudscale.domain.commands import Deposit, Transfer, Withdraw
+from cloudscale.domain.commands import Deposit, Leg, Post, Transfer, Withdraw
 from cloudscale.domain.results import CommandOutcome
 from cqrs import SqliteEventStore
 
@@ -298,6 +298,97 @@ def test_transfer_rejections_persist_without_touching_either_stream(
     assert uow.fold_stream("dst").version == 0
     # Persisted: the same command_id replays the rejection.
     assert uow.execute(request) == result
+
+
+# -- N-leg postings (ADR-0013) ---------------------------------------------------------
+
+
+def test_post_appends_every_leg_atomically_in_account_order(
+    uow: SqliteCommandUnitOfWork, db_path: str
+) -> None:
+    uow.execute(_request(Deposit("payer", 100, 0)))
+    command_id = uuid4()
+    command = Post(
+        "payer",
+        (
+            Leg("payer", 100, "debit"),
+            Leg("merchant", 97, "credit"),
+            Leg("fees", 3, "credit"),
+        ),
+        1,
+    )
+    result = uow.execute(_request(command, command_id=command_id))
+
+    assert result.outcome is CommandOutcome.ACCEPTED
+    assert result.account_id == "payer" and result.committed_version == 2
+    assert [p.account_id for p in result.postings] == ["fees", "merchant", "payer"]
+    assert {p.committed_version for p in result.postings} == {1, 1, 2}
+
+    feed = SqliteEventStore(db_path)
+    try:
+        legs = [e for e in feed.read_all(0) if e["type"].startswith("Transfer")]
+        assert len(legs) == 3
+        assert {e["transfer_id"] for e in legs} == {str(command_id)}
+    finally:
+        feed.close()
+
+    assert uow.fold_stream("payer").balance == 0
+    assert uow.fold_stream("merchant").balance == 97
+    assert uow.fold_stream("fees").balance == 3
+
+
+def test_post_with_one_underfunded_leg_appends_nothing_anywhere(
+    uow: SqliteCommandUnitOfWork,
+) -> None:
+    uow.execute(_request(Deposit("a", 10, 0)))
+    uow.execute(_request(Deposit("b", 5, 0)))
+    request = _request(
+        Post(
+            "a",
+            (Leg("a", 10, "debit"), Leg("b", 6, "debit"), Leg("c", 16, "credit")),
+            1,
+        )
+    )
+    result = uow.execute(request)
+    assert result.outcome is CommandOutcome.INSUFFICIENT_FUNDS
+    assert result.http_status == 422
+    assert uow.fold_stream("a").version == 1
+    assert uow.fold_stream("b").version == 1
+    assert uow.fold_stream("c").version == 0
+    assert uow.execute(request) == result  # persisted rejection replays
+
+
+def test_post_reordered_legs_under_the_same_command_id_is_a_conflict(
+    uow: SqliteCommandUnitOfWork,
+) -> None:
+    uow.execute(_request(Deposit("a", 10, 0)))
+    command_id = uuid4()
+    legs = (Leg("a", 10, "debit"), Leg("b", 4, "credit"), Leg("c", 6, "credit"))
+    first = uow.execute(_request(Post("a", legs, 1), command_id=command_id))
+    assert first.outcome is CommandOutcome.ACCEPTED
+    replay = uow.execute(_request(Post("a", legs, 1), command_id=command_id))
+    assert replay == first
+    reordered = uow.execute(
+        _request(Post("a", (legs[0], legs[2], legs[1]), 1), command_id=command_id)
+    )
+    assert reordered.outcome is CommandOutcome.COMMAND_ID_CONFLICT
+    assert uow.fold_stream("b").version == 1  # nothing re-applied
+
+
+def test_post_and_transfer_are_interchangeable_on_the_log(
+    uow: SqliteCommandUnitOfWork, db_path: str
+) -> None:
+    uow.execute(_request(Deposit("x", 50, 0)))
+    uow.execute(_request(Transfer("x", "y", 20, 1)))
+    uow.execute(_request(Post("x", (Leg("x", 20, "debit"), Leg("y", 20, "credit")), 2)))
+    assert uow.fold_stream("x").balance == 10
+    assert uow.fold_stream("y").balance == 40
+    feed = SqliteEventStore(db_path)
+    try:
+        types = [e["type"] for e in feed.read("account-y")]
+        assert types == ["TransferCredited", "TransferCredited"]
+    finally:
+        feed.close()
 
 
 # -- stream snapshots (ADR-0012) ------------------------------------------------------
