@@ -64,4 +64,24 @@ def kind_for_leg_count(kind: str, legs: int) -> str:
     return kind
 
 
-__all__ = ["TransferRowEffect", "kind_for_leg_count", "transfer_row_effect"]
+#: A posted hold's two legs are HoldPosted (source) and TransferCredited (target);
+#: whichever the consumer sees first must not decide the set's kind. Kinds are
+#: ranked so the row can only ever be upgraded, making the result independent of
+#: arrival order (found by the independent review of ADR-0015).
+KIND_RANK: dict[str, int] = {"transfer": 0, "hold_posting": 1, "reversal": 2}
+
+
+def stronger_kind(current: str, incoming: str) -> str:
+    """The kind a set row should carry after seeing ``incoming``; never downgrades."""
+    return (
+        incoming if KIND_RANK.get(incoming, 0) > KIND_RANK.get(current, 0) else current
+    )
+
+
+__all__ = [
+    "KIND_RANK",
+    "TransferRowEffect",
+    "kind_for_leg_count",
+    "stronger_kind",
+    "transfer_row_effect",
+]

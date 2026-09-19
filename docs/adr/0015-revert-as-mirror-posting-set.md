@@ -80,7 +80,10 @@ the accounts the revert **credits** — money returns to it — the mirror of
 **Authorization** is on the debit set, not the anchor: the caller must be
 authorized on every account the revert debits (each original payee) or hold
 the admin scope. A payer-only token reverting a two-leg transfer is a 403
-(not persisted; it is not a domain decision). For a fee split this is in
+(not persisted; it is not a domain decision). A non-admin who is party to
+none of the set's legs also gets that 403, for an existing set and a
+non-existent id alike, so the route is not an existence oracle (the
+independent review caught the draft returning `not_revertible` there). For a fee split this is in
 practice an operator action. The audit record names the original
 `transfer_id` and every stream written.
 

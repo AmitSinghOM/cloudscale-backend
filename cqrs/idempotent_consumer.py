@@ -198,7 +198,11 @@ class IdempotentProjectionStore:
         if effect is None:
             return
         self._conn.execute(
-            "INSERT OR IGNORE INTO transfers (transfer_id, kind, reverts) VALUES (?, ?, ?)",
+            "INSERT INTO transfers (transfer_id, kind, reverts) VALUES (?, ?, ?) "
+            "ON CONFLICT (transfer_id) DO UPDATE SET kind = CASE "
+            "WHEN excluded.kind = 'reversal' THEN 'reversal' "
+            "WHEN excluded.kind = 'hold_posting' AND transfers.kind = 'transfer' "
+            "THEN 'hold_posting' ELSE transfers.kind END",
             (effect.transfer_id, effect.kind, effect.reverts),
         )
         self._conn.execute(

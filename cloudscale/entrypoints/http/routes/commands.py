@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from cloudscale.domain.commands import Deposit, Leg, Post, Revert, Transfer, Withdraw
 from cloudscale.domain.errors import DomainError
 from cloudscale.domain.events import BALANCE_SIGN
-from cloudscale.entrypoints.http.auth import Principal, authorize_account
+from cloudscale.entrypoints.http.auth import ADMIN_SCOPE, Principal, authorize_account
 from cloudscale.entrypoints.http.context import (
     API_VERSION,
     AUTH_RESPONSES,
@@ -210,7 +210,16 @@ def build_router(ctx: RouteContext) -> APIRouter:
         not the read model, so a just-committed set can be reverted at once.
         """
         authorize_account(principal, account_id, ctx.account_registry)
-        for leg in ctx.executor.legs_of(transfer_id):
+        legs = ctx.executor.legs_of(transfer_id)
+        if ADMIN_SCOPE not in principal.scopes and not any(
+            ctx.may_read(principal, leg.account_id) for leg in legs
+        ):
+            # Party to none of the legs (or no such set): the same 403 either way,
+            # so an anchor-only token cannot probe whether foreign payments exist.
+            raise HTTPException(
+                status_code=403, detail="principal is not authorized for this account"
+            )
+        for leg in legs:
             if BALANCE_SIGN[type(leg).__name__] > 0:  # they received it: we debit them
                 authorize_account(principal, leg.account_id, ctx.account_registry)
         try:

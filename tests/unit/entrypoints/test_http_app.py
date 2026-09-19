@@ -976,3 +976,66 @@ def test_revert_rejections_and_transfer_read_visibility(stack: _Stack) -> None:
         stack.client.get(f"/v1/transfers/{uuid.uuid4()}", headers=_auth()).status_code
         == 404
     )
+
+
+@pytest.mark.parametrize(
+    "src, dst", [("acct-a-src", "acct-b-dst"), ("acct-z-src", "acct-b-dst")]
+)
+def test_posted_hold_kind_is_hold_posting_regardless_of_leg_order(
+    stack: _Stack, src: str, dst: str
+) -> None:
+    """Legs are appended in account-id order, so the consumer sees HoldPosted first
+    when src < dst and TransferCredited first otherwise; the kind must not depend
+    on that (found by the independent review of ADR-0015)."""
+    _seed(stack, src)
+    hold = _hold_body(target_account_id=dst)
+    assert (
+        stack.client.post(
+            f"/v1/accounts/{src}/holds", json=hold, headers=_auth()
+        ).status_code
+        == 201
+    )
+    posted = stack.client.post(
+        f"/v1/accounts/{src}/holds/{hold['command_id']}/post",
+        json={"command_id": str(uuid.uuid4()), "expected_version": 2},
+        headers=_auth(),
+    )
+    assert posted.status_code == 201, posted.text
+    stack.run_consumer()
+    view = stack.client.get(
+        f"/v1/transfers/{hold['command_id']}", headers=_auth()
+    ).json()
+    assert view["kind"] == "hold_posting", view
+    assert {(leg["account_id"], leg["direction"]) for leg in view["legs"]} == {
+        (src, "debit"),
+        (dst, "credit"),
+    }
+
+
+def test_revert_route_is_not_an_existence_oracle_for_non_admins(stack: _Stack) -> None:
+    """An anchor-only token gets the same 403 for a foreign set and a non-existent one."""
+    transfer_id = _committed_transfer_http(stack)  # acct-src -> acct-dst, admin-made
+    _seed(stack, "acct-other")
+    other_only = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-other'])}"
+    }
+    body = {"command_id": str(uuid.uuid4()), "expected_version": 1}
+    foreign = stack.client.post(
+        f"/v1/accounts/acct-other/transfers/{transfer_id}/revert",
+        json=body,
+        headers=other_only,
+    )
+    missing = stack.client.post(
+        f"/v1/accounts/acct-other/transfers/{uuid.uuid4()}/revert",
+        json=body,
+        headers=other_only,
+    )
+    assert foreign.status_code == missing.status_code == 403
+    assert foreign.json() == missing.json()
+    # An admin still gets the informative not_revertible for a missing id.
+    admin = stack.client.post(
+        f"/v1/accounts/acct-other/transfers/{uuid.uuid4()}/revert",
+        json=body,
+        headers=_auth(),
+    )
+    assert admin.status_code == 400 and admin.json()["error_code"] == "not_revertible"

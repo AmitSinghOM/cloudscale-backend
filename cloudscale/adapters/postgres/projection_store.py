@@ -119,7 +119,10 @@ class PostgresProjectionStore:
             return
         conn.execute(
             "INSERT INTO transfers (transfer_id, kind, reverts) VALUES (%s, %s, %s) "
-            "ON CONFLICT (transfer_id) DO NOTHING",
+            "ON CONFLICT (transfer_id) DO UPDATE SET kind = CASE "
+            "WHEN EXCLUDED.kind = 'reversal' THEN 'reversal' "
+            "WHEN EXCLUDED.kind = 'hold_posting' AND transfers.kind = 'transfer' "
+            "THEN 'hold_posting' ELSE transfers.kind END",
             (effect.transfer_id, effect.kind, effect.reverts),
         )
         conn.execute(

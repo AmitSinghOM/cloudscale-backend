@@ -82,7 +82,7 @@ the opposite command.
 |---|---|---|---|
 | 201 | `accepted` | Mirror legs appended, one posting per stream. | Poll balances as for a transfer; `GET /v1/transfers/{transfer_id}` shows `reverted_by`. |
 | 201 | `accepted` (replay) | Same `command_id`, identical request. | Treat as success. |
-| 403 | — | The caller is not authorized on an account the revert would debit. Not persisted. | Use a token for the payee(s) or the admin scope. |
+| 403 | — | The caller is not authorized on an account the revert would debit, **or** is party to none of the set's legs — a non-admin gets the same 403 whether the set exists or not, so this route cannot be used to probe for other people's payments. Not persisted. | Use a token for the payee(s) or the admin scope. |
 | 409 | `already_reverted` | A reversal naming this set is already in the log. | Read `GET /v1/transfers/{transfer_id}` for `reverted_by`. |
 | 409 | `version_conflict` | `expected_version` ≠ the anchor stream's version. | Re-read, resubmit with a new `command_id`. |
 | 409 | `command_id_conflict` | Same `command_id`, different request. | Client bug; mint a new id. |
