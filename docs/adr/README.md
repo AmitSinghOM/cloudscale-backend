@@ -26,5 +26,8 @@ or add one. Reviewers reject otherwise.
 | [0009](0009-event-schema-evolution-via-upcasters.md) | Event schema evolution via upcasters | Accepted |
 | [0010](0010-python-version-policy.md) | Python version policy | Accepted |
 | [0011](0011-double-entry-transfer.md) | Double-entry Transfer as two postings in one transaction | Accepted |
+| [0012](0012-stream-snapshots-verified-cache.md) | Stream snapshots as a verified cache over the event log | Accepted |
+| [0013](0013-n-leg-balanced-postings.md) | N-leg balanced postings on the transfer_id grouping | Accepted |
+| [0014](0014-pending-transfers-holds.md) | Pending transfers (holds) as reserve, post, void, expire | Accepted |
 
 Template: [`TEMPLATE.md`](TEMPLATE.md).
