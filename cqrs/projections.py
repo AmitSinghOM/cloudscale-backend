@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from cloudscale.domain.events import BALANCE_SIGN
+
 
 class BalanceProjection:
     """Folds account events into a ``{account_id, balance, version}`` dict."""
@@ -22,11 +24,8 @@ class BalanceProjection:
         if state["account_id"] is None:
             state["account_id"] = event.get("account_id")
 
-        if etype == "Deposited":
-            state["balance"] += event["amount"]
-        elif etype == "Withdrawn":
-            state["balance"] -= event["amount"]
-        # Unknown event types are ignored so projections stay forward-compatible.
+        # Unknown event types move nothing so projections stay forward-compatible.
+        state["balance"] += BALANCE_SIGN.get(str(etype), 0) * event.get("amount", 0)
 
         state["version"] += 1
         return state

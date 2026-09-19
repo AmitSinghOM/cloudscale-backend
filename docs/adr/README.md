@@ -25,5 +25,6 @@ or add one. Reviewers reject otherwise.
 | [0008](0008-exact-pins-hash-verified-installs.md) | Exact pins and hash-verified installs | Accepted |
 | [0009](0009-event-schema-evolution-via-upcasters.md) | Event schema evolution via upcasters | Accepted |
 | [0010](0010-python-version-policy.md) | Python version policy | Accepted |
+| [0011](0011-double-entry-transfer.md) | Double-entry Transfer as two postings in one transaction | Accepted |
 
 Template: [`TEMPLATE.md`](TEMPLATE.md).

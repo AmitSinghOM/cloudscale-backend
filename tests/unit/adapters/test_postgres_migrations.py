@@ -142,12 +142,47 @@ def test_downgrade_0003_refuses_to_erase_non_v1_schema_versions(
     with psycopg.connect(fresh_dsn) as conn:
         version = conn.execute("SELECT version_num FROM alembic_version").fetchone()
     assert "schema_version" in _events_columns(), "guard must leave the column"
-    assert version is not None and version[0] == "0003_events_schema_version"
+    # The whole downgrade runs in one transaction: a guard firing in 0003
+    # rolls back the later revisions' steps too, so the database stays at head.
+    assert version is not None and version[0] == schema.CURRENT_REVISION
 
     with psycopg.connect(fresh_dsn, autocommit=True) as conn:
         conn.execute("UPDATE events SET schema_version = 1")
     command.downgrade(alembic_config(), "0002_command_results_created_at")
     assert "schema_version" not in _events_columns()
+
+
+def test_downgrade_0004_refuses_while_transfer_legs_exist(
+    fresh_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropping transfer_id/counterparty must never orphan a transfer leg (ADR-0011)."""
+    _upgrade(fresh_dsn, monkeypatch)
+
+    def _events_columns() -> set[str]:
+        with psycopg.connect(fresh_dsn) as conn:
+            return {
+                row[0]
+                for row in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'events'"
+                ).fetchall()
+            }
+
+    assert {"transfer_id", "counterparty"} <= _events_columns()
+    with psycopg.connect(fresh_dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO events (event_id, stream, seq, type, account_id, amount, "
+            "schema_version, transfer_id, counterparty) VALUES "
+            "('leg-1', 'account-a', 1, 'TransferDebited', 'a', 5, 1, 't-1', 'b')"
+        )
+    with pytest.raises(Exception, match="transfer leg"):
+        command.downgrade(alembic_config(), "0003_events_schema_version")
+    assert {"transfer_id", "counterparty"} <= _events_columns(), "guard keeps columns"
+
+    with psycopg.connect(fresh_dsn, autocommit=True) as conn:
+        conn.execute("DELETE FROM events WHERE event_id = 'leg-1'")
+    command.downgrade(alembic_config(), "0003_events_schema_version")
+    assert not ({"transfer_id", "counterparty"} & _events_columns())
 
 
 def test_migrated_schema_is_identical_to_auto_created_schema(

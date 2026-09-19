@@ -9,7 +9,23 @@ integrator; the commit history says how.
 Developer experience: from clone to a correct first integration without
 reading source.
 
+### Added
+- Double-entry transfers (ADR-0011): `POST /v1/accounts/{account_id}/transfers`
+  moves funds to `target_account_id` as a `TransferDebited` and a
+  `TransferCredited` committed in one transaction, sharing a `transfer_id`;
+  same idempotency, version-conflict and rejection contract as commands;
+  legs appended in account order so opposite-direction transfers cannot
+  deadlock (proven on PostgreSQL). `CommandResult`/responses gain an additive
+  `postings` list; the target posting's `committed_version` is redacted for
+  accounts the caller may not read. Alembic `0004` adds nullable
+  `events.transfer_id` / `events.counterparty` with a guarded downgrade.
+  Conservation (sum of balances unchanged by transfers) is a Hypothesis property.
+
 ### Fixed
+- `docs/API_ERRORS.md`, `docs/ARCHITECTURE.md` and the OpenAPI contract promised
+  `200` on an idempotent replay; the service has always returned the stored
+  response byte-for-byte (`201`). Docs and contract now say so; the contract
+  test refuses a `200` on command routes.
 - Review 4 (operator tooling, logging, supply chain, redrive; `docs/reviews/2026-09-19-review4-operators.md`):
   `scripts/dlq.py` works on the PostgreSQL tier by DSN (RUNBOOK R1 was unexecutable in
   production) and never creates schema; PostgreSQL redrive claims the letter atomically

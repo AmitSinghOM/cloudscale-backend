@@ -3,6 +3,7 @@ the query endpoint speaks through the typed application layer."""
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -220,7 +221,7 @@ def test_command_replay_and_conflict_semantics_over_http(stack: _Stack) -> None:
     replay = stack.client.post(
         "/v1/accounts/acct-9/commands", json=body, headers=_auth()
     )
-    assert replay.status_code == 201
+    assert replay.status_code == 201  # identical stored response, status included
     assert replay.json() == first.json()  # the original persisted result
 
     conflicting = dict(body, amount=999)
@@ -336,3 +337,127 @@ def test_public_dev_secret_in_production_mode_is_warned_not_refused() -> None:
         HttpSettings(jwt_secret=SECRET).production_warnings(schema_mode="migrations")
         == []
     )
+
+
+# -- double-entry transfers (ADR-0011) ------------------------------------------------
+
+
+def _transfer_body(**overrides: object) -> dict:
+    body: dict = {
+        "command_id": str(uuid.uuid4()),
+        "target_account_id": "acct-dst",
+        "amount": 40,
+        "expected_version": 1,
+    }
+    body.update(overrides)
+    return body
+
+
+def _seed(stack: _Stack, account: str, amount: int = 100) -> None:
+    response = stack.client.post(
+        f"/v1/accounts/{account}/commands",
+        json=_command_body(amount=amount),
+        headers=_auth(),
+    )
+    assert response.status_code == 201
+
+
+def test_transfer_returns_both_postings_and_the_source_fields(stack: _Stack) -> None:
+    _seed(stack, "acct-src")
+    body = _transfer_body()
+    response = stack.client.post(
+        "/v1/accounts/acct-src/transfers", json=body, headers=_auth()
+    )
+    assert response.status_code == 201
+    result = response.json()
+    assert result["outcome"] == "accepted"
+    assert result["account_id"] == "acct-src"
+    assert result["committed_version"] == 2
+    postings = {p["account_id"]: p for p in result["postings"]}
+    assert set(postings) == {"acct-src", "acct-dst"}
+    assert postings["acct-src"]["committed_version"] == 2
+    assert postings["acct-dst"]["committed_version"] == 1  # admin may read both
+    assert postings["acct-src"]["event_id"] == result["event_id"]
+
+    replay = stack.client.post(
+        "/v1/accounts/acct-src/transfers", json=body, headers=_auth()
+    )
+    assert replay.status_code == 201  # replay is the stored response, byte for byte
+    assert replay.json() == result
+
+
+def test_transfer_authorizes_the_source_only_and_redacts_the_target_version(
+    stack: _Stack,
+) -> None:
+    _seed(stack, "acct-src")
+    owner_only = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-src'])}"
+    }
+    response = stack.client.post(
+        "/v1/accounts/acct-src/transfers", json=_transfer_body(), headers=owner_only
+    )
+    assert response.status_code == 201
+    postings = {p["account_id"]: p for p in response.json()["postings"]}
+    assert postings["acct-src"]["committed_version"] == 2
+    # The target is not the caller's account: its activity count is not disclosed.
+    assert postings["acct-dst"]["committed_version"] is None
+    assert postings["acct-dst"]["event_id"]
+
+    # A token for another account cannot move money out of acct-src.
+    stranger = {"Authorization": f"Bearer {_token(scope=None, accounts=['acct-dst'])}"}
+    denied = stack.client.post(
+        "/v1/accounts/acct-src/transfers",
+        json=_transfer_body(expected_version=2),
+        headers=stranger,
+    )
+    assert denied.status_code == 403
+
+
+def test_transfer_rejections_map_to_documented_statuses(stack: _Stack) -> None:
+    _seed(stack, "acct-src", amount=10)
+    same = stack.client.post(
+        "/v1/accounts/acct-src/transfers",
+        json=_transfer_body(target_account_id="acct-src"),
+        headers=_auth(),
+    )
+    assert same.status_code == 400
+    assert same.json()["detail"] == "same_account"
+
+    short = stack.client.post(
+        "/v1/accounts/acct-src/transfers",
+        json=_transfer_body(amount=11),
+        headers=_auth(),
+    )
+    assert short.status_code == 422
+    assert short.json()["error_code"] == "insufficient_funds"
+    assert short.json()["postings"] == []
+
+    stale = stack.client.post(
+        "/v1/accounts/acct-src/transfers",
+        json=_transfer_body(amount=1, expected_version=0),
+        headers=_auth(),
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error_code"] == "version_conflict"
+    assert stale.json()["current_version"] == 1
+
+
+def test_transfer_reaches_both_balances_through_the_consumer(
+    stack: _Stack, caplog
+) -> None:
+    _seed(stack, "acct-src")
+    caplog.set_level(logging.INFO, logger="cloudscale.audit")
+    accepted = stack.client.post(
+        "/v1/accounts/acct-src/transfers", json=_transfer_body(), headers=_auth()
+    )
+    assert accepted.status_code == 201
+    # The audit record names where the money went, not only where it left.
+    [record] = [
+        r for r in caplog.records if getattr(r, "command_type", None) == "transfer"
+    ]
+    assert {p["account_id"] for p in record.postings} == {"acct-src", "acct-dst"}
+    stack.run_consumer()
+    src = stack.client.get("/v1/accounts/acct-src/balance", headers=_auth()).json()
+    dst = stack.client.get("/v1/accounts/acct-dst/balance", headers=_auth()).json()
+    assert (src["balance"], src["version"]) == (60, 2)
+    assert (dst["balance"], dst["version"]) == (40, 1)

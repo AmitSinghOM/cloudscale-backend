@@ -22,6 +22,7 @@ from cloudscale.adapters.compat import adapt_legacy_event
 from cloudscale.adapters.postgres import schema
 from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cloudscale.adapters.sqlite_compat.dead_letter_store import RedriveOutcome
+from cloudscale.domain.events import BALANCE_SIGN
 
 _SCHEMA = schema.PROJECTION
 
@@ -91,14 +92,7 @@ class PostgresProjectionStore:
         if account_id is None:
             return
         amount = int(event.get("amount") or 0)
-        event_type = event.get("type")
-        delta = (
-            amount
-            if event_type == "Deposited"
-            else -amount
-            if event_type == "Withdrawn"
-            else 0
-        )
+        delta = BALANCE_SIGN.get(str(event.get("type")), 0) * amount
         conn.execute(
             "INSERT INTO balances (account_id, balance, version) "
             "VALUES (%s, %s, 1) "

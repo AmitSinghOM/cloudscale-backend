@@ -441,3 +441,60 @@ def test_resilient_consumer_end_to_end_on_postgres(
     finally:
         projection.close()
         store.close()
+
+
+def test_transfer_legs_project_into_both_balances_on_postgres(
+    throwaway_dsn: str, consumer_name: str
+) -> None:
+    """Both legs of a transfer reach the read model, each exactly once (ADR-0011)."""
+    from cloudscale.adapters.postgres.command_unit_of_work import (
+        PostgresCommandUnitOfWork,
+    )
+    from cloudscale.application.command_service import normalize_command
+    from cloudscale.domain.commands import Deposit, Transfer
+
+    src, dst = f"src-{uuid.uuid4().hex[:8]}", f"dst-{uuid.uuid4().hex[:8]}"
+    uow = PostgresCommandUnitOfWork(throwaway_dsn)
+    store = PostgresEventStore(throwaway_dsn)
+    projection = PostgresProjectionStore(throwaway_dsn, consumer=consumer_name)
+    try:
+
+        def run(command):
+            return uow.execute(
+                normalize_command(
+                    command,
+                    command_id=uuid.uuid4(),
+                    correlation_id=uuid.uuid4(),
+                    issuer="cloudscale",
+                    subject="user-1",
+                )
+            )
+
+        run(Deposit(src, 100, 0))
+        result = run(Transfer(src, dst, 35, 1))
+        assert result.accepted
+
+        report = ResilientConsumer(
+            store, projection, retryable_errors=(psycopg.OperationalError,)
+        ).run()
+        assert report.dead_lettered == 0
+        assert (
+            projection.balance(src)["balance"],
+            projection.balance(src)["version"],
+        ) == (65, 2)
+        assert (
+            projection.balance(dst)["balance"],
+            projection.balance(dst)["version"],
+        ) == (35, 1)
+        # The consumer feed carries the pairing so a downstream can reconcile.
+        legs = [
+            e
+            for e in store.read_all(0)
+            if e.get("transfer_id") == str(result.command_id)
+        ]
+        assert {e["type"] for e in legs} == {"TransferDebited", "TransferCredited"}
+        assert {e["counterparty"] for e in legs} == {src, dst}
+    finally:
+        projection.close()
+        store.close()
+        uow.close()

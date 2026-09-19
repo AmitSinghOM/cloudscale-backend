@@ -22,12 +22,13 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.rows import DictRow
 
+from cloudscale.adapters.compat import legacy_event_to_domain, transfer_leg_fields
 from cloudscale.adapters.postgres import schema
 from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cloudscale.application.command_execution import execute_command_decision
 from cloudscale.application.ports import NormalizedCommand
 from cloudscale.domain.account import AccountState, fold
-from cloudscale.domain.events import AccountEvent, Deposited, EventEnvelope, Withdrawn
+from cloudscale.domain.events import AccountEvent, EventEnvelope
 from cloudscale.domain.upcasting import upcast
 from cloudscale.domain.results import CommandResult
 
@@ -58,29 +59,21 @@ class _BoundStorage:
 
     def fold_stream(self, account_id: str) -> AccountState:
         rows = self._conn.execute(
-            "SELECT type, account_id, amount, schema_version FROM events "
-            "WHERE stream = %s ORDER BY seq ASC",
+            "SELECT type, account_id, amount, transfer_id, counterparty, "
+            "schema_version FROM events WHERE stream = %s ORDER BY seq ASC",
             (_stream_name(account_id),),
         ).fetchall()
-        events: list[Deposited | Withdrawn] = []
-        for row in rows:
-            # Translate the stored shape to the current one before folding
-            # (ADR-0009); rows predating the column read as v1.
-            current = upcast(dict(row))
-            account_id, amount = str(current["account_id"]), int(current["amount"])  # type: ignore[call-overload]
-            if current["type"] == "Deposited":
-                events.append(Deposited(account_id=account_id, amount=amount))
-            elif current["type"] == "Withdrawn":
-                events.append(Withdrawn(account_id=account_id, amount=amount))
-            else:  # pragma: no cover - typed path never writes other types
-                raise ValueError(f"unsupported event type in stream: {row['type']!r}")
-        return fold(events)
+        # Translate each stored shape to the current one before folding
+        # (ADR-0009); rows predating the column read as v1.
+        return fold(legacy_event_to_domain(upcast(dict(row))) for row in rows)
 
     def append_event(self, envelope: EventEnvelope, event: AccountEvent) -> None:
+        transfer_id, counterparty = transfer_leg_fields(event)
         self._conn.execute(
             "INSERT INTO events "
-            "(event_id, stream, seq, type, account_id, amount, schema_version) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            "(event_id, stream, seq, type, account_id, amount, schema_version, "
+            "transfer_id, counterparty) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 str(envelope.event_id),
                 _stream_name(event.account_id),
@@ -89,6 +82,8 @@ class _BoundStorage:
                 event.account_id,
                 event.amount,
                 envelope.schema_version,
+                transfer_id,
+                counterparty,
             ),
         )
         self._conn.execute(

@@ -1,0 +1,12 @@
+{
+  "id": 4,
+  "event_id": "9e4c1d72-5a6b-4f0c-a1b2-c3d4e5f60718",
+  "stream": "account-fixture-2",
+  "seq": 1,
+  "type": "TransferCredited",
+  "account_id": "fixture-2",
+  "amount": 40,
+  "transfer_id": "0b8e6f2c-9d4a-4b7e-8c1f-2a3b4c5d6e7f",
+  "counterparty": "fixture-1",
+  "schema_version": 1
+}

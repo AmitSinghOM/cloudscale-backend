@@ -29,7 +29,7 @@ payoff: PostgreSQL was added without touching the domain (ADR-0004).
 ## Write path
 
 ```
-POST /v1/accounts/{id}/commands
+POST /v1/accounts/{id}/commands          POST /v1/accounts/{id}/transfers  (ADR-0011)
   │  ClientRateLimit (pre-auth, per IP) → BodySizeLimit → authenticate → authorize → per-subject limit
   ▼
 CommandService.normalize ── command_id, correlation_id, issuer, subject
@@ -39,10 +39,12 @@ CommandUnitOfWork.execute            ONE transaction:
   ├─ fold_stream(account) ─ upcast each stored event → AccountState   (ADR-0009)
   ├─ execute_command_decision ─ pure: (state, command) → accept | reject
   ├─ append event (stream, seq = expected_version+1)  ← UNIQUE(stream, seq) is the concurrency guard
+  │    transfer: fold the target too, decide_transfer → debit + credit legs sharing
+  │    transfer_id; append BOTH in ascending account order (no A→B/B→A deadlock)
   ├─ write event_envelope (identity, trace, schema_version)
-  └─ persist command_result
+  └─ persist command_result (postings: one per stream written)
   ▼
-201 / 200 (replay) / 409 / 422 / 400   (docs/API_ERRORS.md)
+201 (first execution and replay, byte-for-byte) / 409 / 422 / 400   (docs/API_ERRORS.md)
 ```
 
 | Guarantee | Mechanism | Proof |
@@ -51,6 +53,9 @@ CommandUnitOfWork.execute            ONE transaction:
 | Two writers on one version → exactly one wins | `UNIQUE (stream, seq)`; loser gets 409 with `current_version` | `test_concurrent_same_version_writers_yield_one_accept_one_conflict` |
 | Partial failure leaves nothing behind | single transaction; PostgreSQL autocommit trap fixed | savepoint / cross-connection visibility tests |
 | Decision logic exists once | `application/command_execution.py`; both adapters delegate | contract tests run against both tiers |
+| A transfer moves money or nothing | both legs appended and the result persisted in the same transaction; `expected_version` guards the source, `UNIQUE (stream, seq)` + fresh-fold retry guard the target | `test_transfer_appends_both_legs_atomically…`, `test_target_side_race_self_heals…` |
+| Transfers conserve the total | debit and credit are the same amount; `apply` refuses a negative balance | `test_transfers_conserve_the_total_and_never_go_negative` (property) |
+| Opposite-direction transfers never deadlock | legs appended in ascending account-id order | `test_opposite_direction_transfers_never_deadlock` (proven to raise `DeadlockDetected` without the ordering) |
 
 ## Read path and the log → projection pipeline
 
@@ -74,6 +79,7 @@ events (id order)                                                               
 | Poison never wedges the log | dead-letter with offset advance; `UnknownSchemaVersionError` is poison | `test_poison_event_is_dead_lettered…`, `test_consumer_dead_letters_an_event_from_the_future…` |
 | Exactly one consumer drains | session advisory lock per consumer name (ADR-0006) | lease tests; two-process SIGKILL run; soak failover 0.27 s |
 | Reads are eventual and say so | `consistency: "eventual"` in the response; clients poll to `committed_version` | `examples/python_client.py` |
+| …and eventual **per account** | a transfer's two legs are applied as two events; between them a reader may see the debit without the credit. Conservation holds in the log at every commit and in the projection at every quiescent point (ADR-0011) | `test_transfer_legs_project_into_both_balances_on_postgres` |
 
 ## Failure behaviour (what a client sees)
 
@@ -119,6 +125,7 @@ under `evidence/<sha>/`; targets and alerts in `docs/SLO.md`.
 | I want to… | Touch | Also |
 |---|---|---|
 | Add a command type | `domain/commands.py`, `domain/account.py`, `application/command_execution.py` | ADR; `docs/API_ERRORS.md`; `docs/openapi.json` regenerates |
+| Add an event type | `domain/events.py` (type, payload, `BALANCE_SIGN`), `domain/upcasting.py` (`CURRENT_SCHEMA_VERSION`), `adapters/compat.py`, a `tests/fixtures/events/<Type>.v1.json` | every balance projection reads `BALANCE_SIGN`; the corpus test fails until the fixture exists |
 | Change an event's shape | bump `CURRENT_SCHEMA_VERSION`, register an upcaster, add the fixture | ADR-0009; the corpus test tells you what is missing |
 | Add a table or column | `adapters/postgres/schema.py` **and** a new Alembic revision, bump `CURRENT_REVISION` | parity test asserts both paths match |
 | Add a setting | `HttpSettings` or `os.environ` | `docs/CONFIGURATION.md` (test enforces) |

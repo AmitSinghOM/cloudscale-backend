@@ -2,8 +2,9 @@
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from uuid import UUID
 
-from .commands import MAX_SIGNED_BIGINT, AccountCommand, Deposit, Withdraw
+from .commands import MAX_SIGNED_BIGINT, AccountCommand, Deposit, Transfer, Withdraw
 from .errors import (
     AccountIdentityMismatchError,
     AmountOutOfRangeError,
@@ -14,7 +15,13 @@ from .errors import (
     UnknownEventError,
     VersionOutOfRangeError,
 )
-from .events import AccountEvent, Deposited, Withdrawn
+from .events import (
+    AccountEvent,
+    Deposited,
+    TransferCredited,
+    TransferDebited,
+    Withdrawn,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,12 +77,26 @@ def _require_next_version(state: AccountState) -> None:
         )
 
 
+def _require_credit_fits(state: AccountState, amount: int, what: str) -> None:
+    if amount > MAX_SIGNED_BIGINT - state.balance:
+        raise AmountOutOfRangeError(
+            f"{what} would move balance outside the signed-BIGINT range"
+        )
+
+
+def _require_funds(state: AccountState, amount: int, what: str) -> None:
+    if amount > state.balance:
+        raise InsufficientFundsError(f"{what} amount exceeds current balance")
+
+
 def decide(state: AccountState, command: AccountCommand) -> AccountEvent:
     """Return the single event selected by a valid command without mutating state.
 
     Optimistic expected-version comparison belongs to the application/repository
     transaction. The command value validates that the supplied version is
     representable; this function makes only aggregate business decisions.
+    A :class:`Transfer` spans two aggregates and is decided by
+    :func:`decide_transfer`.
     """
 
     if not isinstance(command, (Deposit, Withdraw)):
@@ -85,36 +106,69 @@ def decide(state: AccountState, command: AccountCommand) -> AccountEvent:
     _require_next_version(state)
 
     if isinstance(command, Deposit):
-        if command.amount > MAX_SIGNED_BIGINT - state.balance:
-            raise AmountOutOfRangeError(
-                "deposit would move balance outside the signed-BIGINT range"
-            )
+        _require_credit_fits(state, command.amount, "deposit")
         return Deposited(account_id=command.account_id, amount=command.amount)
 
-    if command.amount > state.balance:
-        raise InsufficientFundsError("withdrawal amount exceeds current balance")
+    _require_funds(state, command.amount, "withdrawal")
     return Withdrawn(account_id=command.account_id, amount=command.amount)
+
+
+def decide_transfer(
+    source: AccountState,
+    target: AccountState,
+    command: Transfer,
+    *,
+    transfer_id: UUID,
+) -> tuple[TransferDebited, TransferCredited]:
+    """Return the debit and credit legs of a valid transfer (ADR-0011).
+
+    Pure: both states are folded by the caller inside the transaction that
+    will append both legs. The debit is checked against the source balance
+    and the credit against the target's headroom, so applying either leg can
+    never violate an aggregate invariant.
+    """
+
+    if not isinstance(command, Transfer):
+        raise UnknownCommandError(f"unsupported command type: {type(command).__name__}")
+
+    _require_matching_identity(source, command.account_id)
+    _require_matching_identity(target, command.target_account_id)
+    _require_next_version(source)
+    _require_next_version(target)
+    _require_funds(source, command.amount, "transfer")
+    _require_credit_fits(target, command.amount, "transfer")
+
+    debit = TransferDebited(
+        account_id=command.account_id,
+        amount=command.amount,
+        transfer_id=transfer_id,
+        counterparty=command.target_account_id,
+    )
+    credit = TransferCredited(
+        account_id=command.target_account_id,
+        amount=command.amount,
+        transfer_id=transfer_id,
+        counterparty=command.account_id,
+    )
+    return debit, credit
 
 
 def apply(state: AccountState, event: AccountEvent) -> AccountState:
     """Return a new state with one event applied; never mutate the input state."""
 
-    if not isinstance(event, (Deposited, Withdrawn)):
+    if not isinstance(event, (Deposited, Withdrawn, TransferDebited, TransferCredited)):
         raise UnknownEventError(f"unsupported event type: {type(event).__name__}")
 
     _require_matching_identity(state, event.account_id)
     _require_next_version(state)
 
-    if isinstance(event, Deposited):
-        if event.amount > MAX_SIGNED_BIGINT - state.balance:
-            raise AmountOutOfRangeError(
-                "deposit would move balance outside the signed-BIGINT range"
-            )
+    if isinstance(event, (Deposited, TransferCredited)):
+        _require_credit_fits(state, event.amount, "credit event")
         balance = state.balance + event.amount
     else:
         if event.amount > state.balance:
             raise InsufficientFundsError(
-                "withdrawal event would make account balance negative"
+                "debit event would make account balance negative"
             )
         balance = state.balance - event.amount
 
@@ -136,4 +190,4 @@ def fold(
     return state
 
 
-__all__ = ["AccountState", "apply", "decide", "fold"]
+__all__ = ["AccountState", "apply", "decide", "decide_transfer", "fold"]

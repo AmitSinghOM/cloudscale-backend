@@ -28,6 +28,10 @@
 > honestly not_evaluated). Kafka remains deferred behind the ports — see
 > [ROADMAP.md](./ROADMAP.md).
 
+Double-entry transfers between accounts (`POST /v1/accounts/{id}/transfers`,
+ADR-0011) commit both legs in one transaction with the same idempotency and
+concurrency guarantees as single-account commands.
+
 ## Quickstart (60 seconds, no infrastructure)
 
 ```bash

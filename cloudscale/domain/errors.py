@@ -55,6 +55,12 @@ class InsufficientFundsError(DomainError):
     code = "insufficient_funds"
 
 
+class SameAccountError(DomainError):
+    """A transfer names the same account as source and target."""
+
+    code = "same_account"
+
+
 class UnknownCommandError(DomainError):
     """The aggregate received an unsupported command type."""
 
@@ -76,6 +82,7 @@ __all__ = [
     "InvalidAccountStateError",
     "InvalidAmountError",
     "InvalidExpectedVersionError",
+    "SameAccountError",
     "UnknownCommandError",
     "UnknownEventError",
     "VersionOutOfRangeError",

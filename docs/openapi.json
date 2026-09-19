@@ -134,6 +134,37 @@
         "title": "RegisterAccountRequest",
         "type": "object"
       },
+      "TransferRequest": {
+        "additionalProperties": false,
+        "description": "Move ``amount`` from the path account to ``target_account_id`` (ADR-0011).\n\n``expected_version`` is the source stream's version; the target has no\nclient-supplied guard.",
+        "properties": {
+          "amount": {
+            "title": "Amount",
+            "type": "integer"
+          },
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "expected_version": {
+            "title": "Expected Version",
+            "type": "integer"
+          },
+          "target_account_id": {
+            "title": "Target Account Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "target_account_id",
+          "amount",
+          "expected_version"
+        ],
+        "title": "TransferRequest",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -338,9 +369,6 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Idempotent replay of a previously accepted command_id."
-          },
           "201": {
             "content": {
               "application/json": {
@@ -377,6 +405,70 @@
           }
         ],
         "summary": "Post Command"
+      }
+    },
+    "/v1/accounts/{account_id}/transfers": {
+      "post": {
+        "description": "Move funds from the path account to ``target_account_id`` (ADR-0011).\n\nAuthorization is on the source only: money leaves the caller's\naccount; the target may be any account, exactly as a deposit may\ncreate one. The target posting's ``committed_version`` is redacted\nunless the caller may read that account.",
+        "operationId": "post_transfer_v1_accounts__account_id__transfers_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TransferRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "CommandResult with outcome=domain_rejected and error_code, or a request naming the same account twice (same_account)."
+          },
+          "401": {
+            "description": "Missing, invalid or expired bearer token (fixed message)."
+          },
+          "403": {
+            "description": "Token valid but not authorized for this account."
+          },
+          "409": {
+            "description": "CommandResult: version_conflict (source stream) or command_id_conflict."
+          },
+          "422": {
+            "description": "CommandResult: insufficient_funds on the source."
+          },
+          "429": {
+            "description": "Rate limit exceeded; honour Retry-After."
+          },
+          "503": {
+            "description": "Command path unavailable; retry with the SAME command_id after Retry-After."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Post Transfer"
       }
     },
     "/v1/health": {

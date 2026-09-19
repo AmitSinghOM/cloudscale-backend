@@ -7,6 +7,7 @@ from .errors import (
     InvalidAccountIdError,
     InvalidAmountError,
     InvalidExpectedVersionError,
+    SameAccountError,
 )
 
 MAX_SIGNED_BIGINT = 2**63 - 1
@@ -66,6 +67,30 @@ class Withdraw:
         _validate_expected_version(self.expected_version)
 
 
-AccountCommand = Deposit | Withdraw
+@dataclass(frozen=True, slots=True)
+class Transfer:
+    """Request to move positive minor units from one account to another (ADR-0011).
 
-__all__ = ["AccountCommand", "Deposit", "MAX_SIGNED_BIGINT", "Withdraw"]
+    ``account_id`` is the source — the stream whose funds are at risk and the
+    only one whose ``expected_version`` the caller supplies. The target is
+    guarded by the storage's ``UNIQUE (stream, seq)`` inside the same
+    transaction.
+    """
+
+    account_id: str
+    target_account_id: str
+    amount: int
+    expected_version: int
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_account_id(self.target_account_id)
+        if self.account_id == self.target_account_id:
+            raise SameAccountError("a transfer needs two different accounts")
+        _validate_amount(self.amount)
+        _validate_expected_version(self.expected_version)
+
+
+AccountCommand = Deposit | Withdraw | Transfer
+
+__all__ = ["AccountCommand", "Deposit", "MAX_SIGNED_BIGINT", "Transfer", "Withdraw"]

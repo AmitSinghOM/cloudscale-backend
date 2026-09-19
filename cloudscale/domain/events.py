@@ -43,8 +43,69 @@ class Withdrawn:
         _validate_amount(self.amount)
 
 
-AccountEvent = Deposited | Withdrawn
-EventType = Literal["Deposited", "Withdrawn"]
+def _validate_transfer_leg(event: TransferDebited | TransferCredited) -> None:
+    _validate_account_id(event.account_id)
+    _validate_amount(event.amount)
+    _validate_uuid(event.transfer_id, "transfer_id")
+    _validate_account_id(event.counterparty)
+    if event.counterparty == event.account_id:
+        raise ValueError("a transfer leg's counterparty must be a different account")
+
+
+@dataclass(frozen=True, slots=True)
+class TransferDebited:
+    """Positive minor units left an account as one leg of a transfer (ADR-0011).
+
+    ``transfer_id`` pairs this leg with the ``TransferCredited`` on the
+    ``counterparty`` stream; both are appended in one transaction.
+    """
+
+    account_id: str
+    amount: int
+    transfer_id: UUID
+    counterparty: str
+
+    def __post_init__(self) -> None:
+        _validate_transfer_leg(self)
+
+
+@dataclass(frozen=True, slots=True)
+class TransferCredited:
+    """Positive minor units arrived in an account as one leg of a transfer."""
+
+    account_id: str
+    amount: int
+    transfer_id: UUID
+    counterparty: str
+
+    def __post_init__(self) -> None:
+        _validate_transfer_leg(self)
+
+
+AccountEvent = Deposited | Withdrawn | TransferDebited | TransferCredited
+EventType = Literal["Deposited", "Withdrawn", "TransferDebited", "TransferCredited"]
+_EVENT_TYPES: dict[type, EventType] = {
+    Deposited: "Deposited",
+    Withdrawn: "Withdrawn",
+    TransferDebited: "TransferDebited",
+    TransferCredited: "TransferCredited",
+}
+_TRANSFER_PAYLOAD_KEYS = frozenset(
+    {"account_id", "amount", "transfer_id", "counterparty"}
+)
+_CASH_PAYLOAD_KEYS = frozenset({"account_id", "amount"})
+
+#: Direction each event type moves the balance of ``account_id``. Every
+#: balance projection (typed fold, PostgreSQL and SQLite consumers, legacy
+#: BalanceProjection) reads this table so a new type cannot be half-wired.
+BALANCE_SIGN: Mapping[str, int] = MappingProxyType(
+    {
+        "Deposited": 1,
+        "Withdrawn": -1,
+        "TransferCredited": 1,
+        "TransferDebited": -1,
+    }
+)
 
 
 def _validate_positive_version(value: object, field_name: str) -> None:
@@ -152,11 +213,18 @@ def _canonical_json(value: Mapping[str, object]) -> str:
 
 
 def _event_payload(event: AccountEvent) -> dict[str, object]:
-    return {"account_id": event.account_id, "amount": event.amount}
+    payload: dict[str, object] = {
+        "account_id": event.account_id,
+        "amount": event.amount,
+    }
+    if isinstance(event, (TransferDebited, TransferCredited)):
+        payload["transfer_id"] = str(event.transfer_id)
+        payload["counterparty"] = event.counterparty
+    return payload
 
 
 def _event_type(event: AccountEvent) -> EventType:
-    return "Deposited" if isinstance(event, Deposited) else "Withdrawn"
+    return _EVENT_TYPES[type(event)]
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,8 +246,11 @@ class EventEnvelope:
         _validate_uuid(self.event_id, "event_id")
         _validate_account_id(self.stream_id)
         _validate_positive_version(self.stream_version, "stream_version")
-        if self.event_type not in ("Deposited", "Withdrawn"):
-            raise ValueError("event_type must be Deposited or Withdrawn")
+        if self.event_type not in _EVENT_TYPES.values():
+            raise ValueError(
+                "event_type must be Deposited, Withdrawn, TransferDebited or "
+                "TransferCredited"
+            )
         _validate_utc_timestamp(self.occurred_at, "occurred_at")
         _validate_uuid(self.correlation_id, "correlation_id")
         _validate_uuid(self.causation_id, "causation_id")
@@ -216,8 +287,10 @@ class EventEnvelope:
         stamps v1 on a v2-shaped payload corrupts every later fold.
         """
 
-        if not isinstance(event, (Deposited, Withdrawn)):
-            raise ValueError("event must be Deposited or Withdrawn")
+        if type(event) not in _EVENT_TYPES:
+            raise ValueError(
+                "event must be Deposited, Withdrawn, TransferDebited or TransferCredited"
+            )
         event_type = _event_type(event)
         if schema_version is None:
             schema_version = CURRENT_SCHEMA_VERSION[event_type]
@@ -235,15 +308,34 @@ class EventEnvelope:
         )
 
     def to_domain_event(self) -> AccountEvent:
-        """Reconstruct the task-1.3 event without changing envelope identity."""
+        """Reconstruct the typed event without changing envelope identity."""
 
-        if set(self.payload) != {"account_id", "amount"}:
+        account_id = cast(str, self.payload.get("account_id"))
+        amount = cast(int, self.payload.get("amount"))
+        if self.event_type in ("TransferDebited", "TransferCredited"):
+            if set(self.payload) != _TRANSFER_PAYLOAD_KEYS:
+                raise ValueError(
+                    "v1 transfer payload must contain exactly account_id, amount, "
+                    "transfer_id and counterparty"
+                )
+            transfer_id = _decode_uuid(self.payload["transfer_id"], "transfer_id")
+            counterparty = cast(str, self.payload["counterparty"])
+            leg = (
+                TransferDebited
+                if self.event_type == "TransferDebited"
+                else TransferCredited
+            )
+            return leg(
+                account_id=account_id,
+                amount=amount,
+                transfer_id=transfer_id,
+                counterparty=counterparty,
+            )
+        if set(self.payload) != _CASH_PAYLOAD_KEYS:
             raise ValueError("v1 payload must contain exactly account_id and amount")
-        account_id = self.payload["account_id"]
-        amount = self.payload["amount"]
         if self.event_type == "Deposited":
-            return Deposited(account_id=cast(str, account_id), amount=cast(int, amount))
-        return Withdrawn(account_id=cast(str, account_id), amount=cast(int, amount))
+            return Deposited(account_id=account_id, amount=amount)
+        return Withdrawn(account_id=account_id, amount=amount)
 
     def to_dict(self) -> dict[str, object]:
         """Return the complete v1 wire/storage representation."""
@@ -312,9 +404,12 @@ class EventEnvelope:
 
 
 __all__ = [
+    "BALANCE_SIGN",
     "AccountEvent",
     "Deposited",
     "EventEnvelope",
     "EventType",
+    "TransferCredited",
+    "TransferDebited",
     "Withdrawn",
 ]

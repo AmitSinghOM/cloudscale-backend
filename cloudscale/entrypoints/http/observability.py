@@ -147,6 +147,12 @@ def audit_command(
             "committed_version": result.committed_version,
             "event_id": str(result.event_id) if result.event_id else None,
             "error_code": result.error_code,
+            # Every stream the command wrote (ADR-0011): a transfer's audit
+            # record must name where the money went, not only where it left.
+            "postings": [
+                {"account_id": p.account_id, "event_id": str(p.event_id)}
+                for p in result.postings
+            ],
         },
     )
 
