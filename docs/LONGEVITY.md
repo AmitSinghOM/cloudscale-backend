@@ -123,4 +123,7 @@ not carried.
 *Adopted 2026-09-13 at v0.5.1; reviewed at v0.6.0 the same day (four policy items became enforced);
 reviewed at v0.7.0 on 2026-09-19 (no item past its target date; the "public contract change
 references an ADR" item was relabelled from enforced to policy with a dated plan, and ADR-0011
-was written before its code as that policy requires).*
+was written before its code as that policy requires); reviewed at v0.8.0 on 2026-09-20 (no item
+past its target date; ADR-0012/0013/0014 written before their code; the "add a projected quantity"
+and "add an HTTP route" procedures were added to ARCHITECTURE so the next contributor does not
+rediscover them).*

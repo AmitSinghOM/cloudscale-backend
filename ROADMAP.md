@@ -321,7 +321,7 @@ a 30-day availability window; backup/restore rehearsal; live (restart-free)
 admin revocation; consumer partitioning by account hash; alert routing to a
 pager; independent penetration test; static security lint (`ruff` S rules).
 
-## Phase 6 — Longevity (seven-year horizon)  ·  🚧 started 2026-09-13 · v0.6.0 tagged · v0.7.0 tagged 2026-09-19
+## Phase 6 — Longevity (seven-year horizon)  ·  🚧 started 2026-09-13 · v0.6.0 tagged · v0.7.0 tagged 2026-09-19 · v0.8.0 tagged 2026-09-20
 
 Governed by `docs/LONGEVITY.md`. The structure landed first (charter,
 ADR-0001..0010 reconstructing existing decisions, `CONTRIBUTING.md`,
@@ -334,6 +334,12 @@ What follows turns each remaining *policy* item into an *enforced* one.
       and prevented on PostgreSQL), conservation as a Hypothesis property,
       Alembic `0004` with a guarded downgrade. Released as v0.7.0 with the
       three review passes recorded under `docs/reviews/`.
+- [x] **Snapshots, N-leg postings, holds** (ADR-0012/0013/0014, 2026-09-20) —
+      command latency flat against stream depth (measured, both tiers);
+      2..16-leg balanced posting sets; reserve/post/void/expire with a
+      deterministic-id sweeper. Each ADR written before its code; an
+      independent review pass fixed one HIGH (hold retry idempotency) before
+      merge. Released as v0.8.0.
 - [x] **Longevity structure** (2026-09-13) — as above; ADR index and status
       lines checked by `tests/architecture/test_governance_docs.py`.
 - [x] **Event upcasters** (ADR-0009, 2026-09-13) — `domain/upcasting.py`

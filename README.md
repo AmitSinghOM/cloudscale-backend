@@ -2,8 +2,8 @@
 
 **A production-shaped distributed backend demonstrating CQRS, event sourcing, async processing, and resilience patterns at scale.**
 
-> **Status: Phases 0–5 done, hardened, with a seven-year longevity structure and
-> double-entry transfers (v0.7.0);
+> **Status: Phases 0–5 done, hardened, with a seven-year longevity structure,
+> double-entry transfers, N-leg postings, holds and stream snapshots (v0.8.0);
 > Milestone 1 (local correctness) verified;
 > all four evaluable Milestone 1 network gates passing on the SQLite tier.** The original
 > `cqrs/` command/query split ships with an in-memory event log, and the

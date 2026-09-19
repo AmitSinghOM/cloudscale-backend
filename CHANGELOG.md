@@ -6,6 +6,8 @@ integrator; the commit history says how.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-09-20
+
 Ledger depth: flat latency against stream depth, N-leg posting sets, and
 pending transfers.
 
@@ -185,7 +187,8 @@ fold (29.6× hot-path throughput).
 Phases 0–2: hexagonal core, idempotent command unit of work, resilient
 consumer with retry, circuit breaker and dead-letter redrive.
 
-[Unreleased]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.5.0...v0.5.1
