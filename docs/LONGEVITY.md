@@ -126,4 +126,6 @@ references an ADR" item was relabelled from enforced to policy with a dated plan
 was written before its code as that policy requires); reviewed at v0.8.0 on 2026-09-20 (no item
 past its target date; ADR-0012/0013/0014 written before their code; the "add a projected quantity"
 and "add an HTTP route" procedures were added to ARCHITECTURE so the next contributor does not
-rediscover them).*
+rediscover them); reviewed at v0.9.0 on 2026-09-20 (no item past its target date; ADR-0015 written
+before its code; the "add a read model" procedure and two revert guarantees were added to
+ARCHITECTURE, and THREAT_MODEL gained the revert-authorization and disclosure rows).*
