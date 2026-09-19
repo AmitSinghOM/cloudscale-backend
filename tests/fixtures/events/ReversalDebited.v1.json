@@ -1,0 +1,13 @@
+{
+  "id": 8,
+  "event_id": "4d5e6f7a-8b9c-4d0e-8f1a-3b4c5d6e7f8a",
+  "stream": "account-fixture-2",
+  "seq": 2,
+  "type": "ReversalDebited",
+  "account_id": "fixture-2",
+  "amount": 40,
+  "transfer_id": "7b8c9d0e-1f2a-4b3c-8d4e-5f6a7b8c9d0e",
+  "counterparty": "fixture-1",
+  "reverts": "0b8e6f2c-9d4a-4b7e-8c1f-2a3b4c5d6e7f",
+  "schema_version": 1
+}

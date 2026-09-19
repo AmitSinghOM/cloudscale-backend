@@ -39,12 +39,14 @@ from cloudscale.domain.account import (
     decide_post_hold,
     decide_postings,
     decide_release_hold,
+    decide_revert,
 )
 from cloudscale.domain.commands import (
     ExpireHold,
     Hold,
     Post,
     PostHold,
+    Revert,
     Transfer,
     VoidHold,
 )
@@ -64,6 +66,14 @@ class CommandDecisionStorage(Protocol):
 
     def open_hold(self, account_id: str, hold_id: UUID) -> OpenHold | None:
         """The open hold derived from ``account_id``'s own events (ADR-0014)."""
+        ...
+
+    def legs_of(self, transfer_id: UUID) -> tuple[AccountEvent, ...]:
+        """Every row of a posting set, across streams (ADR-0015)."""
+        ...
+
+    def reverted_by(self, transfer_id: UUID) -> UUID | None:
+        """The reversal that names ``transfer_id``, if any (ADR-0015)."""
         ...
 
     def append_event(self, envelope: EventEnvelope, event: AccountEvent) -> None: ...
@@ -207,6 +217,22 @@ def _decide_legs(
         hold = storage.open_hold(command.account_id, command.hold_id)
         released = decide_release_hold(state, hold, command, now=now)
         return [(released, state.version + 1)]
+    if isinstance(command, Revert):
+        original = storage.legs_of(command.transfer_id)
+        states = {command.account_id: state}
+        for original_leg in original:
+            if original_leg.account_id not in states:
+                states[original_leg.account_id] = storage.fold_stream(
+                    original_leg.account_id
+                )
+        events = decide_revert(
+            states,
+            original,
+            command,
+            transfer_id=request.command_id,
+            reverted_by=storage.reverted_by(command.transfer_id),
+        )
+        return _number_legs(states, events)
     return [(decide(state, command), state.version + 1)]
 
 

@@ -15,6 +15,7 @@ from cloudscale.domain.commands import (
     Hold,
     Post,
     PostHold,
+    Revert,
     Transfer,
     VoidHold,
     Withdraw,
@@ -33,6 +34,7 @@ _COMMAND_TYPES = (
     PostHold,
     VoidHold,
     ExpireHold,
+    Revert,
 )
 
 
@@ -99,6 +101,8 @@ def _command_specific_fields(command: AccountCommand) -> dict[str, object]:
         return {"hold_id": str(command.hold_id), "amount": command.amount}
     if isinstance(command, (VoidHold, ExpireHold)):
         return {"hold_id": str(command.hold_id)}
+    if isinstance(command, Revert):
+        return {"transfer_id": str(command.transfer_id)}
     if isinstance(command, Transfer):
         return {
             "amount": command.amount,

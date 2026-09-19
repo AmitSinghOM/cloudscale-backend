@@ -162,6 +162,8 @@ def test_balance_sign_table_covers_every_event_type() -> None:
         "HoldPlaced": 0,
         "HoldReleased": 0,
         "HoldPosted": -1,
+        "ReversalDebited": -1,
+        "ReversalCredited": 1,
     }
     # Every event type has exactly one entry in each sign table (ADR-0014).
     assert set(HELD_SIGN) == set(BALANCE_SIGN) == set(CURRENT_SCHEMA_VERSION)

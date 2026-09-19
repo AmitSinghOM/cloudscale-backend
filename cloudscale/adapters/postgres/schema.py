@@ -15,7 +15,7 @@ information_schema is identical.
 from __future__ import annotations
 
 #: Alembic revision the adapters require in ``migrations`` schema mode.
-CURRENT_REVISION = "0006_holds"
+CURRENT_REVISION = "0007_reverts"
 
 EVENTS = """
 CREATE TABLE IF NOT EXISTS events (
@@ -36,6 +36,11 @@ ALTER TABLE events ADD COLUMN IF NOT EXISTS expires_at TEXT;
 ALTER TABLE events ADD COLUMN IF NOT EXISTS release_reason TEXT;
 CREATE INDEX IF NOT EXISTS events_stream_transfer_idx ON events (stream, transfer_id)
     WHERE transfer_id IS NOT NULL;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS reverts TEXT;
+CREATE INDEX IF NOT EXISTS events_transfer_idx ON events (transfer_id)
+    WHERE transfer_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS events_reverts_idx ON events (reverts)
+    WHERE reverts IS NOT NULL;
 CREATE INDEX IF NOT EXISTS events_unpublished_idx ON events (id) WHERE NOT published;
 """
 

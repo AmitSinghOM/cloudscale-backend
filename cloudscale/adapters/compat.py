@@ -13,6 +13,8 @@ from cloudscale.domain.events import (
     HoldPlaced,
     HoldPosted,
     HoldReleased,
+    ReversalCredited,
+    ReversalDebited,
     TransferCredited,
     TransferDebited,
     Withdrawn,
@@ -28,6 +30,8 @@ _KNOWN_TYPES = frozenset(
         "HoldPlaced",
         "HoldReleased",
         "HoldPosted",
+        "ReversalDebited",
+        "ReversalCredited",
     }
 )
 
@@ -72,6 +76,19 @@ def legacy_event_to_domain(event: Mapping[str, object]) -> AccountEvent:
         )
     if event_type in ("HoldPlaced", "HoldReleased", "HoldPosted"):
         return _hold_event_from_legacy(event_type, event)
+    if event_type in ("ReversalDebited", "ReversalCredited"):
+        transfer_id = event.get("transfer_id")
+        reverts = event.get("reverts")
+        kind = ReversalDebited if event_type == "ReversalDebited" else ReversalCredited
+        return kind(
+            account_id=account_id,  # type: ignore[arg-type]
+            amount=amount,  # type: ignore[arg-type]
+            transfer_id=UUID(transfer_id)
+            if isinstance(transfer_id, str)
+            else transfer_id,  # type: ignore[arg-type]
+            counterparty=event.get("counterparty"),  # type: ignore[arg-type]
+            reverts=UUID(reverts) if isinstance(reverts, str) else reverts,  # type: ignore[arg-type]
+        )
     raise ValueError(f"unsupported legacy event type: {event_type!r}")
 
 
@@ -126,12 +143,13 @@ def domain_event_to_legacy(
             "amount": event.amount,
         }
     )
-    transfer_id, counterparty, expires_at, reason = event_row_fields(event)
+    transfer_id, counterparty, expires_at, reason, reverts = event_row_fields(event)
     for key, value in (
         ("transfer_id", transfer_id),
         ("counterparty", counterparty),
         ("expires_at", expires_at),
         ("release_reason", reason),
+        ("reverts", reverts),
     ):
         if value is not None:
             legacy[key] = value
@@ -155,28 +173,38 @@ def adapt_legacy_event(event: dict) -> dict:
 def transfer_leg_fields(event: AccountEvent) -> tuple[str | None, str | None]:
     """Return ``(transfer_id, counterparty)`` for the ``events`` row; NULLs otherwise."""
 
-    transfer_id, counterparty, _, _ = event_row_fields(event)
+    transfer_id, counterparty, _, _, _ = event_row_fields(event)
     return transfer_id, counterparty
 
 
-def event_row_fields(
-    event: AccountEvent,
-) -> tuple[str | None, str | None, str | None, str | None]:
-    """Return ``(transfer_id, counterparty, expires_at, release_reason)`` for the row.
+RowFields = tuple[str | None, str | None, str | None, str | None, str | None]
 
-    Hold events store their ``hold_id`` in ``transfer_id`` (ADR-0014); every
-    other field is NULL where the event type has no such attribute.
+
+def event_row_fields(event: AccountEvent) -> RowFields:
+    """Return ``(transfer_id, counterparty, expires_at, release_reason, reverts)``.
+
+    Hold events store their ``hold_id`` in ``transfer_id`` (ADR-0014); a
+    reversal stores the set it mirrors in ``reverts`` (ADR-0015). Every field
+    is NULL where the event type has no such attribute.
     """
 
     if isinstance(event, (TransferDebited, TransferCredited)):
-        return str(event.transfer_id), event.counterparty, None, None
+        return str(event.transfer_id), event.counterparty, None, None, None
     if isinstance(event, HoldPlaced):
-        return str(event.hold_id), event.counterparty, event.expires_at, None
+        return str(event.hold_id), event.counterparty, event.expires_at, None, None
     if isinstance(event, HoldReleased):
-        return str(event.hold_id), None, None, event.reason
+        return str(event.hold_id), None, None, event.reason, None
     if isinstance(event, HoldPosted):
-        return str(event.hold_id), event.counterparty, None, None
-    return None, None, None, None
+        return str(event.hold_id), event.counterparty, None, None, None
+    if isinstance(event, (ReversalDebited, ReversalCredited)):
+        return (
+            str(event.transfer_id),
+            event.counterparty,
+            None,
+            None,
+            str(event.reverts),
+        )
+    return None, None, None, None, None
 
 
 def open_hold_from_rows(

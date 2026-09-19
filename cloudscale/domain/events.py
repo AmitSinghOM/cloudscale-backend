@@ -163,6 +163,50 @@ class HoldPosted:
             raise ValueError("a hold's counterparty must be a different account")
 
 
+def _validate_reversal_leg(event: ReversalDebited | ReversalCredited) -> None:
+    _validate_account_id(event.account_id)
+    _validate_amount(event.amount)
+    _validate_uuid(event.transfer_id, "transfer_id")
+    _validate_uuid(event.reverts, "reverts")
+    if event.reverts == event.transfer_id:
+        raise ValueError("a reversal cannot revert itself")
+    _validate_account_id(event.counterparty)
+    if event.counterparty == event.account_id:
+        raise ValueError("a reversal leg's counterparty must be a different account")
+
+
+@dataclass(frozen=True, slots=True)
+class ReversalDebited:
+    """Money left an account to undo a credit it received in ``reverts`` (ADR-0015).
+
+    ``transfer_id`` groups the reversal's own legs; ``reverts`` names the
+    posting set being mirrored. The original rows are never touched.
+    """
+
+    account_id: str
+    amount: int
+    transfer_id: UUID
+    counterparty: str
+    reverts: UUID
+
+    def __post_init__(self) -> None:
+        _validate_reversal_leg(self)
+
+
+@dataclass(frozen=True, slots=True)
+class ReversalCredited:
+    """Money returned to an account to undo a debit it paid in ``reverts`` (ADR-0015)."""
+
+    account_id: str
+    amount: int
+    transfer_id: UUID
+    counterparty: str
+    reverts: UUID
+
+    def __post_init__(self) -> None:
+        _validate_reversal_leg(self)
+
+
 AccountEvent = (
     Deposited
     | Withdrawn
@@ -171,6 +215,8 @@ AccountEvent = (
     | HoldPlaced
     | HoldReleased
     | HoldPosted
+    | ReversalDebited
+    | ReversalCredited
 )
 EventType = Literal[
     "Deposited",
@@ -180,6 +226,8 @@ EventType = Literal[
     "HoldPlaced",
     "HoldReleased",
     "HoldPosted",
+    "ReversalDebited",
+    "ReversalCredited",
 ]
 _EVENT_TYPES: dict[type, EventType] = {
     Deposited: "Deposited",
@@ -189,6 +237,8 @@ _EVENT_TYPES: dict[type, EventType] = {
     HoldPlaced: "HoldPlaced",
     HoldReleased: "HoldReleased",
     HoldPosted: "HoldPosted",
+    ReversalDebited: "ReversalDebited",
+    ReversalCredited: "ReversalCredited",
 }
 _TRANSFER_PAYLOAD_KEYS = frozenset(
     {"account_id", "amount", "transfer_id", "counterparty"}
@@ -200,6 +250,9 @@ _HOLD_PLACED_PAYLOAD_KEYS = frozenset(
 _HOLD_RELEASED_PAYLOAD_KEYS = frozenset({"account_id", "amount", "hold_id", "reason"})
 _HOLD_POSTED_PAYLOAD_KEYS = frozenset(
     {"account_id", "amount", "hold_id", "counterparty"}
+)
+_REVERSAL_PAYLOAD_KEYS = frozenset(
+    {"account_id", "amount", "transfer_id", "counterparty", "reverts"}
 )
 
 #: Direction each event type moves the balance of ``account_id``. Every
@@ -214,6 +267,8 @@ BALANCE_SIGN: Mapping[str, int] = MappingProxyType(
         "HoldPlaced": 0,
         "HoldReleased": 0,
         "HoldPosted": -1,
+        "ReversalDebited": -1,
+        "ReversalCredited": 1,
     }
 )
 
@@ -228,6 +283,8 @@ HELD_SIGN: Mapping[str, int] = MappingProxyType(
         "HoldPlaced": 1,
         "HoldReleased": -1,
         "HoldPosted": -1,
+        "ReversalDebited": 0,
+        "ReversalCredited": 0,
     }
 )
 
@@ -354,6 +411,10 @@ def _event_payload(event: AccountEvent) -> dict[str, object]:
     elif isinstance(event, HoldPosted):
         payload["hold_id"] = str(event.hold_id)
         payload["counterparty"] = event.counterparty
+    elif isinstance(event, (ReversalDebited, ReversalCredited)):
+        payload["transfer_id"] = str(event.transfer_id)
+        payload["counterparty"] = event.counterparty
+        payload["reverts"] = str(event.reverts)
     return payload
 
 
@@ -467,6 +528,24 @@ class EventEnvelope:
             )
         if self.event_type in ("HoldPlaced", "HoldReleased", "HoldPosted"):
             return self._hold_event(account_id, amount)
+        if self.event_type in ("ReversalDebited", "ReversalCredited"):
+            if set(self.payload) != _REVERSAL_PAYLOAD_KEYS:
+                raise ValueError(
+                    "v1 reversal payload must contain exactly account_id, amount, "
+                    "transfer_id, counterparty and reverts"
+                )
+            kind = (
+                ReversalDebited
+                if self.event_type == "ReversalDebited"
+                else ReversalCredited
+            )
+            return kind(
+                account_id=account_id,
+                amount=amount,
+                transfer_id=_decode_uuid(self.payload["transfer_id"], "transfer_id"),
+                counterparty=cast(str, self.payload["counterparty"]),
+                reverts=_decode_uuid(self.payload["reverts"], "reverts"),
+            )
         if set(self.payload) != _CASH_PAYLOAD_KEYS:
             raise ValueError("v1 payload must contain exactly account_id and amount")
         if self.event_type == "Deposited":
@@ -583,6 +662,8 @@ __all__ = [
     "HoldPosted",
     "HoldReleaseReason",
     "HoldReleased",
+    "ReversalCredited",
+    "ReversalDebited",
     "TransferCredited",
     "TransferDebited",
     "Withdrawn",

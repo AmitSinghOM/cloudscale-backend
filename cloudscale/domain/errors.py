@@ -115,6 +115,24 @@ class InvalidExpiryError(DomainError):
     code = "invalid_expiry"
 
 
+class NotRevertibleError(DomainError):
+    """``transfer_id`` names nothing that moved money as a grouped set (ADR-0015)."""
+
+    code = "not_revertible"
+
+
+class AlreadyRevertedError(DomainError):
+    """A reversal naming this ``transfer_id`` is already in the log (ADR-0015)."""
+
+    code = "already_reverted"
+
+
+class AnchorNotCreditedError(DomainError):
+    """The revert's anchor is not an account the revert credits (ADR-0015)."""
+
+    code = "anchor_not_credited"
+
+
 class UnknownCommandError(DomainError):
     """The aggregate received an unsupported command type."""
 
@@ -129,7 +147,9 @@ class UnknownEventError(DomainError):
 
 __all__ = [
     "AccountIdentityMismatchError",
+    "AlreadyRevertedError",
     "AmountOutOfRangeError",
+    "AnchorNotCreditedError",
     "AnchorNotDebitedError",
     "CaptureExceedsHoldError",
     "DomainError",
@@ -143,6 +163,7 @@ __all__ = [
     "InvalidAmountError",
     "InvalidExpectedVersionError",
     "InvalidExpiryError",
+    "NotRevertibleError",
     "SameAccountError",
     "TooManyLegsError",
     "UnbalancedPostingError",

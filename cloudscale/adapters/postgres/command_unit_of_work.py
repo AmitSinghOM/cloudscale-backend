@@ -51,12 +51,12 @@ _MAX_RACE_RETRIES = 2
 
 _SELECT_FROM_SEQ = (
     "SELECT seq, event_id, type, account_id, amount, transfer_id, counterparty, "
-    "expires_at, release_reason, schema_version FROM events "
+    "expires_at, release_reason, reverts, schema_version FROM events "
     "WHERE stream = %s AND seq >= %s ORDER BY seq ASC"
 )
 _SELECT_ALL = (
     "SELECT seq, event_id, type, account_id, amount, transfer_id, counterparty, "
-    "expires_at, release_reason, schema_version FROM events "
+    "expires_at, release_reason, reverts, schema_version FROM events "
     "WHERE stream = %s ORDER BY seq ASC"
 )
 _SELECT_HOLD = (
@@ -64,6 +64,14 @@ _SELECT_HOLD = (
     "release_reason, schema_version FROM events "
     "WHERE stream = %s AND transfer_id = %s AND type IN "
     "('HoldPlaced', 'HoldReleased', 'HoldPosted') ORDER BY seq ASC"
+)
+_SELECT_LEGS = (
+    "SELECT type, account_id, amount, transfer_id, counterparty, expires_at, "
+    "release_reason, reverts, schema_version FROM events "
+    "WHERE transfer_id = %s ORDER BY id ASC"
+)
+_SELECT_REVERTED_BY = (
+    "SELECT transfer_id FROM events WHERE reverts = %s ORDER BY id ASC LIMIT 1"
 )
 
 
@@ -116,6 +124,16 @@ class _BoundStorage:
         ).fetchall()
         return open_hold_from_rows(hold_id, (dict(r) for r in rows))
 
+    def legs_of(self, transfer_id: UUID) -> tuple[AccountEvent, ...]:
+        """Every row of the posting set ``transfer_id``, across streams (ADR-0015)."""
+        rows = self._conn.execute(_SELECT_LEGS, (str(transfer_id),)).fetchall()
+        return tuple(legacy_event_to_domain(upcast(dict(r))) for r in rows)
+
+    def reverted_by(self, transfer_id: UUID) -> UUID | None:
+        """The reversal that names ``transfer_id``, if any (ADR-0015)."""
+        row = self._conn.execute(_SELECT_REVERTED_BY, (str(transfer_id),)).fetchone()
+        return None if row is None else UUID(str(row["transfer_id"]))
+
     def _read_snapshot(self, stream: str) -> StreamSnapshot | None:
         row = self._conn.execute(
             "SELECT seq, state_json, state_version, anchor_event_id "
@@ -151,12 +169,12 @@ class _BoundStorage:
         )
 
     def append_event(self, envelope: EventEnvelope, event: AccountEvent) -> None:
-        transfer_id, counterparty, expires_at, reason = event_row_fields(event)
+        transfer_id, counterparty, expires_at, reason, reverts = event_row_fields(event)
         self._conn.execute(
             "INSERT INTO events "
             "(event_id, stream, seq, type, account_id, amount, schema_version, "
-            "transfer_id, counterparty, expires_at, release_reason) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            "transfer_id, counterparty, expires_at, release_reason, reverts) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
             (
                 str(envelope.event_id),
                 _stream_name(event.account_id),
@@ -169,6 +187,7 @@ class _BoundStorage:
                 counterparty,
                 expires_at,
                 reason,
+                reverts,
             ),
         )
         self._conn.execute(
@@ -230,6 +249,14 @@ class PostgresCommandUnitOfWork:
     def open_hold(self, account_id: str, hold_id: UUID) -> OpenHold | None:
         with self._pool.connection() as conn:
             return _BoundStorage(conn, snapshot_every=0).open_hold(account_id, hold_id)
+
+    def legs_of(self, transfer_id: UUID) -> tuple[AccountEvent, ...]:
+        with self._pool.connection() as conn:
+            return _BoundStorage(conn, snapshot_every=0).legs_of(transfer_id)
+
+    def reverted_by(self, transfer_id: UUID) -> UUID | None:
+        with self._pool.connection() as conn:
+            return _BoundStorage(conn, snapshot_every=0).reverted_by(transfer_id)
 
     def execute(self, request: NormalizedCommand) -> CommandResult:
         with self._pool.connection() as conn:
