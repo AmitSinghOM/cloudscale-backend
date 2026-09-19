@@ -20,6 +20,7 @@ from cloudscale.domain.commands import (
     VoidHold,
     Withdraw,
 )
+from cloudscale.domain.events import AccountEvent
 from cloudscale.domain.results import CommandResult
 
 from .ports import CommandUnitOfWork, NormalizedCommand
@@ -154,6 +155,11 @@ class CommandService:
     ) -> None:
         self._unit_of_work = unit_of_work
         self._correlation_id_factory = correlation_id_factory
+
+    def legs_of(self, transfer_id: UUID) -> tuple[AccountEvent, ...]:
+        """The committed legs of a posting set, from the log (ADR-0015)."""
+
+        return self._unit_of_work.legs_of(transfer_id)
 
     def execute(
         self,

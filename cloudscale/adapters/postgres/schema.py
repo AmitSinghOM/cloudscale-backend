@@ -101,6 +101,19 @@ CREATE TABLE IF NOT EXISTS holds (
     state      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS holds_open_expiry_idx ON holds (expires_at) WHERE state = 'open';
+CREATE TABLE IF NOT EXISTS transfers (
+    transfer_id TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    reverts     TEXT,
+    reverted_by TEXT
+);
+CREATE TABLE IF NOT EXISTS transfer_legs (
+    transfer_id TEXT NOT NULL,
+    account_id  TEXT NOT NULL,
+    amount      BIGINT NOT NULL,
+    direction   TEXT NOT NULL,
+    PRIMARY KEY (transfer_id, account_id)
+);
 CREATE TABLE IF NOT EXISTS processed_events (
     event_id TEXT PRIMARY KEY
 );

@@ -30,6 +30,27 @@ def upgrade() -> None:
         "CREATE INDEX IF NOT EXISTS events_reverts_idx ON events (reverts) "
         "WHERE reverts IS NOT NULL"
     )
+    op.execute(
+        """
+        CREATE TABLE IF NOT EXISTS transfers (
+            transfer_id TEXT PRIMARY KEY,
+            kind        TEXT NOT NULL,
+            reverts     TEXT,
+            reverted_by TEXT
+        )
+        """
+    )
+    op.execute(
+        """
+        CREATE TABLE IF NOT EXISTS transfer_legs (
+            transfer_id TEXT NOT NULL,
+            account_id  TEXT NOT NULL,
+            amount      BIGINT NOT NULL,
+            direction   TEXT NOT NULL,
+            PRIMARY KEY (transfer_id, account_id)
+        )
+        """
+    )
 
 
 def downgrade() -> None:
@@ -51,6 +72,9 @@ def downgrade() -> None:
         END $$;
         """
     )
+    # Read-model rows are derived: removing them loses nothing the log cannot rebuild.
+    op.drop_table("transfer_legs")
+    op.drop_table("transfers")
     op.execute("DROP INDEX IF EXISTS events_reverts_idx")
     op.execute("DROP INDEX IF EXISTS events_transfer_idx")
     op.execute("ALTER TABLE events DROP COLUMN IF EXISTS reverts")

@@ -1,12 +1,15 @@
-"""Money movement: single-account commands, transfers (ADR-0011), posting sets (ADR-0013)."""
+"""Money movement: commands, transfers (ADR-0011), posting sets (ADR-0013), reverts (ADR-0015)."""
 
 from __future__ import annotations
+
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
 
-from cloudscale.domain.commands import Deposit, Leg, Post, Transfer, Withdraw
+from cloudscale.domain.commands import Deposit, Leg, Post, Revert, Transfer, Withdraw
 from cloudscale.domain.errors import DomainError
+from cloudscale.domain.events import BALANCE_SIGN
 from cloudscale.entrypoints.http.auth import Principal, authorize_account
 from cloudscale.entrypoints.http.context import (
     API_VERSION,
@@ -17,6 +20,7 @@ from cloudscale.entrypoints.http.context import (
 from cloudscale.entrypoints.http.models import (
     CommandRequest,
     PostingsRequest,
+    RevertRequest,
     TransferRequest,
 )
 
@@ -166,7 +170,62 @@ def build_router(ctx: RouteContext) -> APIRouter:
             result, may_read=lambda target: ctx.may_read(principal, target)
         )
 
-    # -- holds (ADR-0014) ---------------------------------------------------------
+    @router.post(
+        f"/{API_VERSION}/accounts/{{account_id}}/transfers/{{transfer_id}}/revert",
+        status_code=201,
+        responses={
+            400: {
+                "description": (
+                    "CommandResult with outcome=domain_rejected and error_code: "
+                    "not_revertible (cash movements, hold placements, unknown id) or "
+                    "anchor_not_credited."
+                )
+            },
+            409: {
+                "description": (
+                    "CommandResult: already_reverted, version_conflict (anchor stream) "
+                    "or command_id_conflict."
+                )
+            },
+            422: {
+                "description": (
+                    "CommandResult: insufficient_funds -- a payee no longer has the "
+                    "money available; nothing was appended."
+                )
+            },
+            **AUTH_RESPONSES,
+        },
+    )
+    def post_revert(
+        account_id: str,
+        transfer_id: UUID,
+        request: RevertRequest,
+        principal: Principal = Depends(ctx.authenticated),
+    ) -> JSONResponse:
+        """Append the mirror of a committed posting set (ADR-0015).
+
+        Authorization is on the accounts the revert DEBITS (every original
+        payee) or the admin scope -- never the anchor alone, or a payer could
+        claw back a payment unilaterally. The debit set is read from the log,
+        not the read model, so a just-committed set can be reverted at once.
+        """
+        authorize_account(principal, account_id, ctx.account_registry)
+        for leg in ctx.executor.legs_of(transfer_id):
+            if BALANCE_SIGN[type(leg).__name__] > 0:  # they received it: we debit them
+                authorize_account(principal, leg.account_id, ctx.account_registry)
+        try:
+            command = Revert(account_id, transfer_id, request.expected_version)
+        except DomainError as error:
+            raise HTTPException(status_code=400, detail=error.code) from error
+        result = ctx.executor.execute(
+            command,
+            command_id=request.command_id,
+            principal=principal,
+            command_type="revert",
+        )
+        return command_response(
+            result, may_read=lambda target: ctx.may_read(principal, target)
+        )
 
     return router
 

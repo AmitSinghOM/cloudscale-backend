@@ -22,6 +22,10 @@ from cloudscale.adapters.compat import adapt_legacy_event
 from cloudscale.adapters.postgres import schema
 from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cloudscale.adapters.sqlite_compat.dead_letter_store import RedriveOutcome
+from cloudscale.application.transfers_read_model import (
+    kind_for_leg_count,
+    transfer_row_effect,
+)
 from cloudscale.domain.events import BALANCE_SIGN, HELD_SIGN
 
 _SCHEMA = schema.PROJECTION
@@ -105,6 +109,30 @@ class PostgresProjectionStore:
             (account_id, delta, held_delta),
         )
         self._apply_to_holds(conn, event_type, event)
+        self._apply_to_transfers(conn, event)
+
+    @staticmethod
+    def _apply_to_transfers(conn: psycopg.Connection[DictRow], event: dict) -> None:
+        """Maintain the per-set read model (ADR-0015); every statement is idempotent."""
+        effect = transfer_row_effect(event)
+        if effect is None:
+            return
+        conn.execute(
+            "INSERT INTO transfers (transfer_id, kind, reverts) VALUES (%s, %s, %s) "
+            "ON CONFLICT (transfer_id) DO NOTHING",
+            (effect.transfer_id, effect.kind, effect.reverts),
+        )
+        conn.execute(
+            "INSERT INTO transfer_legs (transfer_id, account_id, amount, direction) "
+            "VALUES (%s, %s, %s, %s) ON CONFLICT (transfer_id, account_id) DO NOTHING",
+            (effect.transfer_id, effect.account_id, effect.amount, effect.direction),
+        )
+        if effect.marks_reverted is not None:
+            conn.execute(
+                "UPDATE transfers SET reverted_by = %s "
+                "WHERE transfer_id = %s AND reverted_by IS NULL",
+                (effect.transfer_id, effect.marks_reverted),
+            )
 
     @staticmethod
     def _apply_to_holds(
@@ -263,6 +291,25 @@ class PostgresProjectionStore:
             "held": int(row["held"]),
             "version": int(row["version"]),
         }
+
+    def transfer(self, transfer_id: str) -> dict | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT transfer_id, kind, reverts, reverted_by FROM transfers "
+                "WHERE transfer_id = %s",
+                (transfer_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            legs = conn.execute(
+                "SELECT account_id, amount, direction FROM transfer_legs "
+                "WHERE transfer_id = %s ORDER BY account_id",
+                (transfer_id,),
+            ).fetchall()
+        out = dict(row)
+        out["legs"] = [dict(leg) for leg in legs]
+        out["kind"] = kind_for_leg_count(out["kind"], len(legs))
+        return out
 
     def open_holds_expired_at(self, now_iso: str) -> list[dict]:
         """Open holds whose ``expires_at`` <= ``now_iso`` (the sweeper's query)."""

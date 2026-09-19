@@ -50,7 +50,11 @@ from cloudscale.domain.commands import (
     Transfer,
     VoidHold,
 )
-from cloudscale.domain.errors import DomainError, InsufficientFundsError
+from cloudscale.domain.errors import (
+    AlreadyRevertedError,
+    DomainError,
+    InsufficientFundsError,
+)
 from cloudscale.domain.events import AccountEvent, EventEnvelope
 from cloudscale.domain.results import CommandOutcome, CommandResult, Posting
 
@@ -254,6 +258,10 @@ def _number_legs(
 def _rejection_for(error: DomainError) -> tuple[CommandOutcome, int]:
     if isinstance(error, InsufficientFundsError):
         return CommandOutcome.INSUFFICIENT_FUNDS, 422
+    if isinstance(error, AlreadyRevertedError):
+        # A state conflict, not a malformed request (ADR-0015): the set was
+        # reverted by someone else first. Same class as version_conflict.
+        return CommandOutcome.DOMAIN_REJECTED, 409
     return CommandOutcome.DOMAIN_REJECTED, 400
 
 

@@ -10,8 +10,9 @@ from typing import Protocol, TypeVar
 from uuid import UUID
 
 from cloudscale.domain.commands import AccountCommand
+from cloudscale.domain.events import AccountEvent
 from cloudscale.domain.events import EventEnvelope
-from cloudscale.domain.results import BalanceView, CommandResult
+from cloudscale.domain.results import BalanceView, CommandResult, TransferView
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,11 +64,23 @@ class CommandUnitOfWork(Protocol):
 
     def execute(self, request: NormalizedCommand) -> CommandResult: ...
 
+    def legs_of(self, transfer_id: UUID) -> tuple[AccountEvent, ...]:
+        """The committed legs grouped by ``transfer_id``, from the log (ADR-0015).
+
+        Read-only; lets the HTTP tier authorize a revert on the accounts it
+        will debit before the command runs, from the authoritative source.
+        """
+        ...
+
 
 class ProjectionReader(Protocol):
     """Read a projection, returning ``None`` when the account is absent."""
 
     def get_balance(self, account_id: str) -> BalanceView | None: ...
+
+    def get_transfer(self, transfer_id: UUID) -> TransferView | None:
+        """The committed posting set ``transfer_id``, or ``None`` (ADR-0015)."""
+        ...
 
 
 class EventReader(Protocol):
