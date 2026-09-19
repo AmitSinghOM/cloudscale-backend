@@ -60,31 +60,8 @@ def canonical_command_payload(
         "schema_version": COMMAND_SCHEMA_VERSION,
         "subject": subject,
         "type": type(command).__name__,
+        **_command_specific_fields(command),
     }
-    if isinstance(command, Post):
-        # Leg order is part of the request: the same set in a different order
-        # is a different intent under the same command_id (conflict, not replay).
-        normalized["postings"] = [
-            {
-                "account_id": leg.account_id,
-                "amount": leg.amount,
-                "direction": leg.direction,
-            }
-            for leg in command.postings
-        ]
-    elif isinstance(command, Hold):
-        normalized["amount"] = command.amount
-        normalized["target_account_id"] = command.target_account_id
-        normalized["expires_at"] = command.expires_at
-    elif isinstance(command, PostHold):
-        normalized["hold_id"] = str(command.hold_id)
-        normalized["amount"] = command.amount  # None = capture the full hold
-    elif isinstance(command, (VoidHold, ExpireHold)):
-        normalized["hold_id"] = str(command.hold_id)
-    else:
-        normalized["amount"] = command.amount
-    if isinstance(command, Transfer):
-        normalized["target_account_id"] = command.target_account_id
     return json.dumps(
         normalized,
         allow_nan=False,
@@ -92,6 +69,40 @@ def canonical_command_payload(
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
+
+
+def _command_specific_fields(command: AccountCommand) -> dict[str, object]:
+    """The business fields that distinguish one intent from another."""
+    if isinstance(command, Post):
+        # Leg order is part of the request: the same set in a different order
+        # is a different intent under the same command_id (conflict, not replay).
+        return {
+            "postings": [
+                {
+                    "account_id": leg.account_id,
+                    "amount": leg.amount,
+                    "direction": leg.direction,
+                }
+                for leg in command.postings
+            ]
+        }
+    if isinstance(command, Hold):
+        return {
+            "amount": command.amount,
+            "target_account_id": command.target_account_id,
+            "expires_at": command.expires_at,
+        }
+    if isinstance(command, PostHold):
+        # None = capture the full hold; a stated amount is a different intent.
+        return {"hold_id": str(command.hold_id), "amount": command.amount}
+    if isinstance(command, (VoidHold, ExpireHold)):
+        return {"hold_id": str(command.hold_id)}
+    if isinstance(command, Transfer):
+        return {
+            "amount": command.amount,
+            "target_account_id": command.target_account_id,
+        }
+    return {"amount": command.amount}
 
 
 def command_request_hash(canonical_payload: bytes) -> bytes:

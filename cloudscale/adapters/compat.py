@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from types import MappingProxyType
 from uuid import UUID
 
+from cloudscale.domain.account import OpenHold, open_hold_from_events
 from cloudscale.domain.events import (
     AccountEvent,
     Deposited,
@@ -16,6 +17,7 @@ from cloudscale.domain.events import (
     TransferDebited,
     Withdrawn,
 )
+from cloudscale.domain.upcasting import upcast
 
 _KNOWN_TYPES = frozenset(
     {
@@ -69,33 +71,41 @@ def legacy_event_to_domain(event: Mapping[str, object]) -> AccountEvent:
             counterparty=event.get("counterparty"),  # type: ignore[arg-type]
         )
     if event_type in ("HoldPlaced", "HoldReleased", "HoldPosted"):
-        # A hold's id rides the ``transfer_id`` column: it becomes the
-        # transfer id of the eventual posting (ADR-0014).
-        hold_id = event.get("transfer_id")
-        if isinstance(hold_id, str):
-            hold_id = UUID(hold_id)
-        if event_type == "HoldPlaced":
-            return HoldPlaced(
-                account_id=account_id,  # type: ignore[arg-type]
-                amount=amount,  # type: ignore[arg-type]
-                hold_id=hold_id,  # type: ignore[arg-type]
-                counterparty=event.get("counterparty"),  # type: ignore[arg-type]
-                expires_at=event.get("expires_at"),  # type: ignore[arg-type]
-            )
-        if event_type == "HoldReleased":
-            return HoldReleased(
-                account_id=account_id,  # type: ignore[arg-type]
-                amount=amount,  # type: ignore[arg-type]
-                hold_id=hold_id,  # type: ignore[arg-type]
-                reason=event.get("release_reason"),  # type: ignore[arg-type]
-            )
-        return HoldPosted(
+        return _hold_event_from_legacy(event_type, event)
+    raise ValueError(f"unsupported legacy event type: {event_type!r}")
+
+
+def _hold_event_from_legacy(
+    event_type: str, event: Mapping[str, object]
+) -> AccountEvent:
+    # A hold's id rides the ``transfer_id`` column: it becomes the transfer id
+    # of the eventual posting (ADR-0014).
+    hold_id = event.get("transfer_id")
+    if isinstance(hold_id, str):
+        hold_id = UUID(hold_id)
+    account_id = event.get("account_id")
+    amount = event.get("amount")
+    if event_type == "HoldPlaced":
+        return HoldPlaced(
             account_id=account_id,  # type: ignore[arg-type]
             amount=amount,  # type: ignore[arg-type]
             hold_id=hold_id,  # type: ignore[arg-type]
             counterparty=event.get("counterparty"),  # type: ignore[arg-type]
+            expires_at=event.get("expires_at"),  # type: ignore[arg-type]
         )
-    raise ValueError(f"unsupported legacy event type: {event_type!r}")
+    if event_type == "HoldReleased":
+        return HoldReleased(
+            account_id=account_id,  # type: ignore[arg-type]
+            amount=amount,  # type: ignore[arg-type]
+            hold_id=hold_id,  # type: ignore[arg-type]
+            reason=event.get("release_reason"),  # type: ignore[arg-type]
+        )
+    return HoldPosted(
+        account_id=account_id,  # type: ignore[arg-type]
+        amount=amount,  # type: ignore[arg-type]
+        hold_id=hold_id,  # type: ignore[arg-type]
+        counterparty=event.get("counterparty"),  # type: ignore[arg-type]
+    )
 
 
 def domain_event_to_legacy(
@@ -169,12 +179,28 @@ def event_row_fields(
     return None, None, None, None
 
 
+def open_hold_from_rows(
+    hold_id: UUID, rows: Iterable[Mapping[str, object]]
+) -> OpenHold | None:
+    """Derive the open hold from a stream's ``Hold*`` rows, upcast first (ADR-0014).
+
+    Shared by both units of work so the derivation cannot drift between tiers.
+    """
+
+    events = (legacy_event_to_domain(upcast(dict(row))) for row in rows)
+    return open_hold_from_events(
+        hold_id,
+        (e for e in events if isinstance(e, (HoldPlaced, HoldReleased, HoldPosted))),
+    )
+
+
 __all__ = [
     "SQLITE_COMPATIBILITY_METADATA",
     "adapt_legacy_event",
     "domain_event_to_legacy",
     "event_row_fields",
     "legacy_event_to_domain",
+    "open_hold_from_rows",
     "sqlite_compatibility_metadata",
     "transfer_leg_fields",
 ]

@@ -153,44 +153,40 @@ def test_unknown_command_is_refused():
 # -- conservation ---------------------------------------------------------------------
 
 
+def _split(total: int, parts: int, cuts: list[int]) -> list[int]:
+    """Split ``total`` into ``parts`` non-negative shares at the given sorted cuts."""
+    chosen = [min(c, total) for c in cuts[: parts - 1]]
+    chosen += [total] * (parts - 1 - len(chosen))  # too few cuts: later shares are 0
+    bounds = sorted(chosen) + [total]
+    shares, prev = [], 0
+    for bound in bounds:
+        shares.append(bound - prev)
+        prev = bound
+    return shares
+
+
 @st.composite
 def balanced_posting_sets(draw):
+    """The anchor (and maybe one more debtor) pay; the rest receive; it balances."""
     n_accounts = draw(st.integers(min_value=2, max_value=6))
     names = [f"acct-{i}" for i in range(n_accounts)]
     balances = {
-        name: draw(st.integers(min_value=0, max_value=10_000)) for name in names
+        name: draw(st.integers(min_value=1, max_value=10_000)) for name in names
     }
-    # Anchor debits some amount it can afford; split it across other accounts as credits,
-    # optionally adding a second debited account so the set has debits on both sides.
-    anchor = names[0]
-    balances[anchor] = max(balances[anchor], 1)
-    debit_amount = draw(st.integers(min_value=1, max_value=balances[anchor]))
-    others = names[1:]
-    second_debtor = draw(st.sampled_from([None, *others]))
-    legs = [Leg(anchor, debit_amount, "debit")]
-    total = debit_amount
-    if second_debtor is not None and balances[second_debtor] > 0:
-        extra = draw(st.integers(min_value=1, max_value=balances[second_debtor]))
-        legs.append(Leg(second_debtor, extra, "debit"))
-        total += extra
-    creditors = [n for n in others if n != second_debtor]
-    if not creditors:
-        creditors = [others[0]]
-        legs = [leg for leg in legs if leg.account_id != others[0]]
-        total = sum(leg.amount for leg in legs)
-    # Split total across creditors (each >= 1 where possible).
-    cuts = sorted(
-        draw(
-            st.lists(
-                st.integers(min_value=0, max_value=total), max_size=len(creditors) - 1
-            )
-        )
+    anchor, others = names[0], names[1:]
+    debtors = [anchor]
+    if len(others) > 1 and draw(st.booleans()):
+        debtors.append(others[0])
+    creditors = [n for n in others if n not in debtors]
+    legs = [
+        Leg(d, draw(st.integers(min_value=1, max_value=balances[d])), "debit")
+        for d in debtors
+    ]
+    total = sum(leg.amount for leg in legs)
+    cuts = draw(
+        st.lists(st.integers(min_value=0, max_value=total), max_size=len(creditors))
     )
-    shares, prev = [], 0
-    for cut in cuts + [total]:
-        shares.append(cut - prev)
-        prev = cut
-    for name, share in zip(creditors, shares):
+    for name, share in zip(creditors, _split(total, len(creditors), cuts), strict=True):
         if share > 0:
             legs.append(Leg(name, share, "credit"))
     return balances, Post(anchor, tuple(legs), 1)

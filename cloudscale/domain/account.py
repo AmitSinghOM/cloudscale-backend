@@ -84,40 +84,26 @@ class AccountState:
             not isinstance(self.account_id, str) or self.account_id == ""
         ):
             raise InvalidAccountIdError("account_id must be None or a non-empty string")
-        if (
-            not isinstance(self.balance, int)
-            or isinstance(self.balance, bool)
-            or self.balance < 0
-        ):
-            raise InvalidAccountStateError(
-                "balance must be a non-negative, non-Boolean integer"
-            )
+        _require_non_negative_int(self.balance, "balance")
         if self.balance > MAX_SIGNED_BIGINT:
             raise AmountOutOfRangeError("balance exceeds the signed-BIGINT range")
-        if (
-            not isinstance(self.held, int)
-            or isinstance(self.held, bool)
-            or self.held < 0
-        ):
-            raise InvalidAccountStateError(
-                "held must be a non-negative, non-Boolean integer"
-            )
+        _require_non_negative_int(self.held, "held")
         if self.held > self.balance:
             raise InvalidAccountStateError("held funds cannot exceed the balance")
-        if (
-            not isinstance(self.version, int)
-            or isinstance(self.version, bool)
-            or self.version < 0
-        ):
-            raise InvalidAccountStateError(
-                "version must be a non-negative, non-Boolean integer"
-            )
+        _require_non_negative_int(self.version, "version")
         if self.version > MAX_SIGNED_BIGINT:
             raise VersionOutOfRangeError("version exceeds the signed-BIGINT range")
         if self.account_id is None and (self.balance != 0 or self.version != 0):
             raise InvalidAccountStateError(
                 "an unknown account must have balance zero and version zero"
             )
+
+
+def _require_non_negative_int(value: object, what: str) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise InvalidAccountStateError(
+            f"{what} must be a non-negative, non-Boolean integer"
+        )
 
 
 def _require_matching_identity(state: AccountState, target_account_id: str) -> None:

@@ -162,6 +162,55 @@ def fresh_dsn() -> Iterator[str]:
         admin.close()
 
 
+def _seed_expired_holds_pg(dsn: str, count: int) -> list[uuid.UUID]:
+    """Deposit 1,000 on ``src`` and place ``count`` holds already past expiry."""
+    from cloudscale.adapters.postgres.command_unit_of_work import (
+        PostgresCommandUnitOfWork,
+    )
+    from cloudscale.adapters.postgres.event_store import PostgresEventStore
+    from cloudscale.adapters.postgres.projection_store import PostgresProjectionStore
+
+    uow = PostgresCommandUnitOfWork(dsn)
+    hold_ids: list[uuid.UUID] = []
+    try:
+        uow.execute(_request(Deposit("src", 1_000, 0)))
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        for i in range(count):
+            hold_id = uuid.uuid4()
+            uow.execute(
+                _request(Hold("src", f"dst-{i}", 10, i + 1, past), command_id=hold_id)
+            )
+            hold_ids.append(hold_id)
+        assert uow.fold_stream("src").held == 10 * count
+    finally:
+        uow.close()
+    feed = PostgresEventStore(dsn)
+    projection = PostgresProjectionStore(dsn, consumer="sweep-test")
+    try:
+        ResilientConsumer(feed, projection).run()
+    finally:
+        projection.close()
+        feed.close()
+    return hold_ids
+
+
+def _run_sweeper_pg(dsn: str, results: list, lock: threading.Lock) -> None:
+    from cloudscale.adapters.postgres.command_unit_of_work import (
+        PostgresCommandUnitOfWork,
+    )
+    from cloudscale.adapters.postgres.projection_store import PostgresProjectionStore
+
+    unit = PostgresCommandUnitOfWork(dsn, pool_max=1)
+    store = PostgresProjectionStore(dsn, pool_max=1, consumer="sweep-test")
+    try:
+        outcome = sweep_holds.sweep(unit, store)
+    finally:
+        unit.close()
+        store.close()
+    with lock:
+        results.append(outcome)
+
+
 @needs_pg
 def test_two_sweepers_racing_release_each_expired_hold_exactly_once(
     fresh_dsn: str, monkeypatch: pytest.MonkeyPatch
@@ -169,51 +218,20 @@ def test_two_sweepers_racing_release_each_expired_hold_exactly_once(
     from cloudscale.adapters.postgres.command_unit_of_work import (
         PostgresCommandUnitOfWork,
     )
-    from cloudscale.adapters.postgres.event_store import PostgresEventStore
-    from cloudscale.adapters.postgres.projection_store import PostgresProjectionStore
 
     monkeypatch.setenv("CLOUDSCALE_PG_SCHEMA", "auto")
-    uow = PostgresCommandUnitOfWork(fresh_dsn)
-    hold_ids = []
-    try:
-        uow.execute(_request(Deposit("src", 1_000, 0)))
-        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
-        for i in range(5):
-            hold_id = uuid.uuid4()
-            uow.execute(
-                _request(Hold("src", f"dst-{i}", 10, i + 1, past), command_id=hold_id)
-            )
-            hold_ids.append(hold_id)
-        assert uow.fold_stream("src").held == 50
-    finally:
-        uow.close()
-    feed = PostgresEventStore(fresh_dsn)
-    projection = PostgresProjectionStore(fresh_dsn, consumer="sweep-test")
-    try:
-        ResilientConsumer(feed, projection).run()
-    finally:
-        feed.close()
+    hold_ids = _seed_expired_holds_pg(fresh_dsn, 5)
 
     results: list[tuple[int, int]] = []
     lock = threading.Lock()
-
-    def run_sweeper() -> None:
-        unit = PostgresCommandUnitOfWork(fresh_dsn, pool_max=1)
-        store = PostgresProjectionStore(fresh_dsn, pool_max=1, consumer="sweep-test")
-        try:
-            outcome = sweep_holds.sweep(unit, store)
-        finally:
-            unit.close()
-            store.close()
-        with lock:
-            results.append(outcome)
-
-    threads = [threading.Thread(target=run_sweeper) for _ in range(2)]
+    threads = [
+        threading.Thread(target=_run_sweeper_pg, args=(fresh_dsn, results, lock))
+        for _ in range(2)
+    ]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
-    projection.close()
 
     # Counters may double-count a replayed ACCEPTED (same command id, same
     # version); the LOG is the exactly-once claim: one release per hold.

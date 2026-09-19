@@ -22,7 +22,11 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.rows import DictRow
 
-from cloudscale.adapters.compat import event_row_fields, legacy_event_to_domain
+from cloudscale.adapters.compat import (
+    event_row_fields,
+    legacy_event_to_domain,
+    open_hold_from_rows,
+)
 from cloudscale.adapters.postgres import schema
 from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cloudscale.application.command_execution import execute_command_decision
@@ -35,19 +39,8 @@ from cloudscale.application.snapshots import (
     log_snapshot_rejected,
     snapshot_rejection,
 )
-from cloudscale.domain.account import (
-    AccountState,
-    OpenHold,
-    fold,
-    open_hold_from_events,
-)
-from cloudscale.domain.events import (
-    AccountEvent,
-    EventEnvelope,
-    HoldPlaced,
-    HoldPosted,
-    HoldReleased,
-)
+from cloudscale.domain.account import AccountState, OpenHold, fold
+from cloudscale.domain.events import AccountEvent, EventEnvelope
 from cloudscale.domain.upcasting import upcast
 from cloudscale.domain.results import CommandResult
 
@@ -121,15 +114,7 @@ class _BoundStorage:
         rows = self._conn.execute(
             _SELECT_HOLD, (_stream_name(account_id), str(hold_id))
         ).fetchall()
-        events = [legacy_event_to_domain(upcast(dict(r))) for r in rows]
-        return open_hold_from_events(
-            hold_id,
-            [
-                e
-                for e in events
-                if isinstance(e, (HoldPlaced, HoldReleased, HoldPosted))
-            ],
-        )
+        return open_hold_from_rows(hold_id, (dict(r) for r in rows))
 
     def _read_snapshot(self, stream: str) -> StreamSnapshot | None:
         row = self._conn.execute(

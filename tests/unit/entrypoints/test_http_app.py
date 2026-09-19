@@ -704,73 +704,66 @@ def test_hold_lifecycle_over_http_place_post_and_balances(stack: _Stack) -> None
     assert src["balance"] + dst["balance"] == 100
 
 
-def test_hold_void_and_rejections_over_http(stack: _Stack) -> None:
+def _placed_hold(stack: _Stack) -> dict:
     _seed(stack, "acct-src")
     hold = _hold_body()
-    assert (
-        stack.client.post(
-            "/v1/accounts/acct-src/holds", json=hold, headers=_auth()
-        ).status_code
-        == 201
+    placed = stack.client.post(
+        "/v1/accounts/acct-src/holds", json=hold, headers=_auth()
     )
+    assert placed.status_code == 201, placed.text
+    return hold
 
-    too_much = stack.client.post(
-        f"/v1/accounts/acct-src/holds/{hold['command_id']}/post",
-        json={"command_id": str(uuid.uuid4()), "expected_version": 2, "amount": 41},
-        headers=_auth(),
-    )
-    assert (
-        too_much.status_code == 400
-        and too_much.json()["error_code"] == "capture_exceeds_hold"
-    )
 
-    voided = stack.client.post(
-        f"/v1/accounts/acct-src/holds/{hold['command_id']}/void",
-        json={"command_id": str(uuid.uuid4()), "expected_version": 2},
-        headers=_auth(),
+def _post_json(stack: _Stack, path: str, body: dict):
+    return stack.client.post(path, json=body, headers=_auth())
+
+
+def test_hold_void_over_http_then_post_is_hold_not_open(stack: _Stack) -> None:
+    hold = _placed_hold(stack)
+    base = f"/v1/accounts/acct-src/holds/{hold['command_id']}"
+    voided = _post_json(
+        stack, f"{base}/void", {"command_id": str(uuid.uuid4()), "expected_version": 2}
     )
     assert voided.status_code == 201, voided.text
-
-    gone = stack.client.post(
-        f"/v1/accounts/acct-src/holds/{hold['command_id']}/post",
-        json={"command_id": str(uuid.uuid4()), "expected_version": 3},
-        headers=_auth(),
+    gone = _post_json(
+        stack, f"{base}/post", {"command_id": str(uuid.uuid4()), "expected_version": 3}
     )
     assert gone.status_code == 400 and gone.json()["error_code"] == "hold_not_open"
-
-    unknown = stack.client.post(
+    unknown = _post_json(
+        stack,
         f"/v1/accounts/acct-src/holds/{uuid.uuid4()}/void",
-        json={"command_id": str(uuid.uuid4()), "expected_version": 3},
-        headers=_auth(),
+        {"command_id": str(uuid.uuid4()), "expected_version": 3},
     )
     assert (
         unknown.status_code == 400 and unknown.json()["error_code"] == "hold_not_open"
     )
 
-    over_available = stack.client.post(
-        "/v1/accounts/acct-src/holds",
-        json=_hold_body(amount=101, expected_version=3),
-        headers=_auth(),
+
+def test_hold_rejections_over_http(stack: _Stack) -> None:
+    hold = _placed_hold(stack)
+    too_much = _post_json(
+        stack,
+        f"/v1/accounts/acct-src/holds/{hold['command_id']}/post",
+        {"command_id": str(uuid.uuid4()), "expected_version": 2, "amount": 41},
+    )
+    assert too_much.status_code == 400
+    assert too_much.json()["error_code"] == "capture_exceeds_hold"
+
+    holds = "/v1/accounts/acct-src/holds"
+    over_available = _post_json(
+        stack, holds, _hold_body(amount=101, expected_version=2)
     )
     assert over_available.status_code == 422
     assert over_available.json()["error_code"] == "insufficient_funds"
 
-    same = stack.client.post(
-        "/v1/accounts/acct-src/holds",
-        json=_hold_body(target_account_id="acct-src", expected_version=3),
-        headers=_auth(),
+    same = _post_json(
+        stack, holds, _hold_body(target_account_id="acct-src", expected_version=2)
     )
     assert same.status_code == 400 and same.json()["detail"] == "same_account"
 
-    ttl = stack.client.post(
-        "/v1/accounts/acct-src/holds",
-        json=_hold_body(ttl_seconds=10**9, expected_version=3),
-        headers=_auth(),
-    )
-    assert (
-        ttl.status_code == 400
-        and "CLOUDSCALE_HOLD_MAX_TTL_SECONDS" in ttl.json()["detail"]
-    )
+    ttl = _post_json(stack, holds, _hold_body(ttl_seconds=10**9, expected_version=2))
+    assert ttl.status_code == 400
+    assert "CLOUDSCALE_HOLD_MAX_TTL_SECONDS" in ttl.json()["detail"]
 
 
 def test_hold_routes_authorize_the_source_and_redact_the_target(stack: _Stack) -> None:

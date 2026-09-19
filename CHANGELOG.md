@@ -6,6 +6,46 @@ integrator; the commit history says how.
 
 ## [Unreleased]
 
+Ledger depth: flat latency against stream depth, N-leg posting sets, and
+pending transfers.
+
+### Added
+- Stream snapshots (ADR-0012): `fold_stream` on both tiers reads a verified
+  `stream_snapshots` row (AccountState shape version, internal consistency,
+  and the anchor event's seq + id checked against the log) and folds only
+  the tail; any failed check logs `snapshot.rejected` and refolds in full.
+  Written every `CLOUDSCALE_SNAPSHOT_EVERY` events (default 100, 0
+  disables) inside the command transaction with a monotonic upsert. Alembic
+  `0005`. Measured: SQLite 0.64 → 75 ms p50 from depth 1 to 20,000 without
+  snapshots, ~0.45 ms flat with; PostgreSQL 2.0 → 12.1 ms to 2,000 without,
+  ~1.3 ms flat with (`scripts/bench_depth.py`, table in the ADR).
+  `scripts/snapshots.py` (`stats` / `drop`) on both tiers; RUNBOOK R10.
+- N-leg balanced postings (ADR-0013): `POST /v1/accounts/{account_id}/postings`
+  commits 2..16 legs atomically; the command refuses `unbalanced`,
+  `duplicate_account`, `too_many_legs` and `anchor_not_debited` sets before
+  any state is read; one underfunded leg rejects the whole set. Legs are
+  appended in account-id order (three racing cyclic sets deadlock without
+  it, proven). `Transfer` is now the two-leg case of the same decision.
+- Pending transfers / holds (ADR-0014): `POST …/holds`,
+  `…/holds/{hold_id}/post` (full or partial capture), `…/holds/{hold_id}/void`.
+  `AccountState.held`; every debit checks `available = balance - held`;
+  `GET …/balance` returns `held` and `available`. New v1 events
+  `HoldPlaced`, `HoldReleased`, `HoldPosted`; `HELD_SIGN` beside
+  `BALANCE_SIGN`. The open hold is derived from the source stream's own
+  events inside the command transaction, never from the read model. Expiry
+  is `scripts/sweep_holds.py`: a deterministic command id per hold makes
+  concurrent sweepers leave exactly one release in the log. Alembic `0006`
+  (fail-closed downgrade), `balances.held`, `holds` read model,
+  `CLOUDSCALE_HOLD_MAX_TTL_SECONDS`; RUNBOOK R11.
+
+### Changed
+- `CURRENT_STATE_VERSION` is 2: every snapshot written before this release is
+  discarded and refolded once on first read (a WARNING per stream, no data
+  effect). Debits (`Withdraw`, `Transfer`, `Post`) are checked against
+  available funds, which equals the balance for accounts with no holds.
+- `CommandResult.postings` is one entry per stream; a partial hold capture
+  writes the source twice and its posting names the source's last event.
+
 ## [0.7.0] — 2026-09-19
 
 Double-entry transfers (ADR-0011), three four-role review passes with every

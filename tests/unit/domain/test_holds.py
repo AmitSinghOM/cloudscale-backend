@@ -296,6 +296,38 @@ def hold_lifecycles(draw):
     return deposit, steps
 
 
+def _apply_step(
+    step: str, src: AccountState, dst: AccountState, open_holds: list[OpenHold]
+):
+    """Apply one lifecycle step; returns the new (src, dst)."""
+    if step == "place":
+        amount = min(src.available, 7) or 1
+        try:
+            placed = decide_hold(
+                src, Hold("src", "dst", amount, src.version, LATER), hold_id=uuid4()
+            )
+        except InsufficientFundsError:
+            return src, dst
+        open_holds.append(OpenHold(placed.hold_id, placed.amount, "dst", LATER))
+        return apply(src, placed), dst
+    if not open_holds:
+        return src, dst
+    hold = open_holds.pop(0)
+    if step in ("post", "partial"):
+        amount = None if step == "post" else max(1, hold.amount // 2)
+        command = PostHold("src", hold.hold_id, src.version, amount)
+        for event in decide_post_hold(src, dst, hold, command, now=NOW):
+            if event.account_id == "src":
+                src = apply(src, event)
+            else:
+                dst = apply(dst, event)
+        return src, dst
+    released = decide_release_hold(
+        src, hold, VoidHold("src", hold.hold_id, src.version), now=NOW
+    )
+    return apply(src, released), dst
+
+
 @settings(max_examples=150, deadline=None)
 @given(hold_lifecycles())
 def test_holds_conserve_money_and_keep_held_within_balance(case) -> None:
@@ -304,38 +336,7 @@ def test_holds_conserve_money_and_keep_held_within_balance(case) -> None:
     dst = AccountState()
     open_holds: list[OpenHold] = []
     for step in steps:
-        if step == "place":
-            amount = min(src.available, 7) or 1
-            try:
-                placed = decide_hold(
-                    src, Hold("src", "dst", amount, src.version, LATER), hold_id=uuid4()
-                )
-            except InsufficientFundsError:
-                continue
-            src = apply(src, placed)
-            open_holds.append(OpenHold(placed.hold_id, placed.amount, "dst", LATER))
-        elif not open_holds:
-            continue
-        elif step in ("post", "partial"):
-            hold = open_holds.pop(0)
-            amount = None if step == "post" else max(1, hold.amount // 2)
-            events = decide_post_hold(
-                src,
-                dst,
-                hold,
-                PostHold("src", hold.hold_id, src.version, amount),
-                now=NOW,
-            )
-            for event in events:
-                if event.account_id == "src":
-                    src = apply(src, event)
-                else:
-                    dst = apply(dst, event)
-        else:
-            hold = open_holds.pop(0)
-            command = VoidHold("src", hold.hold_id, src.version)
-            released = decide_release_hold(src, hold, command, now=NOW)
-            src = apply(src, released)
+        src, dst = _apply_step(step, src, dst, open_holds)
         # Invariants at every step.
         assert src.balance + dst.balance == deposit
         assert 0 <= src.held <= src.balance
