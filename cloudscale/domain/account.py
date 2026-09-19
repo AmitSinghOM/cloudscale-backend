@@ -408,6 +408,62 @@ MOVEMENT_LEGS: tuple[type, ...] = (
 )
 
 
+def _movement_legs(original_legs: Iterable[AccountEvent]) -> list[MovementLeg]:
+    return [
+        leg
+        for leg in original_legs
+        if isinstance(
+            leg,
+            (
+                TransferDebited,
+                TransferCredited,
+                HoldPosted,
+                ReversalDebited,
+                ReversalCredited,
+            ),
+        )
+    ]
+
+
+def _require_revertible(
+    legs: list[MovementLeg], command: Revert, reverted_by: UUID | None
+) -> None:
+    if not legs:
+        raise NotRevertibleError(
+            f"{command.transfer_id} names no posting set (cash movements and hold "
+            "placements are not revertible)"
+        )
+    if reverted_by is not None:
+        raise AlreadyRevertedError(
+            f"{command.transfer_id} was reverted by {reverted_by}"
+        )
+    if not any(
+        leg.account_id == command.account_id and BALANCE_SIGN[type(leg).__name__] < 0
+        for leg in legs
+    ):
+        raise AnchorNotCreditedError("the anchor must be an account the revert credits")
+
+
+def _mirror_leg(
+    state: AccountState, leg: MovementLeg, *, transfer_id: UUID, reverts: UUID
+) -> ReversalDebited | ReversalCredited:
+    _require_matching_identity(state, leg.account_id)
+    _require_next_version(state)
+    if BALANCE_SIGN[type(leg).__name__] > 0:  # they received it: take it back
+        _require_funds(state, leg.amount, "reversal")
+        kind: type[ReversalDebited] | type[ReversalCredited] = ReversalDebited
+    else:  # they paid it: give it back
+        _require_credit_fits(state, leg.amount, "reversal")
+        kind = ReversalCredited
+    return kind(
+        account_id=leg.account_id,
+        amount=leg.amount,
+        transfer_id=transfer_id,
+        counterparty=leg.counterparty,
+        reverts=reverts,
+    )
+
+
 def decide_revert(
     states: Mapping[str, AccountState],
     original_legs: Iterable[AccountEvent],
@@ -425,56 +481,17 @@ def decide_revert(
     """
     if not isinstance(command, Revert):
         raise UnknownCommandError(f"unsupported command type: {type(command).__name__}")
-    legs: list[MovementLeg] = [
-        leg
-        for leg in original_legs
-        if isinstance(
+    legs = _movement_legs(original_legs)
+    _require_revertible(legs, command, reverted_by)
+    return tuple(
+        _mirror_leg(
+            states[leg.account_id],
             leg,
-            (
-                TransferDebited,
-                TransferCredited,
-                HoldPosted,
-                ReversalDebited,
-                ReversalCredited,
-            ),
+            transfer_id=transfer_id,
+            reverts=command.transfer_id,
         )
-    ]
-    if not legs:
-        raise NotRevertibleError(
-            f"{command.transfer_id} names no posting set (cash movements and hold "
-            "placements are not revertible)"
-        )
-    if reverted_by is not None:
-        raise AlreadyRevertedError(
-            f"{command.transfer_id} was reverted by {reverted_by}"
-        )
-    if not any(
-        leg.account_id == command.account_id and BALANCE_SIGN[type(leg).__name__] < 0
         for leg in legs
-    ):
-        raise AnchorNotCreditedError("the anchor must be an account the revert credits")
-
-    events: list[AccountEvent] = []
-    for leg in legs:
-        state = states[leg.account_id]
-        _require_matching_identity(state, leg.account_id)
-        _require_next_version(state)
-        if BALANCE_SIGN[type(leg).__name__] > 0:  # they received it: take it back
-            _require_funds(state, leg.amount, "reversal")
-            kind: type[ReversalDebited] | type[ReversalCredited] = ReversalDebited
-        else:  # they paid it: give it back
-            _require_credit_fits(state, leg.amount, "reversal")
-            kind = ReversalCredited
-        events.append(
-            kind(
-                account_id=leg.account_id,
-                amount=leg.amount,
-                transfer_id=transfer_id,
-                counterparty=leg.counterparty,
-                reverts=command.transfer_id,
-            )
-        )
-    return tuple(events)
+    )
 
 
 def apply(state: AccountState, event: AccountEvent) -> AccountState:

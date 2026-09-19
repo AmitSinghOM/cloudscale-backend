@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from types import MappingProxyType
 from uuid import UUID
 
@@ -50,46 +50,50 @@ def sqlite_compatibility_metadata() -> dict[str, object]:
     return dict(SQLITE_COMPATIBILITY_METADATA)
 
 
+def _uuid(value: object) -> UUID:
+    return UUID(value) if isinstance(value, str) else value  # type: ignore[return-value]
+
+
+def _cash_from_legacy(event_type: str, event: Mapping[str, object]) -> AccountEvent:
+    kind = Deposited if event_type == "Deposited" else Withdrawn
+    return kind(account_id=event.get("account_id"), amount=event.get("amount"))  # type: ignore[arg-type]
+
+
+def _transfer_leg_from_legacy(
+    event_type: str, event: Mapping[str, object]
+) -> AccountEvent:
+    kind = TransferDebited if event_type == "TransferDebited" else TransferCredited
+    return kind(
+        account_id=event.get("account_id"),  # type: ignore[arg-type]
+        amount=event.get("amount"),  # type: ignore[arg-type]
+        transfer_id=_uuid(event.get("transfer_id")),
+        counterparty=event.get("counterparty"),  # type: ignore[arg-type]
+    )
+
+
+def _reversal_leg_from_legacy(
+    event_type: str, event: Mapping[str, object]
+) -> AccountEvent:
+    kind = ReversalDebited if event_type == "ReversalDebited" else ReversalCredited
+    return kind(
+        account_id=event.get("account_id"),  # type: ignore[arg-type]
+        amount=event.get("amount"),  # type: ignore[arg-type]
+        transfer_id=_uuid(event.get("transfer_id")),
+        counterparty=event.get("counterparty"),  # type: ignore[arg-type]
+        reverts=_uuid(event.get("reverts")),
+    )
+
+
 def legacy_event_to_domain(event: Mapping[str, object]) -> AccountEvent:
     """Validate and convert one known legacy dictionary event to a domain value."""
 
     if not isinstance(event, Mapping):
         raise TypeError("event must be a mapping")
-
     event_type = event.get("type")
-    account_id = event.get("account_id")
-    amount = event.get("amount")
-    if event_type == "Deposited":
-        return Deposited(account_id=account_id, amount=amount)  # type: ignore[arg-type]
-    if event_type == "Withdrawn":
-        return Withdrawn(account_id=account_id, amount=amount)  # type: ignore[arg-type]
-    if event_type in ("TransferDebited", "TransferCredited"):
-        transfer_id = event.get("transfer_id")
-        if isinstance(transfer_id, str):
-            transfer_id = UUID(transfer_id)
-        leg = TransferDebited if event_type == "TransferDebited" else TransferCredited
-        return leg(
-            account_id=account_id,  # type: ignore[arg-type]
-            amount=amount,  # type: ignore[arg-type]
-            transfer_id=transfer_id,  # type: ignore[arg-type]
-            counterparty=event.get("counterparty"),  # type: ignore[arg-type]
-        )
-    if event_type in ("HoldPlaced", "HoldReleased", "HoldPosted"):
-        return _hold_event_from_legacy(event_type, event)
-    if event_type in ("ReversalDebited", "ReversalCredited"):
-        transfer_id = event.get("transfer_id")
-        reverts = event.get("reverts")
-        kind = ReversalDebited if event_type == "ReversalDebited" else ReversalCredited
-        return kind(
-            account_id=account_id,  # type: ignore[arg-type]
-            amount=amount,  # type: ignore[arg-type]
-            transfer_id=UUID(transfer_id)
-            if isinstance(transfer_id, str)
-            else transfer_id,  # type: ignore[arg-type]
-            counterparty=event.get("counterparty"),  # type: ignore[arg-type]
-            reverts=UUID(reverts) if isinstance(reverts, str) else reverts,  # type: ignore[arg-type]
-        )
-    raise ValueError(f"unsupported legacy event type: {event_type!r}")
+    decoder = _LEGACY_DECODERS.get(event_type) if isinstance(event_type, str) else None
+    if decoder is None:
+        raise ValueError(f"unsupported legacy event type: {event_type!r}")
+    return decoder(event_type, event)  # type: ignore[arg-type]
 
 
 def _hold_event_from_legacy(
@@ -123,6 +127,19 @@ def _hold_event_from_legacy(
         hold_id=hold_id,  # type: ignore[arg-type]
         counterparty=event.get("counterparty"),  # type: ignore[arg-type]
     )
+
+
+_LEGACY_DECODERS: dict[str, Callable[[str, Mapping[str, object]], AccountEvent]] = {
+    "Deposited": _cash_from_legacy,
+    "Withdrawn": _cash_from_legacy,
+    "TransferDebited": _transfer_leg_from_legacy,
+    "TransferCredited": _transfer_leg_from_legacy,
+    "HoldPlaced": _hold_event_from_legacy,
+    "HoldReleased": _hold_event_from_legacy,
+    "HoldPosted": _hold_event_from_legacy,
+    "ReversalDebited": _reversal_leg_from_legacy,
+    "ReversalCredited": _reversal_leg_from_legacy,
+}
 
 
 def domain_event_to_legacy(

@@ -26,7 +26,7 @@ transaction so the fold can never go stale between read and append.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
@@ -197,47 +197,86 @@ def _decide_legs(
     """
     command = request.command
     if isinstance(command, (Transfer, Post)):
-        states: dict[str, AccountState] = {command.account_id: state}
-        for leg in command.legs():
-            if leg.account_id not in states:
-                states[leg.account_id] = storage.fold_stream(leg.account_id)
-        events: tuple[AccountEvent, ...] = decide_postings(
-            states, command, transfer_id=request.command_id
-        )
-        return _number_legs(states, events)
+        return _postings_legs(storage, command, state, command_id=request.command_id)
     if isinstance(command, Hold):
         placed = decide_hold(state, command, hold_id=request.command_id, now=now)
         return [(placed, state.version + 1)]
     if isinstance(command, PostHold):
-        hold = storage.open_hold(command.account_id, command.hold_id)
-        # The target is known only from the hold itself; fold it once found.
-        target_id = hold.counterparty if hold is not None else command.account_id
-        states = {command.account_id: state}
-        if hold is not None:
-            states[target_id] = storage.fold_stream(target_id)
-        events = decide_post_hold(state, states[target_id], hold, command, now=now)
-        return _number_legs(states, events)
+        return _post_hold_legs(storage, state, command, now=now)
     if isinstance(command, (VoidHold, ExpireHold)):
         hold = storage.open_hold(command.account_id, command.hold_id)
         released = decide_release_hold(state, hold, command, now=now)
         return [(released, state.version + 1)]
     if isinstance(command, Revert):
-        original = storage.legs_of(command.transfer_id)
-        states = {command.account_id: state}
-        for original_leg in original:
-            if original_leg.account_id not in states:
-                states[original_leg.account_id] = storage.fold_stream(
-                    original_leg.account_id
-                )
-        events = decide_revert(
-            states,
-            original,
-            command,
-            transfer_id=request.command_id,
-            reverted_by=storage.reverted_by(command.transfer_id),
-        )
-        return _number_legs(states, events)
+        return _revert_legs(storage, command, state, command_id=request.command_id)
     return [(decide(state, command), state.version + 1)]
+
+
+def _fold_others(
+    storage: CommandDecisionStorage,
+    anchor_id: str,
+    anchor: AccountState,
+    account_ids: Iterable[str],
+) -> dict[str, AccountState]:
+    """The anchor's already-folded state plus a fresh fold of every other stream."""
+    states = {anchor_id: anchor}
+    for account_id in account_ids:
+        if account_id not in states:
+            states[account_id] = storage.fold_stream(account_id)
+    return states
+
+
+def _postings_legs(
+    storage: CommandDecisionStorage,
+    command: Transfer | Post,
+    state: AccountState,
+    *,
+    command_id: UUID,
+) -> list[tuple[AccountEvent, int]]:
+    states = _fold_others(
+        storage, command.account_id, state, (leg.account_id for leg in command.legs())
+    )
+    return _number_legs(
+        states, decide_postings(states, command, transfer_id=command_id)
+    )
+
+
+def _post_hold_legs(
+    storage: CommandDecisionStorage,
+    state: AccountState,
+    command: PostHold,
+    *,
+    now: datetime,
+) -> list[tuple[AccountEvent, int]]:
+    hold = storage.open_hold(command.account_id, command.hold_id)
+    # The target is known only from the hold itself; fold it once found.
+    target_id = hold.counterparty if hold is not None else command.account_id
+    states = _fold_others(
+        storage, command.account_id, state, [target_id] if hold is not None else []
+    )
+    events = decide_post_hold(state, states[target_id], hold, command, now=now)
+    return _number_legs(states, events)
+
+
+def _revert_legs(
+    storage: CommandDecisionStorage,
+    command: Revert,
+    state: AccountState,
+    *,
+    command_id: UUID,
+) -> list[tuple[AccountEvent, int]]:
+    original = storage.legs_of(command.transfer_id)
+    states = _fold_others(
+        storage, command.account_id, state, (leg.account_id for leg in original)
+    )
+    events = decide_revert(
+        states,
+        original,
+        command,
+        transfer_id=command_id,
+        reverted_by=storage.reverted_by(command.transfer_id),
+    )
+    return _number_legs(states, events)
 
 
 def _number_legs(

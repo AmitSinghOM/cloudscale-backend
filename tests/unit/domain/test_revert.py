@@ -272,44 +272,52 @@ def transfer_then_revert_sequences(draw):
     return deposit, steps
 
 
+def _step_transfer(states, committed):
+    if states["a"].available < 1:
+        return states
+    amount = max(1, min(states["a"].available, 7))
+    tid = uuid4()
+    legs = decide_postings(
+        states, Transfer("a", "b", amount, states["a"].version), transfer_id=tid
+    )
+    committed.append((tid, legs))
+    return _apply_all(states, legs)
+
+
+def _step_revert(states, committed, reverted, *, last: bool):
+    candidates = [(tid, legs) for tid, legs in committed if tid not in reverted]
+    if not candidates:
+        return states
+    tid, legs = candidates[-1] if last else candidates[0]
+    anchor = next(e.account_id for e in legs if type(e).__name__.endswith("Debited"))
+    try:
+        mirror = decide_revert(
+            states,
+            legs,
+            Revert(anchor, tid, states[anchor].version),
+            transfer_id=uuid4(),
+            reverted_by=None,
+        )
+    except InsufficientFundsError:
+        return states
+    reverted.add(tid)
+    committed.append((mirror[0].transfer_id, mirror))
+    return _apply_all(states, mirror)
+
+
 @settings(max_examples=150, deadline=None)
 @given(transfer_then_revert_sequences())
 def test_reverts_conserve_money_and_never_go_negative(case) -> None:
     deposit, steps = case
     states = {"a": fold([Deposited("a", deposit)]), "b": AccountState()}
-    committed: list[tuple[object, tuple]] = []  # (transfer_id, legs) in order
+    committed: list = []
     reverted: set = set()
     for step in steps:
         if step == "transfer":
-            amount = max(1, min(states["a"].available, 7))
-            if states["a"].available < 1:
-                continue
-            tid = uuid4()
-            legs = decide_postings(
-                states, Transfer("a", "b", amount, states["a"].version), transfer_id=tid
+            states = _step_transfer(states, committed)
+        else:
+            states = _step_revert(
+                states, committed, reverted, last=step == "revert_last"
             )
-            states = _apply_all(states, legs)
-            committed.append((tid, legs))
-        elif committed:
-            candidates = [(tid, legs) for tid, legs in committed if tid not in reverted]
-            if not candidates:
-                continue
-            tid, legs = candidates[-1] if step == "revert_last" else candidates[0]
-            anchor = next(
-                e.account_id for e in legs if type(e).__name__.endswith("Debited")
-            )
-            try:
-                mirror = decide_revert(
-                    states,
-                    legs,
-                    Revert(anchor, tid, states[anchor].version),
-                    transfer_id=uuid4(),
-                    reverted_by=None,
-                )
-            except InsufficientFundsError:
-                continue
-            states = _apply_all(states, mirror)
-            reverted.add(tid)
-            committed.append((mirror[0].transfer_id, mirror))
         assert states["a"].balance + states["b"].balance == deposit
         assert all(s.balance >= 0 for s in states.values())
