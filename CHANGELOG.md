@@ -6,6 +6,31 @@ integrator; the commit history says how.
 
 ## [Unreleased]
 
+### Added
+- Revert (ADR-0015): `POST /v1/accounts/{account_id}/transfers/{transfer_id}/revert`
+  appends the **mirror** of a committed posting set — every original credit
+  becomes a `ReversalDebited`, every debit a `ReversalCredited`, exact
+  amounts, one transaction, linked by `reverts`. Revertible: transfers,
+  posting sets, posted holds, and reverts (a revert of a revert restores the
+  original). Not revertible: cash movements and hold lifecycle events
+  (`not_revertible`). A second revert is `already_reverted` (409); two
+  reverts racing leave exactly one reversal set (proven on PostgreSQL). Each
+  mirrored debit is checked against **available** funds, so a payee who
+  spent the money makes the revert fail (`insufficient_funds`) rather than
+  go into debt — there is no `force`. The anchor must be an account the
+  revert credits (`anchor_not_credited`). **Authorization is on every
+  account the revert debits** or the admin scope; a payer-only token is 403.
+- `transfers` read model and `GET /v1/transfers/{transfer_id}`: kind, legs
+  (amounts redacted for accounts the caller may not read), `reverted_by`,
+  `reverts`; a set the caller may read nothing of is a 404. Maintained by
+  both projections through one shared, idempotent effect function. Alembic
+  `0007` (`events.reverts`, two indexes, the read model; fail-closed
+  downgrade while reversals exist).
+
+### Changed
+- `CommandUnitOfWork` gains read-only `legs_of(transfer_id)` so the HTTP
+  tier authorizes a revert from the log, not the eventual read model.
+
 ## [0.8.0] — 2026-09-20
 
 Ledger depth: flat latency against stream depth, N-leg posting sets, and

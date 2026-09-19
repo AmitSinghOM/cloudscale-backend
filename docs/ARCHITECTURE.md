@@ -80,6 +80,8 @@ events (id order)                                                               
 | Exactly one consumer drains | session advisory lock per consumer name (ADR-0006) | lease tests; two-process SIGKILL run; soak failover 0.27 s |
 | Reads are eventual and say so | `consistency: "eventual"` in the response; clients poll to `committed_version` | `examples/python_client.py` |
 | …and eventual **per account** | a transfer's two legs are applied as two events; between them a reader may see the debit without the credit. Conservation holds in the log at every commit and in the projection at every quiescent point (ADR-0011) | `test_transfer_legs_project_into_both_balances_on_postgres` |
+| A payment is reverted at most once | a revert writes its anchor stream, so two reverts collide on `UNIQUE (stream, seq)`; the loser refolds and is rejected; `reverted_by` is derived from the log inside the transaction, never from the read model (ADR-0015) | `test_two_reverts_racing_leave_exactly_one_reversal_set`, `test_second_revert_is_already_reverted_and_persisted` |
+| A revert never creates debt | each mirrored debit is checked against **available**; one failing leg rejects the whole set | `test_revert_racing_the_payee_spending_never_goes_negative`, `test_payee_who_spent_the_money_cannot_be_reverted_into_debt` |
 
 ## Failure behaviour (what a client sees)
 
@@ -133,3 +135,4 @@ under `evidence/<sha>/`; targets and alerts in `docs/SLO.md`.
 | Add a table or column | `adapters/postgres/schema.py` **and** a new Alembic revision, bump `CURRENT_REVISION` | parity test asserts both paths match |
 | Add a setting | `HttpSettings` or `os.environ` | `docs/CONFIGURATION.md` (test enforces) |
 | Add a projection | implement `apply(event) -> bool` + `dead_letter(...)` | consumer name → own lease |
+| Add a read model (like `transfers`) | the per-event effect as a pure function in `application/<name>_read_model.py` shared by **both** projections (`postgres/projection_store.py`, `cqrs/idempotent_consumer.py`), tables in `schema.py` + Alembic + the consumer's SQLite DDL, a reader method on both stores, `ProjectionReader`/`QueryService`, a route | ADR-0015 pattern; every statement idempotent (`ON CONFLICT DO NOTHING`) because the consumer may replay; decisions never read it |
