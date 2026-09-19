@@ -20,6 +20,9 @@ reading source.
   accounts the caller may not read. Alembic `0004` adds nullable
   `events.transfer_id` / `events.counterparty` with a guarded downgrade.
   Conservation (sum of balances unchanged by transfers) is a Hypothesis property.
+  `examples/python_client.py` gains `transfer()` and a `DomainRejected`
+  exception, and its walkthrough moves funds between two accounts and
+  checks conservation; the quickstart smoke test asserts the transfer output.
 
 ### Fixed
 - `docs/API_ERRORS.md`, `docs/ARCHITECTURE.md` and the OpenAPI contract promised

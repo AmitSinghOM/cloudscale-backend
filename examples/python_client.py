@@ -1,6 +1,6 @@
 """Minimal, correct client for the CloudScale HTTP API (stdlib + httpx).
 
-Copy this file into your project. It shows the three things integrators get
+Copy this file into your project. It shows the four things integrators get
 wrong with an event-sourced API:
 
 1. **Retry with the SAME ``command_id``.** The server is idempotent per
@@ -12,6 +12,12 @@ wrong with an event-sourced API:
 3. **Reads are eventual.** The balance is a projection of the log. After a
    write, poll until the read model reaches the committed version instead of
    asserting on the first read.
+4. **A transfer writes two streams.** ``POST .../{source}/transfers`` debits
+   the source and credits the target in one transaction (ADR-0011). The
+   response lists one posting per stream; ``expected_version`` guards the
+   source only, and the target posting's ``committed_version`` is ``None``
+   when you may not read that account - wait on the source's version, and on
+   the target's only when it was returned.
 
 Run against the dev stack::
 
@@ -45,11 +51,34 @@ class CommandIdConflict(Exception):
     This is a caller bug, not a race - never retry it."""
 
 
+class DomainRejected(Exception):
+    """400/422 with an ``error_code`` (``insufficient_funds``, ``same_account``,
+    ``amount_out_of_range``): the server understood the command and refused it
+    on business grounds. The rejection is persisted under the command_id, so a
+    retry with the same request returns the same rejection - fix the request."""
+
+    def __init__(self, error_code: str) -> None:
+        super().__init__(error_code)
+        self.error_code = error_code
+
+
+@dataclass(frozen=True)
+class Posting:
+    """One stream a command wrote. ``committed_version`` is None when the caller
+    may not read that account (the server does not reveal another account's
+    activity count through a transfer)."""
+
+    account_id: str
+    event_id: uuid.UUID
+    committed_version: int | None
+
+
 @dataclass(frozen=True)
 class CommandResult:
     command_id: uuid.UUID
     outcome: str
     committed_version: int | None
+    postings: tuple[Posting, ...] = ()
 
 
 class CloudScaleClient:
@@ -73,21 +102,42 @@ class CloudScaleClient:
     ) -> CommandResult:
         return self._command(account_id, "withdraw", amount, expected_version)
 
+    def transfer(
+        self,
+        source_account_id: str,
+        target_account_id: str,
+        amount: int,
+        expected_version: int,
+    ) -> CommandResult:
+        """Debit ``source`` and credit ``target`` atomically (ADR-0011).
+
+        ``expected_version`` is the SOURCE stream's version - the account whose
+        money is at risk. The target needs no version from you; a concurrent
+        writer on the target is resolved server-side.
+        """
+        return self._post(
+            f"/v1/accounts/{source_account_id}/transfers",
+            {
+                "target_account_id": target_account_id,
+                "amount": amount,
+                "expected_version": expected_version,
+            },
+        )
+
     def _command(
         self, account_id: str, kind: str, amount: int, expected_version: int
     ) -> CommandResult:
+        return self._post(
+            f"/v1/accounts/{account_id}/commands",
+            {"type": kind, "amount": amount, "expected_version": expected_version},
+        )
+
+    def _post(self, path: str, fields: dict) -> CommandResult:
         command_id = uuid.uuid4()  # minted ONCE; reused across every retry below
-        body = {
-            "command_id": str(command_id),
-            "type": kind,
-            "amount": amount,
-            "expected_version": expected_version,
-        }
+        body = {"command_id": str(command_id), **fields}
         for attempt in range(1, self._max_attempts + 1):
             try:
-                response = self._http.post(
-                    f"/v1/accounts/{account_id}/commands", json=body
-                )
+                response = self._http.post(path, json=body)
             except httpx.TransportError:
                 if attempt == self._max_attempts:
                     raise
@@ -97,7 +147,17 @@ class CloudScaleClient:
             if response.status_code in (200, 201):
                 data = response.json()
                 return CommandResult(
-                    command_id, data["outcome"], data["committed_version"]
+                    command_id,
+                    data["outcome"],
+                    data["committed_version"],
+                    tuple(
+                        Posting(
+                            p["account_id"],
+                            uuid.UUID(p["event_id"]),
+                            p["committed_version"],
+                        )
+                        for p in data.get("postings", ())
+                    ),
                 )
             if response.status_code == 409:
                 data = response.json()
@@ -106,6 +166,11 @@ class CloudScaleClient:
                 # command_id_conflict: this id was already used for a DIFFERENT
                 # request. That is a bug in the caller, never a race; do not retry.
                 raise CommandIdConflict(str(command_id))
+            if response.status_code in (400, 422):
+                data = response.json()
+                code = data.get("error_code") or data.get("detail")
+                if isinstance(code, str):
+                    raise DomainRejected(code)
             if response.status_code in (429, 503) and attempt < self._max_attempts:
                 # Both carry Retry-After; both are safe to retry with the SAME id.
                 time.sleep(float(response.headers.get("Retry-After", "1")))
@@ -192,6 +257,47 @@ def main(argv: list[str]) -> int:
         print("balance:", state["balance"], "at version", state["version"])
         if state["balance"] != 150:
             print("unexpected balance", state["balance"], file=sys.stderr)
+            return 1
+
+        # -- transfer: two streams, one transaction --------------------------------
+        target = f"example-{uuid.uuid4().hex[:6]}"
+        try:
+            client.transfer(account, target, 500, expected_version=state["version"])
+        except DomainRejected as rejected:
+            # Persisted under its command_id: the same request would be
+            # rejected the same way. Nothing was written to either stream.
+            print("transfer of 500 rejected:", rejected.error_code)
+        moved = client.transfer(account, target, 40, expected_version=state["version"])
+        by_account = {p.account_id: p for p in moved.postings}
+        print(
+            "transfer:",
+            moved.outcome,
+            "→ source version",
+            by_account[account].committed_version,
+            "/ target version",
+            by_account[target].committed_version,
+        )
+        source_state = client.wait_for_version(
+            account, by_account[account].committed_version or 0
+        )
+        target_version = by_account[target].committed_version
+        if target_version is None:
+            # Redacted: this token may not read the target. You can still
+            # observe your own side; the credit lands in the target's own reads.
+            print("target posting redacted (no read access); source only")
+            target_state = {"balance": None, "version": None}
+        else:
+            target_state = client.wait_for_version(target, target_version)
+        print(
+            "balances after transfer:",
+            source_state["balance"],
+            "+",
+            target_state["balance"],
+            "=",
+            (source_state["balance"] or 0) + (target_state["balance"] or 0),
+        )
+        if source_state["balance"] != 110 or target_state["balance"] not in (40, None):
+            print("unexpected balances after transfer", file=sys.stderr)
             return 1
         return 0
     finally:

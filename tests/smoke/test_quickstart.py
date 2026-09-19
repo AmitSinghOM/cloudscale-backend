@@ -106,6 +106,10 @@ def test_dev_token_and_example_client_run_green_against_a_real_server(
     assert result.returncode == 0, result.stderr
     assert "balance: 150 at version 2" in result.stdout
     assert "stale write rejected" in result.stdout
+    # ADR-0011: the example moves 40 across two streams and proves conservation.
+    assert "transfer of 500 rejected: insufficient_funds" in result.stdout
+    assert "transfer: accepted → source version 3 / target version 1" in result.stdout
+    assert "balances after transfer: 110 + 40 = 150" in result.stdout
 
 
 def test_dev_token_refuses_to_run_without_a_secret() -> None:
