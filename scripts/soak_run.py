@@ -67,6 +67,7 @@ MAX_LAG_SECONDS = 1.0  # every window
 MAX_FAILOVER_SECONDS = 5.0
 MAX_PG_CONNECTION_SPREAD = 2  # max - min across samples
 WARMUP_SECONDS = 600.0  # RSS slope measured after this
+MIN_SOAK_SECONDS = 1800.0  # shorter runs are harness smokes, never evidence
 
 GROWTH_TABLES = ("command_results", "rate_limit_buckets", "outbox", "events")
 
@@ -311,6 +312,23 @@ def evaluate(samples: list[dict], failover: dict | None, duration: float) -> dic
 
     def check(name: str, passed: bool, observed: object, limit: object) -> None:
         checks[name] = {"pass": bool(passed), "observed": observed, "limit": limit}
+
+    # A run too short to measure drift must not be able to say PASS: the RSS
+    # criteria below are legitimately "insufficient" before warm-up, and a
+    # verdict that leans on vacuous checks is not evidence.
+    check(
+        "minimum_duration_s",
+        duration >= MIN_SOAK_SECONDS,
+        round(duration, 1),
+        MIN_SOAK_SECONDS,
+    )
+
+    # Samples where the PostgreSQL sampler failed carry pg_error and no PG
+    # fields; the checks below would silently skip them -- and a refused
+    # connection is exactly the condition the connection-spread check exists
+    # for. Count them as a criterion of their own.
+    sampler_errors = sum(1 for s in samples if s.get("pg_error"))
+    check("pg_sampler_errors", sampler_errors == 0, sampler_errors, 0)
 
     steady = [s for s in samples if s["t"] >= WARMUP_SECONDS]
     for proc in ("server", "consumer_a", "consumer_b"):
