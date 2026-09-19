@@ -15,7 +15,7 @@ information_schema is identical.
 from __future__ import annotations
 
 #: Alembic revision the adapters require in ``migrations`` schema mode.
-CURRENT_REVISION = "0004_events_transfer_columns"
+CURRENT_REVISION = "0005_stream_snapshots"
 
 EVENTS = """
 CREATE TABLE IF NOT EXISTS events (
@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS event_envelopes (
 );
 """
 
+#: ADR-0012: at most one verified-cache row per stream; never the source of record.
+SNAPSHOTS = """
+CREATE TABLE IF NOT EXISTS stream_snapshots (
+    stream          TEXT PRIMARY KEY,
+    seq             BIGINT NOT NULL,
+    state_json      TEXT NOT NULL,
+    state_version   INTEGER NOT NULL,
+    anchor_event_id TEXT NOT NULL
+);
+"""
+
 PROJECTION = """
 CREATE TABLE IF NOT EXISTS balances (
     account_id TEXT PRIMARY KEY,
@@ -106,7 +117,7 @@ CREATE TABLE IF NOT EXISTS rate_limit_buckets (
 """
 
 #: Every statement group, in dependency order (outbox references events).
-ALL = (EVENTS, OUTBOX, COMMAND_RESULTS, PROJECTION, ACCOUNTS, RATE_LIMIT)
+ALL = (EVENTS, OUTBOX, COMMAND_RESULTS, SNAPSHOTS, PROJECTION, ACCOUNTS, RATE_LIMIT)
 
 __all__ = [
     "ACCOUNTS",
@@ -117,4 +128,5 @@ __all__ = [
     "OUTBOX",
     "PROJECTION",
     "RATE_LIMIT",
+    "SNAPSHOTS",
 ]

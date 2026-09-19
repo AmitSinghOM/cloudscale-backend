@@ -78,6 +78,11 @@ class HttpSettings(BaseSettings):
     trust_proxy_headers: bool = False
     #: Maximum accepted request body, bytes (commands are ~150 bytes).
     max_body_bytes: int = Field(default=16_384, ge=1)
+
+    #: ADR-0012: write a verified stream snapshot every N events on a stream
+    #: (both tiers). Keeps command latency flat against stream depth. 0
+    #: disables writing; existing snapshots are still read and verified.
+    snapshot_every: int = Field(default=100, ge=0)
     #: CORS allowlist. Empty (default) = no cross-origin browser access.
     cors_origins: list[str] = Field(default_factory=list)
 

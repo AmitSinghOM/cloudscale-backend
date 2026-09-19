@@ -287,3 +287,29 @@ def test_shared_limiter_disabled_at_zero(
         assert limiter.try_acquire("anyone") == (True, 0.0)
     finally:
         limiter.close()
+
+
+def test_0005_snapshots_table_round_trips_and_is_safe_to_drop(
+    fresh_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Snapshots are derived data (ADR-0012): the downgrade needs no guard."""
+    _upgrade(fresh_dsn, monkeypatch)
+
+    def _has_table() -> bool:
+        with psycopg.connect(fresh_dsn) as conn:
+            return (
+                conn.execute("SELECT to_regclass('stream_snapshots')").fetchone()[0]
+                is not None
+            )
+
+    assert _has_table()
+    with psycopg.connect(fresh_dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO stream_snapshots VALUES ('account-a', 3, '{}', 1, 'e-3')"
+        )
+    command.downgrade(alembic_config(), "0004_events_transfer_columns")
+    assert not _has_table()
+    command.upgrade(alembic_config(), "head")
+    assert _has_table()
+    with psycopg.connect(fresh_dsn) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM stream_snapshots").fetchone()[0] == 0

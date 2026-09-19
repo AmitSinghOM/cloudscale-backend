@@ -58,7 +58,9 @@ def build_app() -> FastAPI:
         from cloudscale.adapters.postgres.readiness import PostgresReadinessProbe
 
         dsn = os.environ["CLOUDSCALE_PG_DSN"]
-        pg_unit_of_work = PostgresCommandUnitOfWork(dsn)
+        pg_unit_of_work = PostgresCommandUnitOfWork(
+            dsn, snapshot_every=settings.snapshot_every
+        )
         pg_projection = PostgresProjectionStore(dsn)
         pg_registry = PostgresAccountRegistry(dsn)
         pg_probe = PostgresReadinessProbe(dsn)
@@ -101,7 +103,9 @@ def build_app() -> FastAPI:
 
     log_db = os.environ["CLOUDSCALE_LOG_DB"]
     projection_db = os.environ["CLOUDSCALE_PROJECTION_DB"]
-    unit_of_work = SqliteCommandUnitOfWork(log_db)
+    unit_of_work = SqliteCommandUnitOfWork(
+        log_db, snapshot_every=settings.snapshot_every
+    )
     projection = DeadLetteringProjectionStore(path=projection_db)
     registry = SqliteAccountRegistry(log_db)  # ownership lives beside the log
     return create_app(

@@ -23,6 +23,12 @@ from .events import (
     Withdrawn,
 )
 
+#: Shape-and-semantics version of :class:`AccountState` as folded by this build
+#: (ADR-0012). Stream snapshots record it; a snapshot whose version differs is
+#: discarded and the stream is refolded from the log. Bump it when the state's
+#: fields change OR when an upcaster changes how an existing event folds.
+CURRENT_STATE_VERSION = 1
+
 
 @dataclass(frozen=True, slots=True)
 class AccountState:
@@ -190,4 +196,11 @@ def fold(
     return state
 
 
-__all__ = ["AccountState", "apply", "decide", "decide_transfer", "fold"]
+__all__ = [
+    "CURRENT_STATE_VERSION",
+    "AccountState",
+    "apply",
+    "decide",
+    "decide_transfer",
+    "fold",
+]

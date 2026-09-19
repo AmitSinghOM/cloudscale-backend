@@ -27,15 +27,32 @@ from cloudscale.adapters.postgres import schema
 from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
 from cloudscale.application.command_execution import execute_command_decision
 from cloudscale.application.ports import NormalizedCommand
+from cloudscale.application.snapshots import (
+    DEFAULT_SNAPSHOT_EVERY,
+    SnapshotTracker,
+    StreamSnapshot,
+    fold_from_snapshot,
+    log_snapshot_rejected,
+    snapshot_rejection,
+)
 from cloudscale.domain.account import AccountState, fold
 from cloudscale.domain.events import AccountEvent, EventEnvelope
 from cloudscale.domain.upcasting import upcast
 from cloudscale.domain.results import CommandResult
 
 # Same events DDL as PostgresEventStore so both writers interoperate.
-_SCHEMA = schema.EVENTS + schema.COMMAND_RESULTS
+_SCHEMA = schema.EVENTS + schema.COMMAND_RESULTS + schema.SNAPSHOTS
 
 _MAX_RACE_RETRIES = 2
+
+_SELECT_FROM_SEQ = (
+    "SELECT seq, event_id, type, account_id, amount, transfer_id, counterparty, "
+    "schema_version FROM events WHERE stream = %s AND seq >= %s ORDER BY seq ASC"
+)
+_SELECT_ALL = (
+    "SELECT seq, event_id, type, account_id, amount, transfer_id, counterparty, "
+    "schema_version FROM events WHERE stream = %s ORDER BY seq ASC"
+)
 
 
 def _stream_name(account_id: str) -> str:
@@ -45,8 +62,9 @@ def _stream_name(account_id: str) -> str:
 class _BoundStorage:
     """``CommandDecisionStorage`` over one checked-out connection."""
 
-    def __init__(self, conn: psycopg.Connection[DictRow]) -> None:
+    def __init__(self, conn: psycopg.Connection[DictRow], snapshot_every: int) -> None:
         self._conn = conn
+        self._tracker = SnapshotTracker(snapshot_every)
 
     def stored_result(self, command_id: UUID) -> CommandResult | None:
         row = self._conn.execute(
@@ -58,14 +76,60 @@ class _BoundStorage:
         return CommandResult.from_dict(json.loads(row["result_json"]))
 
     def fold_stream(self, account_id: str) -> AccountState:
-        rows = self._conn.execute(
-            "SELECT type, account_id, amount, transfer_id, counterparty, "
-            "schema_version FROM events WHERE stream = %s ORDER BY seq ASC",
-            (_stream_name(account_id),),
-        ).fetchall()
+        """Fold from the verified snapshot plus tail, else the full stream (ADR-0012)."""
+        stream = _stream_name(account_id)
+        snapshot = self._read_snapshot(stream)
+        if snapshot is not None:
+            rows = self._conn.execute(
+                _SELECT_FROM_SEQ, (stream, snapshot.seq)
+            ).fetchall()
+            reason = snapshot_rejection(snapshot, rows)
+            if reason is None:
+                tail = [legacy_event_to_domain(upcast(dict(r))) for r in rows[1:]]
+                state = fold_from_snapshot(snapshot, tail)
+                self._tracker.folded(account_id, state, snapshot.seq)
+                return state
+            log_snapshot_rejected(stream, reason)
+        rows = self._conn.execute(_SELECT_ALL, (stream,)).fetchall()
         # Translate each stored shape to the current one before folding
         # (ADR-0009); rows predating the column read as v1.
-        return fold(legacy_event_to_domain(upcast(dict(row))) for row in rows)
+        state = fold(legacy_event_to_domain(upcast(dict(row))) for row in rows)
+        self._tracker.folded(account_id, state, 0)
+        return state
+
+    def _read_snapshot(self, stream: str) -> StreamSnapshot | None:
+        row = self._conn.execute(
+            "SELECT seq, state_json, state_version, anchor_event_id "
+            "FROM stream_snapshots WHERE stream = %s",
+            (stream,),
+        ).fetchone()
+        if row is None:
+            return None
+        return StreamSnapshot(
+            seq=int(row["seq"]),
+            state=StreamSnapshot.state_from_json(row["state_json"]),
+            state_version=int(row["state_version"]),
+            anchor_event_id=str(row["anchor_event_id"]),
+        )
+
+    def _write_snapshot(self, stream: str, snapshot: StreamSnapshot) -> None:
+        # Monotonic: a lagging writer can never move a snapshot backwards.
+        self._conn.execute(
+            "INSERT INTO stream_snapshots "
+            "(stream, seq, state_json, state_version, anchor_event_id) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT (stream) DO UPDATE SET seq = EXCLUDED.seq, "
+            "state_json = EXCLUDED.state_json, state_version = EXCLUDED.state_version, "
+            "anchor_event_id = EXCLUDED.anchor_event_id "
+            "WHERE stream_snapshots.seq < EXCLUDED.seq",
+            (
+                stream,
+                snapshot.seq,
+                snapshot.to_state_json(),
+                snapshot.state_version,
+                snapshot.anchor_event_id,
+            ),
+        )
 
     def append_event(self, envelope: EventEnvelope, event: AccountEvent) -> None:
         transfer_id, counterparty = transfer_leg_fields(event)
@@ -102,6 +166,9 @@ class _BoundStorage:
                 envelope.schema_version,
             ),
         )
+        due = self._tracker.after_append(envelope, event)
+        if due is not None:
+            self._write_snapshot(_stream_name(event.account_id), due)
 
     def persist_result(self, result: CommandResult) -> None:
         self._conn.execute(
@@ -121,19 +188,22 @@ class PostgresCommandUnitOfWork:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         event_id_factory: Callable[[], UUID] = uuid4,
         pool_max: int | None = None,
+        snapshot_every: int = DEFAULT_SNAPSHOT_EVERY,
     ) -> None:
         self._pool = open_pool(conninfo, max_size=pool_max)
         ensure_schema(self._pool, _SCHEMA)
         self._clock = clock
         self._event_id_factory = event_id_factory
+        self._snapshot_every = snapshot_every
 
     def close(self) -> None:
         self._pool.close()
 
     def execute(self, request: NormalizedCommand) -> CommandResult:
         with self._pool.connection() as conn:
-            storage = _BoundStorage(conn)
             for attempt in range(1, _MAX_RACE_RETRIES + 2):
+                # A fresh tracker per attempt: a retried decision refolds.
+                storage = _BoundStorage(conn, self._snapshot_every)
                 try:
                     with conn.transaction():
                         return execute_command_decision(

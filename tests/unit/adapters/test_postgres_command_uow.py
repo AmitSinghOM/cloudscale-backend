@@ -195,7 +195,7 @@ def test_cross_instance_command_id_race_persists_exactly_one_result(
 def _state(dsn: str, account_id: str):
     """Fold one stream exactly as the unit of work does, on a fresh connection."""
     with psycopg.connect(dsn, row_factory=psycopg.rows.dict_row) as conn:
-        return _BoundStorage(conn).fold_stream(account_id)
+        return _BoundStorage(conn, snapshot_every=0).fold_stream(account_id)
 
 
 # -- double-entry transfers (ADR-0011) ------------------------------------------------
@@ -322,3 +322,158 @@ def test_target_side_race_self_heals_via_retry_on_fresh_fold(
     assert outcomes == [CommandOutcome.ACCEPTED, CommandOutcome.ACCEPTED]
     assert _state(throwaway_dsn, target).balance == 12
     assert _state(throwaway_dsn, target).version == 2
+
+
+# -- stream snapshots (ADR-0012) ------------------------------------------------------
+
+
+def _snapshot_row(dsn: str, account: str):
+    with psycopg.connect(dsn) as conn:
+        return conn.execute(
+            "SELECT seq, state_json, state_version, anchor_event_id "
+            "FROM stream_snapshots WHERE stream = %s",
+            (f"account-{account}",),
+        ).fetchone()
+
+
+def _run(uow: PostgresCommandUnitOfWork, account: str, n: int, amount: int = 1) -> int:
+    version = _state(uow._pool.conninfo, account).version
+    for _ in range(n):
+        result = uow.execute(_request(Deposit(account, amount, version)))
+        assert result.outcome is CommandOutcome.ACCEPTED
+        version = result.committed_version or 0
+    return version
+
+
+def test_snapshot_written_every_n_events_and_anchored_on_the_log(
+    throwaway_dsn: str, account: str
+) -> None:
+    uow = PostgresCommandUnitOfWork(throwaway_dsn, snapshot_every=4)
+    try:
+        _run(uow, account, 3)
+        assert _snapshot_row(throwaway_dsn, account) is None
+        _run(uow, account, 6)  # 9 events -> snapshot at 8
+        row = _snapshot_row(throwaway_dsn, account)
+        assert row is not None and row[0] == 8
+        with psycopg.connect(throwaway_dsn) as conn:
+            (event_id,) = conn.execute(
+                "SELECT event_id FROM events WHERE stream = %s AND seq = 8",
+                (f"account-{account}",),
+            ).fetchone()
+        assert row[3] == event_id
+        assert _state(throwaway_dsn, account).balance == 9
+    finally:
+        uow.close()
+
+
+def test_fold_from_snapshot_serves_decisions_identically_to_the_full_fold(
+    throwaway_dsn: str, account: str
+) -> None:
+    fast = PostgresCommandUnitOfWork(throwaway_dsn, snapshot_every=2)
+    try:
+        version = _run(fast, account, 7, amount=10)
+        assert _snapshot_row(throwaway_dsn, account)[0] == 6
+        withdraw = fast.execute(_request(Withdraw(account, 65, version)))
+        assert withdraw.outcome is CommandOutcome.ACCEPTED
+        rejected = fast.execute(
+            _request(Withdraw(account, 6, withdraw.committed_version or 0))
+        )
+        assert rejected.outcome is CommandOutcome.INSUFFICIENT_FUNDS
+    finally:
+        fast.close()
+    # _state() folds with snapshots disabled -> full fold from seq 1.
+    assert _state(throwaway_dsn, account).balance == 5
+
+
+def test_anchor_mismatch_discards_the_snapshot_on_postgres(
+    throwaway_dsn: str, account: str, caplog
+) -> None:
+    uow = PostgresCommandUnitOfWork(throwaway_dsn, snapshot_every=2)
+    try:
+        _run(uow, account, 4, amount=5)
+        with psycopg.connect(throwaway_dsn, autocommit=True) as conn:
+            conn.execute(
+                "UPDATE stream_snapshots SET anchor_event_id = 'not-the-event', "
+                "state_json = %s WHERE stream = %s",
+                (
+                    '{"account_id":"%s","balance":999,"version":4}' % account,
+                    f"account-{account}",
+                ),
+            )
+        with caplog.at_level("WARNING", logger="cloudscale.snapshots"):
+            version = _run(uow, account, 1, amount=5)  # decision refolds from the log
+        assert version == 5
+        assert any("anchor mismatch" in r.getMessage() for r in caplog.records)
+        assert _state(throwaway_dsn, account).balance == 25
+    finally:
+        uow.close()
+
+
+def test_snapshot_upsert_is_monotonic_on_postgres(
+    throwaway_dsn: str, account: str
+) -> None:
+    from cloudscale.application.snapshots import StreamSnapshot
+    from cloudscale.domain.account import AccountState
+
+    uow = PostgresCommandUnitOfWork(throwaway_dsn, snapshot_every=1)
+    try:
+        _run(uow, account, 5)
+        assert _snapshot_row(throwaway_dsn, account)[0] == 5
+        with psycopg.connect(throwaway_dsn, row_factory=psycopg.rows.dict_row) as conn:
+            _BoundStorage(conn, snapshot_every=1)._write_snapshot(
+                f"account-{account}",
+                StreamSnapshot(3, AccountState(account, 3, 3), 1, "old-anchor"),
+            )
+            conn.commit()
+        assert _snapshot_row(throwaway_dsn, account)[0] == 5
+    finally:
+        uow.close()
+
+
+def test_snapshot_every_zero_disables_writing_on_postgres(
+    throwaway_dsn: str, account: str
+) -> None:
+    uow = PostgresCommandUnitOfWork(throwaway_dsn, snapshot_every=0)
+    try:
+        _run(uow, account, 6)
+        assert _snapshot_row(throwaway_dsn, account) is None
+    finally:
+        uow.close()
+
+
+def test_concurrent_writers_on_one_deep_stream_keep_snapshot_and_fold_consistent(
+    throwaway_dsn: str, account: str
+) -> None:
+    """Retries refold on a fresh tracker; the snapshot never lies about the log."""
+    uow = PostgresCommandUnitOfWork(throwaway_dsn, snapshot_every=3, pool_max=4)
+    try:
+        _run(uow, account, 5, amount=1)
+        outcomes: list[CommandOutcome] = []
+        lock = threading.Lock()
+
+        def racer() -> None:
+            version = _state(throwaway_dsn, account).version
+            result = uow.execute(_request(Deposit(account, 1, version)))
+            with lock:
+                outcomes.append(result.outcome)
+
+        threads = [threading.Thread(target=racer) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        accepted = outcomes.count(CommandOutcome.ACCEPTED)
+        assert accepted >= 1
+        state = _state(throwaway_dsn, account)
+        assert state.balance == 5 + accepted
+        row = _snapshot_row(throwaway_dsn, account)
+        assert row is not None and row[0] <= state.version
+        # The snapshot's cached state matches the log at its own seq.
+        with psycopg.connect(throwaway_dsn) as conn:
+            (count,) = conn.execute(
+                "SELECT COUNT(*) FROM events WHERE stream = %s AND seq <= %s",
+                (f"account-{account}", row[0]),
+            ).fetchone()
+        assert count == row[0]
+    finally:
+        uow.close()

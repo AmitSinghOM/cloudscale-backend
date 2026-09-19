@@ -19,6 +19,7 @@ a customer-facing deployment must set (RUNBOOK D1–D7).
 | `CLOUDSCALE_PG_SCHEMA` | `auto` | `migrations` | `auto`: the app creates tables idempotently (dev/test). `migrations`: the app creates **nothing** and refuses to start unless Alembic has stamped the required revision. |
 | `CLOUDSCALE_PG_POOL_MAX` | `4` | size for your replica count | Max pooled connections per process. Raise this (or add replicas) when 503s coincide with a healthy database. |
 | `CLOUDSCALE_PG_POOL_TIMEOUT_SECONDS` | `3` | `3` | Wait for a pooled connection before failing fast as a transient error → 503 + `Retry-After`. Do not raise it to hide exhaustion. |
+| `CLOUDSCALE_SNAPSHOT_EVERY` | `100` | `100` | ADR-0012: write a verified stream snapshot every N events on a stream (both tiers), keeping command latency flat against stream depth. `0` disables writing; existing snapshots are still read and verified against the log. Drop snapshots at any time with `scripts/snapshots.py`. |
 
 ## Identity (exactly one of the first two is required)
 

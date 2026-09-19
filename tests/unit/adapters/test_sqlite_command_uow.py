@@ -298,3 +298,166 @@ def test_transfer_rejections_persist_without_touching_either_stream(
     assert uow.fold_stream("dst").version == 0
     # Persisted: the same command_id replays the rejection.
     assert uow.execute(request) == result
+
+
+# -- stream snapshots (ADR-0012) ------------------------------------------------------
+
+
+def _snapshot_row(db_path: str, account: str):
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            "SELECT seq, state_json, state_version, anchor_event_id "
+            "FROM stream_snapshots WHERE stream = ?",
+            (f"account-{account}",),
+        ).fetchone()
+
+
+def _run(uow: SqliteCommandUnitOfWork, account: str, n: int, amount: int = 1) -> int:
+    version = uow.fold_stream(account).version
+    for _ in range(n):
+        result = uow.execute(_request(Deposit(account, amount, version)))
+        assert result.outcome is CommandOutcome.ACCEPTED
+        version = result.committed_version or 0
+    return version
+
+
+def test_snapshot_written_every_n_events_inside_the_command_transaction(
+    db_path: str,
+) -> None:
+    uow = SqliteCommandUnitOfWork(db_path, snapshot_every=4)
+    try:
+        account = "acct-snap-a"
+        _run(uow, account, 3)
+        assert _snapshot_row(db_path, account) is None  # 3 < 4
+        _run(uow, account, 1)
+        row = _snapshot_row(db_path, account)
+        assert row is not None and row[0] == 4
+        _run(uow, account, 5)  # 9 events: snapshot advanced to 8
+        row = _snapshot_row(db_path, account)
+        assert row[0] == 8
+        # The snapshot anchors on the real event at seq 8.
+        with sqlite3.connect(db_path) as conn:
+            (event_id,) = conn.execute(
+                "SELECT event_id FROM events WHERE stream = ? AND seq = 8",
+                (f"account-{account}",),
+            ).fetchone()
+        assert row[3] == event_id
+        # And the fold it produces equals the fold of the whole stream.
+        assert uow.fold_stream(account).balance == 9
+    finally:
+        uow.close()
+
+
+def test_fold_from_snapshot_equals_full_fold_and_serves_the_next_decision(
+    db_path: str,
+) -> None:
+    fast = SqliteCommandUnitOfWork(db_path, snapshot_every=2)
+    try:
+        account = "acct-snap-b"
+        version = _run(fast, account, 7, amount=10)
+        withdraw = fast.execute(_request(Withdraw(account, 65, version)))
+        assert withdraw.outcome is CommandOutcome.ACCEPTED
+        rejected = fast.execute(
+            _request(Withdraw(account, 6, withdraw.committed_version or 0))
+        )
+        assert rejected.outcome is CommandOutcome.INSUFFICIENT_FUNDS  # 70-65 = 5
+    finally:
+        fast.close()
+    # A reader with snapshots disabled folds the full stream and agrees.
+    plain = SqliteCommandUnitOfWork(db_path, snapshot_every=0)
+    try:
+        assert plain.fold_stream(account).balance == 5
+    finally:
+        plain.close()
+
+
+def test_anchor_mismatch_discards_the_snapshot_and_refolds(
+    db_path: str, caplog
+) -> None:
+    uow = SqliteCommandUnitOfWork(db_path, snapshot_every=2)
+    try:
+        account = "acct-snap-c"
+        _run(uow, account, 4, amount=5)
+        with sqlite3.connect(db_path) as conn:
+            # Simulate a restore from a different log: the anchor id differs and
+            # the cached balance is wrong. Only the log may be believed.
+            conn.execute(
+                "UPDATE stream_snapshots SET anchor_event_id = 'not-the-event', "
+                'state_json = \'{"account_id":"acct-snap-c","balance":999,'
+                '"version":4}\' WHERE stream = ?',
+                (f"account-{account}",),
+            )
+        with caplog.at_level("WARNING", logger="cloudscale.snapshots"):
+            state = uow.fold_stream(account)
+        assert state.balance == 20 and state.version == 4
+        assert any("anchor mismatch" in r.getMessage() for r in caplog.records)
+    finally:
+        uow.close()
+
+
+def test_stale_state_version_discards_the_snapshot(db_path: str, caplog) -> None:
+    uow = SqliteCommandUnitOfWork(db_path, snapshot_every=1)
+    try:
+        account = "acct-snap-d"
+        _run(uow, account, 2, amount=5)
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE stream_snapshots SET state_version = state_version + 1, "
+                'state_json = \'{"account_id":"acct-snap-d","balance":999,'
+                '"version":2}\' WHERE stream = ?',
+                (f"account-{account}",),
+            )
+        with caplog.at_level("WARNING", logger="cloudscale.snapshots"):
+            assert uow.fold_stream(account).balance == 10
+        assert any("state_version" in r.getMessage() for r in caplog.records)
+        # The next accepted command rewrites a fresh, current-version snapshot.
+        _run(uow, account, 1)
+        row = _snapshot_row(db_path, account)
+        assert row[0] == 3 and row[2] == 1
+    finally:
+        uow.close()
+
+
+def test_snapshot_upsert_is_monotonic(db_path: str) -> None:
+    uow = SqliteCommandUnitOfWork(db_path, snapshot_every=1)
+    try:
+        account = "acct-snap-e"
+        _run(uow, account, 5)
+        assert _snapshot_row(db_path, account)[0] == 5
+        # A lagging writer trying to store seq 3 must not move it backwards.
+        from cloudscale.application.snapshots import StreamSnapshot
+        from cloudscale.domain.account import AccountState
+
+        uow._write_snapshot(
+            f"account-{account}",
+            StreamSnapshot(3, AccountState(account, 3, 3), 1, "old-anchor"),
+        )
+        uow._conn.commit()
+        assert _snapshot_row(db_path, account)[0] == 5
+    finally:
+        uow.close()
+
+
+def test_snapshot_every_zero_disables_writing(db_path: str) -> None:
+    uow = SqliteCommandUnitOfWork(db_path, snapshot_every=0)
+    try:
+        _run(uow, "acct-snap-f", 6)
+        assert _snapshot_row(db_path, "acct-snap-f") is None
+    finally:
+        uow.close()
+
+
+def test_transfer_snapshots_both_streams_independently(db_path: str) -> None:
+    uow = SqliteCommandUnitOfWork(db_path, snapshot_every=2)
+    try:
+        version = _run(uow, "acct-snap-src", 1, amount=100)  # seq 1, no snapshot yet
+        result = uow.execute(
+            _request(Transfer("acct-snap-src", "acct-snap-dst", 40, version))
+        )
+        assert result.outcome is CommandOutcome.ACCEPTED
+        assert _snapshot_row(db_path, "acct-snap-src")[0] == 2  # source hit 2
+        assert _snapshot_row(db_path, "acct-snap-dst") is None  # target at 1
+        assert uow.fold_stream("acct-snap-src").balance == 60
+        assert uow.fold_stream("acct-snap-dst").balance == 40
+    finally:
+        uow.close()
