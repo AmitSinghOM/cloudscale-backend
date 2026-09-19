@@ -44,12 +44,13 @@ def _request(command, command_id=None):
 
 def _seed_sqlite(tmp_path: Path, expires_in: timedelta) -> tuple[str, str, uuid.UUID]:
     log, proj = str(tmp_path / "log.db"), str(tmp_path / "proj.db")
-    uow = SqliteCommandUnitOfWork(log)
+    # A 1-second hold placed on a clock set so that it expires ``expires_in`` from now.
+    placed_at = datetime.now(UTC) + expires_in - timedelta(seconds=1)
+    uow = SqliteCommandUnitOfWork(log, clock=lambda: placed_at)
     try:
         uow.execute(_request(Deposit("src", 100, 0)))
         hold_id = uuid.uuid4()
-        expires_at = (datetime.now(UTC) + expires_in).isoformat()
-        uow.execute(_request(Hold("src", "dst", 40, 1, expires_at), command_id=hold_id))
+        uow.execute(_request(Hold("src", "dst", 40, 1, 1), command_id=hold_id))
     finally:
         uow.close()
     feed = SqliteEventStore(log)
@@ -170,15 +171,17 @@ def _seed_expired_holds_pg(dsn: str, count: int) -> list[uuid.UUID]:
     from cloudscale.adapters.postgres.event_store import PostgresEventStore
     from cloudscale.adapters.postgres.projection_store import PostgresProjectionStore
 
-    uow = PostgresCommandUnitOfWork(dsn)
+    placed_at = datetime.now(UTC) - timedelta(
+        minutes=2
+    )  # 1-minute holds, already expired
+    uow = PostgresCommandUnitOfWork(dsn, clock=lambda: placed_at)
     hold_ids: list[uuid.UUID] = []
     try:
         uow.execute(_request(Deposit("src", 1_000, 0)))
-        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
         for i in range(count):
             hold_id = uuid.uuid4()
             uow.execute(
-                _request(Hold("src", f"dst-{i}", 10, i + 1, past), command_id=hold_id)
+                _request(Hold("src", f"dst-{i}", 10, i + 1, 60), command_id=hold_id)
             )
             hold_ids.append(hold_id)
         assert uow.fold_stream("src").held == 10 * count

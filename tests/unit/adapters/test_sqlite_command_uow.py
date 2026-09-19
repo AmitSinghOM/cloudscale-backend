@@ -567,6 +567,8 @@ def test_transfer_snapshots_both_streams_independently(db_path: str) -> None:
 
 # -- holds (ADR-0014) ------------------------------------------------------------------
 
+HOUR = 3600
+
 
 def _uow_with_clock(db_path: str, moments: list) -> SqliteCommandUnitOfWork:
     """A unit of work whose clock pops from ``moments`` (last one sticks)."""
@@ -583,8 +585,7 @@ def test_hold_reserves_available_funds_and_is_derived_from_the_log(
 ) -> None:
     uow.execute(_request(Deposit("src", 100, 0)))
     hold_id = uuid4()
-    later = "2099-01-01T00:00:00+00:00"
-    placed = uow.execute(_request(Hold("src", "dst", 40, 1, later), command_id=hold_id))
+    placed = uow.execute(_request(Hold("src", "dst", 40, 1, HOUR), command_id=hold_id))
     assert placed.outcome is CommandOutcome.ACCEPTED
     state = uow.fold_stream("src")
     assert (state.balance, state.held, state.available) == (100, 40, 60)
@@ -607,11 +608,7 @@ def test_post_hold_moves_reserved_funds_to_the_target_in_one_transaction(
 ) -> None:
     uow.execute(_request(Deposit("src", 100, 0)))
     hold_id = uuid4()
-    uow.execute(
-        _request(
-            Hold("src", "dst", 40, 1, "2099-01-01T00:00:00+00:00"), command_id=hold_id
-        )
-    )
+    uow.execute(_request(Hold("src", "dst", 40, 1, HOUR), command_id=hold_id))
     result = uow.execute(_request(PostHold("src", hold_id, 2)))
     assert result.outcome is CommandOutcome.ACCEPTED
     assert [(p.account_id, p.committed_version) for p in result.postings] == [
@@ -634,11 +631,7 @@ def test_partial_capture_puts_two_events_on_the_source_and_reports_both(
 ) -> None:
     uow.execute(_request(Deposit("src", 100, 0)))
     hold_id = uuid4()
-    uow.execute(
-        _request(
-            Hold("src", "dst", 40, 1, "2099-01-01T00:00:00+00:00"), command_id=hold_id
-        )
-    )
+    uow.execute(_request(Hold("src", "dst", 40, 1, HOUR), command_id=hold_id))
     result = uow.execute(_request(PostHold("src", hold_id, 2, amount=15)))
     assert result.outcome is CommandOutcome.ACCEPTED
     # One posting per stream; the source's names its LAST event (seq 4).
@@ -667,9 +660,8 @@ def test_void_and_expire_release_without_moving_funds(db_path: str) -> None:
     try:
         uow.execute(_request(Deposit("src", 100, 0)))
         voided_id, expiring_id = uuid4(), uuid4()
-        soon = (t0.replace(minute=30)).isoformat()
-        uow.execute(_request(Hold("src", "dst", 30, 1, soon), command_id=voided_id))
-        uow.execute(_request(Hold("src", "dst", 20, 2, soon), command_id=expiring_id))
+        uow.execute(_request(Hold("src", "dst", 30, 1, 1800), command_id=voided_id))
+        uow.execute(_request(Hold("src", "dst", 20, 2, 1800), command_id=expiring_id))
         assert uow.fold_stream("src").held == 50
 
         voided = uow.execute(_request(VoidHold("src", voided_id, 3)))
@@ -702,7 +694,7 @@ def test_hold_events_snapshot_and_refold_identically(db_path: str) -> None:
         hold_id = uuid4()
         fast.execute(
             _request(
-                Hold("src", "dst", 40, 1, "2099-01-01T00:00:00+00:00"),
+                Hold("src", "dst", 40, 1, HOUR),
                 command_id=hold_id,
             )
         )

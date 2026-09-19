@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -171,15 +170,9 @@ class Post:
         return self.postings
 
 
-def _validate_expires_at(value: object) -> None:
-    if not isinstance(value, str) or not value:
-        raise InvalidExpiryError("expires_at must be a UTC ISO-8601 string")
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise InvalidExpiryError("expires_at must be a UTC ISO-8601 string") from error
-    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
-        raise InvalidExpiryError("expires_at must be UTC")
+def _validate_ttl_seconds(value: object) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise InvalidExpiryError("ttl_seconds must be a positive integer")
 
 
 def _validate_uuid(value: object, field_name: str) -> None:
@@ -191,15 +184,17 @@ def _validate_uuid(value: object, field_name: str) -> None:
 class Hold:
     """Reserve ``amount`` on ``account_id`` for a later posting to the target (ADR-0014).
 
-    ``expires_at`` is absolute UTC text: the HTTP layer converts a TTL using
-    its clock so the domain never reads one. The hold id is the command id.
+    ``ttl_seconds`` is the caller's intent and is what the idempotency hash
+    covers, so a retry with the same command id is a replay. The decision
+    turns it into an absolute ``expires_at`` from the decision clock, once;
+    the fold never reads a clock. The hold id is the command id.
     """
 
     account_id: str
     target_account_id: str
     amount: int
     expected_version: int
-    expires_at: str
+    ttl_seconds: int
 
     def __post_init__(self) -> None:
         _validate_account_id(self.account_id)
@@ -208,7 +203,7 @@ class Hold:
             raise SameAccountError("a hold needs two different accounts")
         _validate_amount(self.amount)
         _validate_expected_version(self.expected_version)
-        _validate_expires_at(self.expires_at)
+        _validate_ttl_seconds(self.ttl_seconds)
 
 
 @dataclass(frozen=True, slots=True)

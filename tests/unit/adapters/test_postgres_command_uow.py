@@ -589,11 +589,7 @@ def test_hold_lifecycle_on_postgres_and_read_model(
     try:
         uow.execute(_request(Deposit(src, 100, 0)))
         hold_id = uuid.uuid4()
-        placed = uow.execute(
-            _request(
-                Hold(src, dst, 40, 1, "2099-01-01T00:00:00+00:00"), command_id=hold_id
-            )
-        )
+        placed = uow.execute(_request(Hold(src, dst, 40, 1, 3600), command_id=hold_id))
         assert placed.outcome is CommandOutcome.ACCEPTED
         assert _state(throwaway_dsn, src).held == 40
         hold = _BoundStorageProbe(throwaway_dsn).open_hold(src, hold_id)
@@ -648,9 +644,7 @@ def test_concurrent_post_and_void_of_one_hold_resolve_to_exactly_one_winner(
     seed = PostgresCommandUnitOfWork(throwaway_dsn)
     seed.execute(_request(Deposit(src, 100, 0)))
     hold_id = uuid.uuid4()
-    seed.execute(
-        _request(Hold(src, dst, 40, 1, "2099-01-01T00:00:00+00:00"), command_id=hold_id)
-    )
+    seed.execute(_request(Hold(src, dst, 40, 1, 3600), command_id=hold_id))
     seed.close()
 
     outcomes = _race(

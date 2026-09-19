@@ -664,6 +664,23 @@ def test_hold_lifecycle_over_http_place_post_and_balances(stack: _Stack) -> None
     assert placed.json()["committed_version"] == 2
     assert [p["account_id"] for p in placed.json()["postings"]] == ["acct-src"]
 
+    # The retry rule the whole API rests on: the same command_id is a replay,
+    # byte for byte -- even though the decision stamps expires_at from its
+    # clock (found by the independent review; this was a 409 before the fix).
+    replay = stack.client.post(
+        "/v1/accounts/acct-src/holds", json=hold, headers=_auth()
+    )
+    assert replay.status_code == 201
+    assert replay.json() == placed.json()
+    # A different TTL under the same id is a different intent: conflict.
+    changed = stack.client.post(
+        "/v1/accounts/acct-src/holds",
+        json={**hold, "ttl_seconds": 7200},
+        headers=_auth(),
+    )
+    assert changed.status_code == 409
+    assert changed.json()["error_code"] == "command_id_conflict"
+
     stack.run_consumer()
     src = stack.client.get("/v1/accounts/acct-src/balance", headers=_auth()).json()
     assert (src["balance"], src["held"], src["available"]) == (100, 40, 60)

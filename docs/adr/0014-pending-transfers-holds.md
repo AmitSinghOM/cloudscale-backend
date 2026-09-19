@@ -56,10 +56,14 @@ paired with a `TransferCredited` on the target whose `transfer_id` is the
 `hold_id`. `HELD_SIGN` is a second table beside `BALANCE_SIGN`; each
 projected quantity has exactly one table and the fold applies both.
 `CURRENT_STATE_VERSION` (ADR-0012) becomes 2. Commands:
-`Hold(account_id, target_account_id, amount, expected_version, expires_at)`
-→ `HoldPlaced` (hold id = command id; `expires_at` is absolute UTC text
-produced by the HTTP layer from `ttl_seconds`, bounded by
-`CLOUDSCALE_HOLD_MAX_TTL_SECONDS`); `PostHold(account_id, hold_id,
+`Hold(account_id, target_account_id, amount, expected_version, ttl_seconds)`
+→ `HoldPlaced` (hold id = command id; the **decision** stamps the event's
+absolute `expires_at` from the decision clock plus the caller's TTL, so the
+idempotency hash covers only the caller's intent and a retry with the same
+command id is the replay every other command promises — the independent
+review caught the earlier draft hashing a server-stamped timestamp, which
+turned retries into `command_id_conflict`; `ttl_seconds` is bounded by
+`CLOUDSCALE_HOLD_MAX_TTL_SECONDS` at the HTTP layer); `PostHold(account_id, hold_id,
 expected_version, amount=None)` → `HoldPosted` + `TransferCredited`, plus a
 `HoldReleased(partial)` for the remainder when `amount` is less than held,
 all in one transaction; `VoidHold` → `HoldReleased(voided)`; `ExpireHold` →

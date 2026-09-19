@@ -96,9 +96,12 @@ def test_release_beyond_held_is_an_invariant_violation_not_a_negative_balance() 
 def test_hold_is_checked_against_available_not_balance() -> None:
     state = _src(100, held=60)
     with pytest.raises(InsufficientFundsError):
-        decide_hold(state, Hold("src", "dst", 41, 1, LATER), hold_id=uuid4())
-    placed = decide_hold(state, Hold("src", "dst", 40, 1, LATER), hold_id=uuid4())
+        decide_hold(state, Hold("src", "dst", 41, 1, 3600), hold_id=uuid4(), now=NOW)
+    placed = decide_hold(
+        state, Hold("src", "dst", 40, 1, 3600), hold_id=uuid4(), now=NOW
+    )
     assert placed.amount == 40 and placed.counterparty == "dst"
+    assert placed.expires_at == LATER  # stamped from the decision clock + ttl
     assert apply(state, placed).available == 0
 
 
@@ -109,17 +112,23 @@ def test_every_debit_honours_available_funds() -> None:
     assert decide(state, Withdraw("src", 40, 1)).amount == 40
 
 
+@pytest.mark.parametrize("bad", [0, -1, True, "3600", 1.5])
+def test_hold_ttl_must_be_a_positive_integer(bad) -> None:
+    with pytest.raises(InvalidExpiryError):
+        Hold("src", "dst", 1, 0, bad)  # type: ignore[arg-type]
+
+
 @pytest.mark.parametrize(
     "bad", ["", "not-a-date", "2026-09-20T12:00:00", "2026-09-20T12:00:00+05:30"]
 )
-def test_hold_expiry_must_be_utc_iso8601(bad) -> None:
-    with pytest.raises(InvalidExpiryError):
-        Hold("src", "dst", 1, 0, bad)
+def test_hold_placed_event_expiry_must_be_utc_iso8601(bad) -> None:
+    with pytest.raises(ValueError):
+        HoldPlaced("src", 1, uuid4(), "dst", bad)
 
 
 def test_hold_rejects_same_account() -> None:
     with pytest.raises(SameAccountError):
-        Hold("src", "src", 1, 0, LATER)
+        Hold("src", "src", 1, 0, 3600)
 
 
 # -- open-hold derivation -------------------------------------------------------------------
@@ -304,7 +313,10 @@ def _apply_step(
         amount = min(src.available, 7) or 1
         try:
             placed = decide_hold(
-                src, Hold("src", "dst", amount, src.version, LATER), hold_id=uuid4()
+                src,
+                Hold("src", "dst", amount, src.version, 3600),
+                hold_id=uuid4(),
+                now=NOW,
             )
         except InsufficientFundsError:
             return src, dst

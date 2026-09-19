@@ -13,7 +13,6 @@ import logging
 import sqlite3
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 from uuid import UUID
@@ -178,9 +177,9 @@ class PostingsRequest(BaseModel):
 class HoldRequest(BaseModel):
     """Reserve funds on the path account for ``target_account_id`` (ADR-0014).
 
-    ``ttl_seconds`` becomes an absolute ``expires_at`` on the server clock,
-    bounded by ``CLOUDSCALE_HOLD_MAX_TTL_SECONDS``. The hold id is the
-    ``command_id``.
+    ``ttl_seconds`` (bounded by ``CLOUDSCALE_HOLD_MAX_TTL_SECONDS``) is part of
+    the idempotent request; the decision stamps the absolute ``expires_at``
+    from its clock. The hold id is the ``command_id``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -307,7 +306,6 @@ def create_app(
     token_verifier: TokenVerifier | None = None,
     readiness_probe: ReadinessProbe | None = None,
     closeables: Sequence[Closeable] = (),
-    clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> FastAPI:
     """Build the HTTP app over explicit, injected collaborators.
 
@@ -720,14 +718,13 @@ def create_app(
                     "(CLOUDSCALE_HOLD_MAX_TTL_SECONDS)"
                 ),
             )
-        expires_at = (clock() + timedelta(seconds=request.ttl_seconds)).isoformat()
         try:
             command = Hold(
                 account_id,
                 request.target_account_id,
                 request.amount,
                 request.expected_version,
-                expires_at,
+                request.ttl_seconds,
             )
         except DomainError as error:
             raise HTTPException(status_code=400, detail=error.code) from error

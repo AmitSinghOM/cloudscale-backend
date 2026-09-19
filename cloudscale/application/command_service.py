@@ -87,10 +87,12 @@ def _command_specific_fields(command: AccountCommand) -> dict[str, object]:
             ]
         }
     if isinstance(command, Hold):
+        # The caller's TTL, not the server-stamped expires_at: a retry with the
+        # same command_id must hash identically to be the replay the docs promise.
         return {
             "amount": command.amount,
             "target_account_id": command.target_account_id,
-            "expires_at": command.expires_at,
+            "ttl_seconds": command.ttl_seconds,
         }
     if isinstance(command, PostHold):
         # None = capture the full hold; a stated amount is a different intent.

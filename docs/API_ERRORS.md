@@ -71,10 +71,11 @@ A hold reserves funds on the path account for a later posting to
 `target_account_id`. `held` rises and `available = balance - held` falls;
 `balance` does not move until the hold is posted. Every debit (withdraw,
 transfer, posting set, another hold) is checked against **available**. The
-hold id is the `command_id` of the hold request. `ttl_seconds` becomes an
-absolute `expires_at` on the server clock (bounded by
-`CLOUDSCALE_HOLD_MAX_TTL_SECONDS`); past it the hold can only be voided or
-expired — the sweeper (`scripts/sweep_holds.py`) expires it. The target
+hold id is the `command_id` of the hold request. `ttl_seconds` (bounded by
+`CLOUDSCALE_HOLD_MAX_TTL_SECONDS`) is part of the idempotent request, so a
+retry with the same `command_id` is a 201 replay; the server stamps the
+absolute `expires_at` once, at decision time. Past it the hold can only be
+voided or expired — the sweeper (`scripts/sweep_holds.py`) expires it. The target
 account sees nothing until the post. `GET …/balance` returns `held` and
 `available`.
 

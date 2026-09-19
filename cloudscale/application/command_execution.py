@@ -192,9 +192,8 @@ def _decide_legs(
         )
         return _number_legs(states, events)
     if isinstance(command, Hold):
-        return [
-            (decide_hold(state, command, hold_id=request.command_id), state.version + 1)
-        ]
+        placed = decide_hold(state, command, hold_id=request.command_id, now=now)
+        return [(placed, state.version + 1)]
     if isinstance(command, PostHold):
         hold = storage.open_hold(command.account_id, command.hold_id)
         # The target is known only from the hold itself; fold it once found.

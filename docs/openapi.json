@@ -108,7 +108,7 @@
       },
       "HoldRequest": {
         "additionalProperties": false,
-        "description": "Reserve funds on the path account for ``target_account_id`` (ADR-0014).\n\n``ttl_seconds`` becomes an absolute ``expires_at`` on the server clock,\nbounded by ``CLOUDSCALE_HOLD_MAX_TTL_SECONDS``. The hold id is the\n``command_id``.",
+        "description": "Reserve funds on the path account for ``target_account_id`` (ADR-0014).\n\n``ttl_seconds`` (bounded by ``CLOUDSCALE_HOLD_MAX_TTL_SECONDS``) is part of\nthe idempotent request; the decision stamps the absolute ``expires_at``\nfrom its clock. The hold id is the ``command_id``.",
         "properties": {
           "amount": {
             "title": "Amount",

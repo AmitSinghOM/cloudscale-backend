@@ -2,7 +2,7 @@
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from .commands import (
@@ -274,8 +274,15 @@ def open_hold_from_events(
     return OpenHold(hold_id, placed.amount, placed.counterparty, placed.expires_at)
 
 
-def decide_hold(state: AccountState, command: Hold, *, hold_id: UUID) -> HoldPlaced:
-    """Reserve funds: checked against AVAILABLE, not balance (ADR-0014)."""
+def decide_hold(
+    state: AccountState, command: Hold, *, hold_id: UUID, now: datetime
+) -> HoldPlaced:
+    """Reserve funds: checked against AVAILABLE, not balance (ADR-0014).
+
+    ``expires_at`` is stamped here from the decision clock and the caller's
+    TTL, so the event carries an absolute time while the command (and its
+    idempotency hash) carries only the caller's intent.
+    """
     if not isinstance(command, Hold):
         raise UnknownCommandError(f"unsupported command type: {type(command).__name__}")
     _require_matching_identity(state, command.account_id)
@@ -286,7 +293,7 @@ def decide_hold(state: AccountState, command: Hold, *, hold_id: UUID) -> HoldPla
         amount=command.amount,
         hold_id=hold_id,
         counterparty=command.target_account_id,
-        expires_at=command.expires_at,
+        expires_at=(now + timedelta(seconds=command.ttl_seconds)).isoformat(),
     )
 
 
