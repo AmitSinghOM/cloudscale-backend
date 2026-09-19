@@ -26,8 +26,16 @@ _ASYMMETRIC_ALGORITHMS = frozenset({"RS256", "RS384", "RS512", "ES256", "ES384"}
 #: Secrets that appear verbatim in this repository (Makefile, compose.yaml,
 #: CI). A deployment running one of them in production mode is warned at
 #: startup - see HttpSettings.production_warnings.
+#: Every fixed JWT secret committed to this public repository. A production
+#: process configured with any of them gets a startup warning (see
+#: ``production_warnings``); tests/architecture keeps this set complete by
+#: scanning the shipped files (Makefile, compose.yaml, scripts/) for secret
+#: literals. Test-only secrets under tests/ are not shipped and not listed.
 KNOWN_DEVELOPMENT_SECRETS: frozenset[str] = frozenset(
-    {"local-dev-only-secret-0123456789abcdef-0123456789abcdef"}
+    {
+        "local-dev-only-secret-0123456789abcdef-0123456789abcdef",  # Makefile, compose
+        "http-gate-run-secret-0123456789abcdef-0123456789abcdef",  # scripts harnesses
+    }
 )
 
 
