@@ -124,7 +124,7 @@ build, not a wish.
 ## Verifying
 
 ```
-make install-dev   # hash-pinned lockfile into .venv (Python 3.12)
+make install-dev   # hash-pinned lockfile into .venv (Python 3.12 or 3.13)
 make check         # ruff format-check + lint, mypy, pytest
 .venv/bin/python scripts/verify_milestone.py 1   # revision-bound evidence gate
 ```

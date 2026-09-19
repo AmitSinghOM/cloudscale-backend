@@ -10,6 +10,13 @@ Developer experience: from clone to a correct first integration without
 reading source.
 
 ### Fixed
+- Review 3 (longevity range v0.5.1..v0.6.0, `docs/reviews/2026-09-19-longevity-review.md`):
+  event writers stamp `schema_version` from `CURRENT_SCHEMA_VERSION` instead of a
+  literal 1 (the first real schema bump would otherwise have corrupted every
+  fold); Alembic `0003` downgrade refuses to drop `schema_version` while any row
+  is newer than v1; the soak verdict fails on PostgreSQL sampler errors and on
+  runs shorter than 30 minutes; the schema-newer-than-build 503 is logged at
+  ERROR so operators can tell it from a storage outage.
 - Four-role review of the developer-experience change set (`docs/reviews/2026-09-15-dx-review.md`):
   OpenAPI contract now declares bearer auth and real status codes; example
   client distinguishes 409 kinds and backs off on 429; `make dev` fails loudly
