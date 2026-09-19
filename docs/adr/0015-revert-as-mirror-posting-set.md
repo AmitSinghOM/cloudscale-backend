@@ -63,9 +63,11 @@ The decision reads the log inside the transaction, never the read model:
 `reverted_by(transfer_id)` the first reversal that names it. A second
 revert is rejected with `already_reverted`. Under concurrency no new lock is
 needed: every revert writes the anchor stream, so two reverts of one
-original collide on `UNIQUE (stream, seq)` there, the loser refolds and now
-sees `reverted_by`, and is rejected — persisted under its own command id
-like every rejection.
+original collide on `UNIQUE (stream, seq)` there and the loser refolds and
+is rejected — with `version_conflict` (its anchor version went stale when
+the winner appended) or, if it supplied the now-current version,
+`already_reverted` — persisted under its own command id like every
+rejection. Either way the log holds exactly one reversal set.
 
 Each `ReversalDebited` is checked against **available** funds and each
 `ReversalCredited` for headroom; one failing leg rejects the whole revert
