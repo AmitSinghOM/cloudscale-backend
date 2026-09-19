@@ -28,6 +28,7 @@ from cloudscale.domain.commands import (  # noqa: E402
     Leg,
     Post,
     PostHold,
+    Revert,
     Transfer,
     VoidHold,
     Withdraw,
@@ -657,3 +658,108 @@ def test_concurrent_post_and_void_of_one_hold_resolve_to_exactly_one_winner(
     assert state.held == 0
     # Either the post won (balance 60, dst 40) or the void won (100, 0) -- never both.
     assert (state.balance, _state(throwaway_dsn, dst).balance) in {(60, 40), (100, 0)}
+
+
+# -- reverts (ADR-0015) ----------------------------------------------------------------
+
+
+def test_two_reverts_racing_leave_exactly_one_reversal_set(
+    throwaway_dsn: str, account: str
+) -> None:
+    """Both reverts write the anchor stream, so UNIQUE (stream, seq) serializes
+    them; the loser refolds and is rejected -- with version_conflict (its anchor
+    version went stale when the winner appended) or, had it supplied the fresh
+    version, already_reverted. Either way the log holds one reversal set."""
+    src, dst = f"{account}-src", f"{account}-dst"
+    seed = PostgresCommandUnitOfWork(throwaway_dsn)
+    seed.execute(_request(Deposit(src, 100, 0)))
+    transfer_id = uuid.uuid4()
+    seed.execute(_request(Transfer(src, dst, 40, 1), command_id=transfer_id))
+    seed.close()
+
+    outcomes = _race(
+        throwaway_dsn,
+        [_request(Revert(src, transfer_id, 2)), _request(Revert(src, transfer_id, 2))],
+        rounds=1,
+    )[0]
+    assert outcomes.count(CommandOutcome.ACCEPTED) == 1
+    assert all(
+        o
+        in (
+            CommandOutcome.ACCEPTED,
+            CommandOutcome.VERSION_CONFLICT,
+            CommandOutcome.DOMAIN_REJECTED,
+        )
+        for o in outcomes
+    )
+    assert _state(throwaway_dsn, src).balance == 100
+    assert _state(throwaway_dsn, dst).balance == 0
+    with psycopg.connect(throwaway_dsn) as conn:
+        (reversals,) = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE reverts = %s", (str(transfer_id),)
+        ).fetchone()
+    assert reversals == 2  # one debit + one credit: exactly one reversal set
+    # A later revert with the now-current version is the already_reverted path.
+    late = PostgresCommandUnitOfWork(throwaway_dsn)
+    try:
+        result = late.execute(_request(Revert(src, transfer_id, 3)))
+        assert (result.error_code, result.http_status) == ("already_reverted", 409)
+    finally:
+        late.close()
+
+
+def test_revert_racing_the_payee_spending_never_goes_negative(
+    throwaway_dsn: str, account: str
+) -> None:
+    src, dst = f"{account}-s", f"{account}-d"
+    seed = PostgresCommandUnitOfWork(throwaway_dsn)
+    seed.execute(_request(Deposit(src, 100, 0)))
+    transfer_id = uuid.uuid4()
+    seed.execute(_request(Transfer(src, dst, 40, 1), command_id=transfer_id))
+    seed.close()
+
+    outcomes = _race(
+        throwaway_dsn,
+        [_request(Revert(src, transfer_id, 2)), _request(Withdraw(dst, 40, 1))],
+        rounds=1,
+    )[0]
+    s, d = _state(throwaway_dsn, src), _state(throwaway_dsn, dst)
+    assert d.balance >= 0 and s.balance + d.balance <= 100
+    # Either the revert won (100/0, withdraw fails on stale version or funds) or the
+    # withdraw won (60/0, revert fails on insufficient funds) -- never both.
+    assert (s.balance, d.balance) in {(100, 0), (60, 0)}
+    assert outcomes.count(CommandOutcome.ACCEPTED) == 1
+
+
+def test_revert_on_postgres_projects_into_the_transfers_read_model(
+    throwaway_dsn: str, account: str
+) -> None:
+    from cloudscale.adapters.postgres.projection_store import PostgresProjectionStore
+    from cloudscale.processes.resilient_consumer import ResilientConsumer
+
+    src, dst = f"{account}-p", f"{account}-q"
+    uow = PostgresCommandUnitOfWork(throwaway_dsn)
+    try:
+        uow.execute(_request(Deposit(src, 100, 0)))
+        transfer_id = uuid.uuid4()
+        uow.execute(_request(Transfer(src, dst, 40, 1), command_id=transfer_id))
+        revert_id = uuid.uuid4()
+        result = uow.execute(
+            _request(Revert(src, transfer_id, 2), command_id=revert_id)
+        )
+        assert result.outcome is CommandOutcome.ACCEPTED
+        assert uow.reverted_by(transfer_id) == revert_id
+    finally:
+        uow.close()
+    feed = PostgresEventStore(throwaway_dsn)
+    projection = PostgresProjectionStore(throwaway_dsn, consumer=f"revert-{account}")
+    try:
+        ResilientConsumer(feed, projection).run()
+        row = projection.transfer(str(transfer_id))
+        assert row["kind"] == "transfer" and row["reverted_by"] == str(revert_id)
+        assert len(row["legs"]) == 2
+        assert projection.transfer(str(revert_id))["reverts"] == str(transfer_id)
+        assert projection.transfer(str(uuid.uuid4())) is None
+    finally:
+        projection.close()
+        feed.close()

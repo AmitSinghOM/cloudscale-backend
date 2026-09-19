@@ -65,6 +65,38 @@ of the debited legs. Debits must equal credits. Success returns the same
 | 400 | `anchor_not_debited` | The path account is not a debited leg. | Anchor on an account whose money leaves. |
 | 400 | `domain_rejected` + a domain code | E.g. `amount_out_of_range` when a credit would overflow. | Fix the request. |
 
+## Revert: `POST /v1/accounts/{account_id}/transfers/{transfer_id}/revert` (ADR-0015)
+
+Appends the **mirror** of a committed posting set (a transfer, a posting set,
+a posted hold, or another revert): every original credit becomes a
+`ReversalDebited`, every original debit a `ReversalCredited`, exact amounts,
+one transaction. The original rows are never changed; "reverted" is derived.
+The path `account_id` is the anchor — an account the revert **credits**
+(money returns to it) — and its `expected_version` is the one supplied.
+**Authorization is on every account the revert debits** (each original
+payee) or the admin scope: a payer-only token gets 403. Cash movements
+(`deposit`/`withdraw`) and hold placements/releases are not revertible; use
+the opposite command.
+
+| Status | `outcome` / `error_code` | Meaning | Client action |
+|---|---|---|---|
+| 201 | `accepted` | Mirror legs appended, one posting per stream. | Poll balances as for a transfer; `GET /v1/transfers/{transfer_id}` shows `reverted_by`. |
+| 201 | `accepted` (replay) | Same `command_id`, identical request. | Treat as success. |
+| 403 | — | The caller is not authorized on an account the revert would debit, **or** is party to none of the set's legs — a non-admin gets the same 403 whether the set exists or not, so this route cannot be used to probe for other people's payments. Not persisted. | Use a token for the payee(s) or the admin scope. |
+| 409 | `already_reverted` | A reversal naming this set is already in the log. | Read `GET /v1/transfers/{transfer_id}` for `reverted_by`. |
+| 409 | `version_conflict` | `expected_version` ≠ the anchor stream's version. | Re-read, resubmit with a new `command_id`. |
+| 409 | `command_id_conflict` | Same `command_id`, different request. | Client bug; mint a new id. |
+| 422 | `insufficient_funds` | A payee no longer has the amount **available** (spent or held). Nothing was appended. | The original stays unreverted; this is a receivable, not a ledger balance. |
+| 400 | `not_revertible` | `transfer_id` names no posting set (unknown, a cash movement, a hold placement/release). | Use the opposite cash command, or void the hold. |
+| 400 | `anchor_not_credited` | The path account is not one the revert would credit. | Anchor on an original payer. |
+
+## Read: `GET /v1/transfers/{transfer_id}` (ADR-0015)
+
+| Status | Meaning | Client action |
+|---|---|---|
+| 200 | The set with `kind`, `legs` (amounts `null` on accounts the caller may not read), `reverted_by`, `reverts`. Eventual: trails the log. | — |
+| 404 | Not projected yet, or the caller may read none of its accounts (existence is not disclosed). | Poll after the write. |
+
 ## Holds: `POST /v1/accounts/{account_id}/holds`, `…/holds/{hold_id}/post`, `…/holds/{hold_id}/void` (ADR-0014)
 
 A hold reserves funds on the path account for a later posting to
@@ -117,6 +149,9 @@ account sees nothing until the post. `GET …/balance` returns `held` and
 | `hold_not_expired` | An expire was attempted before `expires_at`. |
 | `capture_exceeds_hold` | A post named more than the held amount. |
 | `invalid_expiry` | `expires_at` is not a UTC ISO-8601 timestamp. |
+| `not_revertible` | `transfer_id` names no posting set that moved money. |
+| `already_reverted` | A reversal naming this set already exists (409). |
+| `anchor_not_credited` | A revert's anchor is not an account it credits. |
 | `unknown_command` | `type` is not `deposit` or `withdraw`. |
 | `unknown_event` | Stream holds an event type the aggregate cannot fold (report it). |
 | `domain_error` | Base code; only seen if a new rule forgot its own code. |

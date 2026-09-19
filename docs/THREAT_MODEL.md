@@ -53,6 +53,8 @@ B6 Operators → everything. B7 Supply chain → image.
 | D | Spoofed `X-Forwarded-For` to escape client budget | Header ignored unless `trust_proxy_headers`; documented as edge-only | test `forwarded_for_ignored_unless_proxy_trusted` |
 | E | Non-admin registers ownership of someone else's account | First registration wins; 409 on conflict; admin bypass requires `jti` | registry tests |
 | E | Revoked admin token still used | `jti` denylist checked on every admin request | revocation tests |
+| E | Payer claws a payment back unilaterally via revert | A revert is authorized on **every account it debits** (each original payee) or the admin scope, never the anchor alone; the debit set is read from the log, not the eventual read model; a 403 is not persisted under the `command_id` (ADR-0015) | `routes/commands.post_revert`; `test_revert_authorizes_on_the_accounts_it_debits_not_the_anchor` |
+| I | Existence of other people's payments disclosed via `GET /v1/transfers/{id}` | A set the caller may read none of is a 404, not a 403; amounts on legs the caller may not read are redacted | `routes/queries.get_transfer`; `test_revert_rejections_and_transfer_read_visibility` |
 
 ### B3/B5 — Service → PostgreSQL
 

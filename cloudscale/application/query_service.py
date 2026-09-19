@@ -1,7 +1,9 @@
 """Projection-only account query orchestration."""
 
+from uuid import UUID
+
 from cloudscale.domain.commands import _validate_account_id
-from cloudscale.domain.results import BalanceView
+from cloudscale.domain.results import BalanceView, TransferView
 
 from .ports import ProjectionReader
 
@@ -22,6 +24,11 @@ class QueryService:
         if projection.account_id != account_id:
             raise ValueError("projection account_id must match the requested account")
         return projection
+
+    def get_transfer(self, transfer_id: UUID) -> TransferView | None:
+        """Return the committed posting set, or ``None`` if not yet projected (ADR-0015)."""
+
+        return self._projection_reader.get_transfer(transfer_id)
 
 
 __all__ = ["QueryService"]

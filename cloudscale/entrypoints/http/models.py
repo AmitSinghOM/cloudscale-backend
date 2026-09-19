@@ -130,6 +130,39 @@ class ReleaseHoldRequest(BaseModel):
     expected_version: int
 
 
+class RevertRequest(BaseModel):
+    """Undo a committed posting set by appending its mirror (ADR-0015).
+
+    The path names the anchor (an account the revert credits) and the set to
+    mirror; ``expected_version`` is the anchor stream's.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_id: UUID
+    expected_version: int
+
+
+class TransferLegResponse(BaseModel):
+    """One leg of a committed set; ``amount`` is null for accounts the caller may not read."""
+
+    account_id: str
+    amount: int | None
+    direction: Literal["debit", "credit"]
+
+
+class TransferResponse(BaseModel):
+    """A committed posting set and its reversal status (ADR-0015)."""
+
+    transfer_id: UUID
+    kind: str
+    legs: list[TransferLegResponse]
+    reverted_by: UUID | None
+    reverts: UUID | None
+    #: Read models are projections of the log; reads can trail writes.
+    consistency: str = "eventual"
+
+
 class PostingResponse(BaseModel):
     """One stream an accepted command wrote.
 

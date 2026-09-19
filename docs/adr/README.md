@@ -29,5 +29,6 @@ or add one. Reviewers reject otherwise.
 | [0012](0012-stream-snapshots-verified-cache.md) | Stream snapshots as a verified cache over the event log | Accepted |
 | [0013](0013-n-leg-balanced-postings.md) | N-leg balanced postings on the transfer_id grouping | Accepted |
 | [0014](0014-pending-transfers-holds.md) | Pending transfers (holds) as reserve, post, void, expire | Accepted |
+| [0015](0015-revert-as-mirror-posting-set.md) | Revert as a mirror posting set linked to the original | Accepted |
 
 Template: [`TEMPLATE.md`](TEMPLATE.md).

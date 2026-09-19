@@ -351,3 +351,42 @@ def test_downgrade_0006_refuses_while_hold_events_exist(
         assert conn.execute("SELECT to_regclass('holds')").fetchone()[0] is None
     command.upgrade(alembic_config(), "head")
     assert {"expires_at", "release_reason"} <= _events_columns()
+
+
+def test_downgrade_0007_refuses_while_reversals_exist_and_drops_read_model_otherwise(
+    fresh_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reversal without its reverts link no longer says what it undid (ADR-0015)."""
+    _upgrade(fresh_dsn, monkeypatch)
+
+    def _has(table: str) -> bool:
+        with psycopg.connect(fresh_dsn) as conn:
+            return (
+                conn.execute(f"SELECT to_regclass('{table}')").fetchone()[0] is not None
+            )  # noqa: S608
+
+    assert _has("transfers") and _has("transfer_legs")
+    with psycopg.connect(fresh_dsn, autocommit=True) as conn:
+        conn.execute(
+            "INSERT INTO events (event_id, stream, seq, type, account_id, amount, "
+            "schema_version, transfer_id, counterparty, reverts) VALUES "
+            "('rev-1', 'account-b', 1, 'ReversalDebited', 'b', 5, 1, 'r-1', 'a', 't-1')"
+        )
+    with pytest.raises(Exception, match="reversal leg"):
+        command.downgrade(alembic_config(), "0006_holds")
+    assert _has("transfers"), "guard keeps the read model"
+
+    with psycopg.connect(fresh_dsn, autocommit=True) as conn:
+        conn.execute("DELETE FROM events WHERE event_id = 'rev-1'")
+    command.downgrade(alembic_config(), "0006_holds")
+    assert not _has("transfers") and not _has("transfer_legs")
+    with psycopg.connect(fresh_dsn) as conn:
+        columns = {
+            row[0]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'events'"
+            ).fetchall()
+        }
+    assert "reverts" not in columns
+    command.upgrade(alembic_config(), "head")
+    assert _has("transfers")

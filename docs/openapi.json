@@ -291,6 +291,62 @@
         "title": "ReleaseHoldRequest",
         "type": "object"
       },
+      "RevertRequest": {
+        "additionalProperties": false,
+        "description": "Undo a committed posting set by appending its mirror (ADR-0015).\n\nThe path names the anchor (an account the revert credits) and the set to\nmirror; ``expected_version`` is the anchor stream's.",
+        "properties": {
+          "command_id": {
+            "format": "uuid",
+            "title": "Command Id",
+            "type": "string"
+          },
+          "expected_version": {
+            "title": "Expected Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command_id",
+          "expected_version"
+        ],
+        "title": "RevertRequest",
+        "type": "object"
+      },
+      "TransferLegResponse": {
+        "description": "One leg of a committed set; ``amount`` is null for accounts the caller may not read.",
+        "properties": {
+          "account_id": {
+            "title": "Account Id",
+            "type": "string"
+          },
+          "amount": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Amount"
+          },
+          "direction": {
+            "enum": [
+              "debit",
+              "credit"
+            ],
+            "title": "Direction",
+            "type": "string"
+          }
+        },
+        "required": [
+          "account_id",
+          "amount",
+          "direction"
+        ],
+        "title": "TransferLegResponse",
+        "type": "object"
+      },
       "TransferRequest": {
         "additionalProperties": false,
         "description": "Move ``amount`` from the path account to ``target_account_id`` (ADR-0011).\n\n``expected_version`` is the source stream's version; the target has no\nclient-supplied guard.",
@@ -320,6 +376,65 @@
           "expected_version"
         ],
         "title": "TransferRequest",
+        "type": "object"
+      },
+      "TransferResponse": {
+        "description": "A committed posting set and its reversal status (ADR-0015).",
+        "properties": {
+          "consistency": {
+            "default": "eventual",
+            "title": "Consistency",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "legs": {
+            "items": {
+              "$ref": "#/components/schemas/TransferLegResponse"
+            },
+            "title": "Legs",
+            "type": "array"
+          },
+          "reverted_by": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reverted By"
+          },
+          "reverts": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reverts"
+          },
+          "transfer_id": {
+            "format": "uuid",
+            "title": "Transfer Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "transfer_id",
+          "kind",
+          "legs",
+          "reverted_by",
+          "reverts"
+        ],
+        "title": "TransferResponse",
         "type": "object"
       },
       "ValidationError": {
@@ -904,6 +1019,80 @@
         "summary": "Post Transfer"
       }
     },
+    "/v1/accounts/{account_id}/transfers/{transfer_id}/revert": {
+      "post": {
+        "description": "Append the mirror of a committed posting set (ADR-0015).\n\nAuthorization is on the accounts the revert DEBITS (every original\npayee) or the admin scope -- never the anchor alone, or a payer could\nclaw back a payment unilaterally. The debit set is read from the log,\nnot the read model, so a just-committed set can be reverted at once.",
+        "operationId": "post_revert_v1_accounts__account_id__transfers__transfer_id__revert_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "account_id",
+            "required": true,
+            "schema": {
+              "title": "Account Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "transfer_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Transfer Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RevertRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "description": "CommandResult with outcome=domain_rejected and error_code: not_revertible (cash movements, hold placements, unknown id) or anchor_not_credited."
+          },
+          "401": {
+            "description": "Missing, invalid or expired bearer token (fixed message)."
+          },
+          "403": {
+            "description": "Token valid but not authorized for this account."
+          },
+          "409": {
+            "description": "CommandResult: already_reverted, version_conflict (anchor stream) or command_id_conflict."
+          },
+          "422": {
+            "description": "CommandResult: insufficient_funds -- a payee no longer has the money available; nothing was appended."
+          },
+          "429": {
+            "description": "Rate limit exceeded; honour Retry-After."
+          },
+          "503": {
+            "description": "Command path unavailable; retry with the SAME command_id after Retry-After."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Post Revert"
+      }
+    },
     "/v1/health": {
       "get": {
         "operationId": "health_v1_health_get",
@@ -948,6 +1137,67 @@
           }
         },
         "summary": "Ready"
+      }
+    },
+    "/v1/transfers/{transfer_id}": {
+      "get": {
+        "description": "A committed posting set and whether a reversal names it (ADR-0015).\n\nVisible to a caller who may read at least one leg's account; amounts on\nlegs whose account the caller may not read are redacted (the ADR-0011\nrule). A set the caller may read nothing of is a 404, not a 403, so the\nexistence of other people's payments is not disclosed.",
+        "operationId": "get_transfer_v1_transfers__transfer_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "transfer_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Transfer Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TransferResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "description": "Missing, invalid or expired bearer token (fixed message)."
+          },
+          "403": {
+            "description": "Token valid but not authorized for this account."
+          },
+          "404": {
+            "description": "No such posting set projected yet; poll after the write, or the caller may read none of its accounts."
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "429": {
+            "description": "Rate limit exceeded; honour Retry-After."
+          },
+          "503": {
+            "description": "Command path unavailable; retry with the SAME command_id after Retry-After."
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "summary": "Get Transfer"
       }
     }
   }

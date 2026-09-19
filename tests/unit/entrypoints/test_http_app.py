@@ -819,3 +819,223 @@ def test_hold_routes_authorize_the_source_and_redact_the_target(stack: _Stack) -
         headers=stranger,
     )
     assert denied_void.status_code == 403
+
+
+# -- reverts (ADR-0015) ----------------------------------------------------------------
+
+
+def _committed_transfer_http(stack: _Stack) -> str:
+    _seed(stack, "acct-src")
+    body = _transfer_body()
+    assert (
+        stack.client.post(
+            "/v1/accounts/acct-src/transfers", json=body, headers=_auth()
+        ).status_code
+        == 201
+    )
+    return body["command_id"]
+
+
+def test_revert_appends_the_mirror_and_shows_in_the_transfers_read_model(
+    stack: _Stack, caplog
+) -> None:
+    transfer_id = _committed_transfer_http(stack)
+    caplog.set_level(logging.INFO, logger="cloudscale.audit")
+    body = {"command_id": str(uuid.uuid4()), "expected_version": 2}
+    response = stack.client.post(
+        f"/v1/accounts/acct-src/transfers/{transfer_id}/revert",
+        json=body,
+        headers=_auth(),
+    )
+    assert response.status_code == 201, response.text
+    result = response.json()
+    assert {p["account_id"]: p["committed_version"] for p in result["postings"]} == {
+        "acct-src": 3,
+        "acct-dst": 2,
+    }
+    [record] = [
+        r for r in caplog.records if getattr(r, "command_type", None) == "revert"
+    ]
+    assert {p["account_id"] for p in record.postings} == {"acct-src", "acct-dst"}
+
+    replay = stack.client.post(
+        f"/v1/accounts/acct-src/transfers/{transfer_id}/revert",
+        json=body,
+        headers=_auth(),
+    )
+    assert replay.status_code == 201 and replay.json() == result
+
+    again = stack.client.post(
+        f"/v1/accounts/acct-src/transfers/{transfer_id}/revert",
+        json={"command_id": str(uuid.uuid4()), "expected_version": 3},
+        headers=_auth(),
+    )
+    assert again.status_code == 409 and again.json()["error_code"] == "already_reverted"
+
+    stack.run_consumer()
+    src = stack.client.get("/v1/accounts/acct-src/balance", headers=_auth()).json()
+    dst = stack.client.get("/v1/accounts/acct-dst/balance", headers=_auth()).json()
+    assert (src["balance"], dst["balance"]) == (100, 0)
+    view = stack.client.get(f"/v1/transfers/{transfer_id}", headers=_auth())
+    assert view.status_code == 200, view.text
+    assert view.json()["kind"] == "transfer"
+    assert view.json()["reverted_by"] == body["command_id"]
+    assert {
+        (leg["account_id"], leg["direction"], leg["amount"])
+        for leg in view.json()["legs"]
+    } == {
+        ("acct-src", "debit", 40),
+        ("acct-dst", "credit", 40),
+    }
+    reversal = stack.client.get(
+        f"/v1/transfers/{body['command_id']}", headers=_auth()
+    ).json()
+    assert reversal["kind"] == "reversal" and reversal["reverts"] == transfer_id
+
+
+def test_revert_authorizes_on_the_accounts_it_debits_not_the_anchor(
+    stack: _Stack,
+) -> None:
+    transfer_id = _committed_transfer_http(stack)
+    body = {"command_id": str(uuid.uuid4()), "expected_version": 2}
+    payer_only = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-src'])}"
+    }
+    denied = stack.client.post(
+        f"/v1/accounts/acct-src/transfers/{transfer_id}/revert",
+        json=body,
+        headers=payer_only,
+    )
+    assert denied.status_code == 403  # the payer alone cannot claw the payment back
+    # Not persisted: the same command_id succeeds when the payee consents.
+    both = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-src', 'acct-dst'])}"
+    }
+    allowed = stack.client.post(
+        f"/v1/accounts/acct-src/transfers/{transfer_id}/revert", json=body, headers=both
+    )
+    assert allowed.status_code == 201, allowed.text
+    # The payee sees its own amount and the payer's leg redacted.
+    stack.run_consumer()
+    payee_only = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-dst'])}"
+    }
+    view = stack.client.get(f"/v1/transfers/{transfer_id}", headers=payee_only).json()
+    amounts = {leg["account_id"]: leg["amount"] for leg in view["legs"]}
+    assert amounts == {"acct-dst": 40, "acct-src": None}
+
+
+def test_revert_rejections_and_transfer_read_visibility(stack: _Stack) -> None:
+    transfer_id = _committed_transfer_http(stack)
+    # Anchor must be credited by the revert: anchoring on the payee is refused.
+    wrong_anchor = stack.client.post(
+        f"/v1/accounts/acct-dst/transfers/{transfer_id}/revert",
+        json={"command_id": str(uuid.uuid4()), "expected_version": 1},
+        headers=_auth(),
+    )
+    assert wrong_anchor.status_code == 400
+    assert wrong_anchor.json()["error_code"] == "anchor_not_credited"
+    # A deposit is not a posting set.
+    not_set = stack.client.post(
+        f"/v1/accounts/acct-src/transfers/{uuid.uuid4()}/revert",
+        json={"command_id": str(uuid.uuid4()), "expected_version": 2},
+        headers=_auth(),
+    )
+    assert (
+        not_set.status_code == 400 and not_set.json()["error_code"] == "not_revertible"
+    )
+    # Payee spent the money: 422, nothing appended.
+    stack.client.post(
+        "/v1/accounts/acct-dst/commands",
+        json={
+            "command_id": str(uuid.uuid4()),
+            "type": "withdraw",
+            "amount": 1,
+            "expected_version": 1,
+        },
+        headers=_auth(),
+    )
+    short = stack.client.post(
+        f"/v1/accounts/acct-src/transfers/{transfer_id}/revert",
+        json={"command_id": str(uuid.uuid4()), "expected_version": 2},
+        headers=_auth(),
+    )
+    assert (
+        short.status_code == 422 and short.json()["error_code"] == "insufficient_funds"
+    )
+    # A stranger may read none of the legs: 404, not 403 (existence undisclosed).
+    stack.run_consumer()
+    stranger = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-other'])}"
+    }
+    assert (
+        stack.client.get(f"/v1/transfers/{transfer_id}", headers=stranger).status_code
+        == 404
+    )
+    assert (
+        stack.client.get(f"/v1/transfers/{uuid.uuid4()}", headers=_auth()).status_code
+        == 404
+    )
+
+
+@pytest.mark.parametrize(
+    "src, dst", [("acct-a-src", "acct-b-dst"), ("acct-z-src", "acct-b-dst")]
+)
+def test_posted_hold_kind_is_hold_posting_regardless_of_leg_order(
+    stack: _Stack, src: str, dst: str
+) -> None:
+    """Legs are appended in account-id order, so the consumer sees HoldPosted first
+    when src < dst and TransferCredited first otherwise; the kind must not depend
+    on that (found by the independent review of ADR-0015)."""
+    _seed(stack, src)
+    hold = _hold_body(target_account_id=dst)
+    assert (
+        stack.client.post(
+            f"/v1/accounts/{src}/holds", json=hold, headers=_auth()
+        ).status_code
+        == 201
+    )
+    posted = stack.client.post(
+        f"/v1/accounts/{src}/holds/{hold['command_id']}/post",
+        json={"command_id": str(uuid.uuid4()), "expected_version": 2},
+        headers=_auth(),
+    )
+    assert posted.status_code == 201, posted.text
+    stack.run_consumer()
+    view = stack.client.get(
+        f"/v1/transfers/{hold['command_id']}", headers=_auth()
+    ).json()
+    assert view["kind"] == "hold_posting", view
+    assert {(leg["account_id"], leg["direction"]) for leg in view["legs"]} == {
+        (src, "debit"),
+        (dst, "credit"),
+    }
+
+
+def test_revert_route_is_not_an_existence_oracle_for_non_admins(stack: _Stack) -> None:
+    """An anchor-only token gets the same 403 for a foreign set and a non-existent one."""
+    transfer_id = _committed_transfer_http(stack)  # acct-src -> acct-dst, admin-made
+    _seed(stack, "acct-other")
+    other_only = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-other'])}"
+    }
+    body = {"command_id": str(uuid.uuid4()), "expected_version": 1}
+    foreign = stack.client.post(
+        f"/v1/accounts/acct-other/transfers/{transfer_id}/revert",
+        json=body,
+        headers=other_only,
+    )
+    missing = stack.client.post(
+        f"/v1/accounts/acct-other/transfers/{uuid.uuid4()}/revert",
+        json=body,
+        headers=other_only,
+    )
+    assert foreign.status_code == missing.status_code == 403
+    assert foreign.json() == missing.json()
+    # An admin still gets the informative not_revertible for a missing id.
+    admin = stack.client.post(
+        f"/v1/accounts/acct-other/transfers/{uuid.uuid4()}/revert",
+        json=body,
+        headers=_auth(),
+    )
+    assert admin.status_code == 400 and admin.json()["error_code"] == "not_revertible"

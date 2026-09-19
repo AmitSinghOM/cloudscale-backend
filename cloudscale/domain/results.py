@@ -91,6 +91,31 @@ class BalanceView:
 
 
 @dataclass(frozen=True, slots=True)
+class TransferLeg:
+    """One leg of a committed posting set as the read model records it (ADR-0015)."""
+
+    account_id: str
+    amount: int
+    direction: str  # "debit" | "credit"
+
+
+@dataclass(frozen=True, slots=True)
+class TransferView:
+    """A committed posting set and whether a reversal names it (ADR-0015).
+
+    ``kind`` is ``transfer`` (2 legs), ``posting`` (N legs), ``hold_posting``
+    or ``reversal``. ``reverted_by`` is the reversal's ``transfer_id`` or
+    ``None``; ``reverts`` is what this set undid, if it is itself a reversal.
+    """
+
+    transfer_id: UUID
+    kind: str
+    legs: tuple[TransferLeg, ...]
+    reverted_by: UUID | None = None
+    reverts: UUID | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Posting:
     """One stream written by an accepted command (ADR-0011).
 

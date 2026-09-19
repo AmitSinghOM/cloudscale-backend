@@ -27,6 +27,7 @@ from cloudscale.domain.commands import (
     Leg,
     Post,
     PostHold,
+    Revert,
     Transfer,
     VoidHold,
     Withdraw,
@@ -710,3 +711,115 @@ def test_hold_events_snapshot_and_refold_identically(db_path: str) -> None:
         plain.close()
     assert snap_state == full
     assert (full.balance, full.held, full.version) == (65, 0, 5)
+
+
+# -- reverts (ADR-0015) ----------------------------------------------------------------
+
+
+def _committed_transfer(uow: SqliteCommandUnitOfWork, amount: int = 40) -> UUID:
+    uow.execute(_request(Deposit("src", 100, 0)))
+    transfer_id = uuid4()
+    result = uow.execute(
+        _request(Transfer("src", "dst", amount, 1), command_id=transfer_id)
+    )
+    assert result.outcome is CommandOutcome.ACCEPTED
+    return transfer_id
+
+
+def test_revert_appends_the_mirror_atomically_and_links_it(
+    uow: SqliteCommandUnitOfWork, db_path: str
+) -> None:
+    transfer_id = _committed_transfer(uow)
+    revert_id = uuid4()
+    result = uow.execute(_request(Revert("src", transfer_id, 2), command_id=revert_id))
+    assert result.outcome is CommandOutcome.ACCEPTED
+    assert {p.account_id: p.committed_version for p in result.postings} == {
+        "src": 3,
+        "dst": 2,
+    }
+    assert uow.fold_stream("src").balance == 100
+    assert uow.fold_stream("dst").balance == 0
+    assert uow.reverted_by(transfer_id) == revert_id
+    legs = uow.legs_of(revert_id)
+    assert {type(e).__name__ for e in legs} == {"ReversalDebited", "ReversalCredited"}
+    assert all(e.reverts == transfer_id for e in legs)  # type: ignore[union-attr]
+    feed = SqliteEventStore(db_path)
+    try:
+        rows = [e for e in feed.read_all(0) if e["type"].startswith("Reversal")]
+        assert {e["reverts"] for e in rows} == {str(transfer_id)}
+        assert {e["transfer_id"] for e in rows} == {str(revert_id)}
+    finally:
+        feed.close()
+
+
+def test_second_revert_is_already_reverted_and_persisted(
+    uow: SqliteCommandUnitOfWork,
+) -> None:
+    transfer_id = _committed_transfer(uow)
+    uow.execute(_request(Revert("src", transfer_id, 2)))
+    request = _request(Revert("src", transfer_id, 3))
+    again = uow.execute(request)
+    assert again.outcome is CommandOutcome.DOMAIN_REJECTED
+    assert (again.error_code, again.http_status) == ("already_reverted", 409)
+    assert uow.fold_stream("src").version == 3  # nothing appended
+    assert uow.execute(request) == again  # replays the rejection
+
+
+def test_revert_when_the_payee_spent_the_money_appends_nothing(
+    uow: SqliteCommandUnitOfWork,
+) -> None:
+    transfer_id = _committed_transfer(uow)
+    uow.execute(_request(Withdraw("dst", 1, 1)))  # dst now has 39
+    result = uow.execute(_request(Revert("src", transfer_id, 2)))
+    assert result.outcome is CommandOutcome.INSUFFICIENT_FUNDS
+    assert result.http_status == 422
+    assert uow.fold_stream("src").version == 2 and uow.fold_stream("dst").version == 2
+    assert uow.reverted_by(transfer_id) is None
+
+
+def test_reverting_a_deposit_or_unknown_id_is_not_revertible(
+    uow: SqliteCommandUnitOfWork,
+) -> None:
+    deposit_id = uuid4()
+    uow.execute(_request(Deposit("src", 100, 0), command_id=deposit_id))
+    result = uow.execute(_request(Revert("src", deposit_id, 1)))
+    assert (result.error_code, result.http_status) == ("not_revertible", 400)
+    unknown = uow.execute(_request(Revert("src", uuid4(), 1)))
+    assert unknown.error_code == "not_revertible"
+
+
+def test_revert_of_a_revert_and_the_read_model(
+    uow: SqliteCommandUnitOfWork, db_path: str, tmp_path
+) -> None:
+    transfer_id = _committed_transfer(uow)
+    first = uuid4()
+    uow.execute(_request(Revert("src", transfer_id, 2), command_id=first))
+    second = uuid4()
+    result = uow.execute(_request(Revert("dst", first, 2), command_id=second))
+    assert result.outcome is CommandOutcome.ACCEPTED
+    assert uow.fold_stream("src").balance == 60 and uow.fold_stream("dst").balance == 40
+
+    from cloudscale.adapters.sqlite_compat.dead_letter_store import (
+        DeadLetteringProjectionStore,
+    )
+    from cloudscale.processes.resilient_consumer import ResilientConsumer
+
+    feed = SqliteEventStore(db_path)
+    projection = DeadLetteringProjectionStore(path=str(tmp_path / "proj.db"))
+    try:
+        ResilientConsumer(feed, projection).run()
+        original = projection.transfer(str(transfer_id))
+        assert original["kind"] == "transfer" and original["reverted_by"] == str(first)
+        assert {(leg["account_id"], leg["direction"]) for leg in original["legs"]} == {
+            ("src", "debit"),
+            ("dst", "credit"),
+        }
+        first_row = projection.transfer(str(first))
+        assert first_row["kind"] == "reversal"
+        assert first_row["reverts"] == str(transfer_id)
+        assert first_row["reverted_by"] == str(second)
+        assert projection.transfer(str(second))["reverted_by"] is None
+        assert projection.balance("src")["balance"] == 60
+    finally:
+        projection.close()
+        feed.close()

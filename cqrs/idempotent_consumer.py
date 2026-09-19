@@ -22,6 +22,10 @@ import sqlite3
 import threading
 from typing import Any, Dict, Iterable
 
+from cloudscale.application.transfers_read_model import (
+    kind_for_leg_count,
+    transfer_row_effect,
+)
 from cloudscale.domain.events import BALANCE_SIGN, HELD_SIGN
 
 
@@ -52,6 +56,21 @@ CREATE TABLE IF NOT EXISTS holds (
     amount     INTEGER NOT NULL,
     expires_at TEXT NOT NULL,
     state      TEXT NOT NULL
+);
+
+-- Per-set read model (ADR-0015): "was this payment reverted, by what?"
+CREATE TABLE IF NOT EXISTS transfers (
+    transfer_id TEXT PRIMARY KEY,
+    kind        TEXT NOT NULL,
+    reverts     TEXT,
+    reverted_by TEXT
+);
+CREATE TABLE IF NOT EXISTS transfer_legs (
+    transfer_id TEXT NOT NULL,
+    account_id  TEXT NOT NULL,
+    amount      INTEGER NOT NULL,
+    direction   TEXT NOT NULL,
+    PRIMARY KEY (transfer_id, account_id)
 );
 """
 
@@ -171,6 +190,32 @@ class IdempotentProjectionStore:
             (delta, held_delta, account_id),
         )
         self._apply_to_holds(str(etype), event)
+        self._apply_to_transfers(event)
+
+    def _apply_to_transfers(self, event: dict) -> None:
+        """Maintain the per-set read model (ADR-0015); every statement is idempotent."""
+        effect = transfer_row_effect(event)
+        if effect is None:
+            return
+        self._conn.execute(
+            "INSERT INTO transfers (transfer_id, kind, reverts) VALUES (?, ?, ?) "
+            "ON CONFLICT (transfer_id) DO UPDATE SET kind = CASE "
+            "WHEN excluded.kind = 'reversal' THEN 'reversal' "
+            "WHEN excluded.kind = 'hold_posting' AND transfers.kind = 'transfer' "
+            "THEN 'hold_posting' ELSE transfers.kind END",
+            (effect.transfer_id, effect.kind, effect.reverts),
+        )
+        self._conn.execute(
+            "INSERT OR IGNORE INTO transfer_legs "
+            "(transfer_id, account_id, amount, direction) VALUES (?, ?, ?, ?)",
+            (effect.transfer_id, effect.account_id, effect.amount, effect.direction),
+        )
+        if effect.marks_reverted is not None:
+            self._conn.execute(
+                "UPDATE transfers SET reverted_by = ? "
+                "WHERE transfer_id = ? AND reverted_by IS NULL",
+                (effect.transfer_id, effect.marks_reverted),
+            )
 
     def _apply_to_holds(self, etype: str, event: dict) -> None:
         """Maintain the per-hold read model (ADR-0014)."""
@@ -218,6 +263,25 @@ class IdempotentProjectionStore:
             "held": int(row["held"]),
             "version": int(row["version"]),
         }
+
+    def transfer(self, transfer_id: str) -> Dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT transfer_id, kind, reverts, reverted_by FROM transfers "
+                "WHERE transfer_id = ?",
+                (transfer_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            legs = self._conn.execute(
+                "SELECT account_id, amount, direction FROM transfer_legs "
+                "WHERE transfer_id = ? ORDER BY account_id",
+                (transfer_id,),
+            ).fetchall()
+        out = dict(row)
+        out["legs"] = [dict(leg) for leg in legs]
+        out["kind"] = kind_for_leg_count(out["kind"], len(legs))
+        return out
 
     def open_holds_expired_at(self, now_iso: str) -> list[Dict]:
         """Open holds whose ``expires_at`` <= ``now_iso`` (the sweeper's query)."""

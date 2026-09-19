@@ -49,6 +49,8 @@ CURRENT_SCHEMA_VERSION: Final[dict[str, int]] = {
     "HoldPlaced": 1,
     "HoldReleased": 1,
     "HoldPosted": 1,
+    "ReversalDebited": 1,
+    "ReversalCredited": 1,
 }
 
 _REGISTRY: dict[tuple[str, int], Upcaster] = {}

@@ -24,6 +24,7 @@ from cloudscale.application.command_service import CommandService
 from cloudscale.application.ports import AccountRegistry
 from cloudscale.application.query_service import QueryService
 from cloudscale.domain.commands import AccountCommand
+from cloudscale.domain.events import AccountEvent
 from cloudscale.domain.results import CommandResult
 from cloudscale.domain.upcasting import UnknownSchemaVersionError
 from cloudscale.entrypoints.http.auth import Principal
@@ -108,6 +109,10 @@ class CommandExecutor:
         self._breaker = breaker
         self._transient = transient_errors
         self._metrics = metrics
+
+    def legs_of(self, transfer_id: UUID) -> tuple[AccountEvent, ...]:
+        """Committed legs of a posting set, from the log (ADR-0015); read-only."""
+        return self._service.legs_of(transfer_id)
 
     def execute(
         self,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from types import MappingProxyType
 from uuid import UUID
 
@@ -13,6 +13,8 @@ from cloudscale.domain.events import (
     HoldPlaced,
     HoldPosted,
     HoldReleased,
+    ReversalCredited,
+    ReversalDebited,
     TransferCredited,
     TransferDebited,
     Withdrawn,
@@ -28,6 +30,8 @@ _KNOWN_TYPES = frozenset(
         "HoldPlaced",
         "HoldReleased",
         "HoldPosted",
+        "ReversalDebited",
+        "ReversalCredited",
     }
 )
 
@@ -46,33 +50,50 @@ def sqlite_compatibility_metadata() -> dict[str, object]:
     return dict(SQLITE_COMPATIBILITY_METADATA)
 
 
+def _uuid(value: object) -> UUID:
+    return UUID(value) if isinstance(value, str) else value  # type: ignore[return-value]
+
+
+def _cash_from_legacy(event_type: str, event: Mapping[str, object]) -> AccountEvent:
+    kind = Deposited if event_type == "Deposited" else Withdrawn
+    return kind(account_id=event.get("account_id"), amount=event.get("amount"))  # type: ignore[arg-type]
+
+
+def _transfer_leg_from_legacy(
+    event_type: str, event: Mapping[str, object]
+) -> AccountEvent:
+    kind = TransferDebited if event_type == "TransferDebited" else TransferCredited
+    return kind(
+        account_id=event.get("account_id"),  # type: ignore[arg-type]
+        amount=event.get("amount"),  # type: ignore[arg-type]
+        transfer_id=_uuid(event.get("transfer_id")),
+        counterparty=event.get("counterparty"),  # type: ignore[arg-type]
+    )
+
+
+def _reversal_leg_from_legacy(
+    event_type: str, event: Mapping[str, object]
+) -> AccountEvent:
+    kind = ReversalDebited if event_type == "ReversalDebited" else ReversalCredited
+    return kind(
+        account_id=event.get("account_id"),  # type: ignore[arg-type]
+        amount=event.get("amount"),  # type: ignore[arg-type]
+        transfer_id=_uuid(event.get("transfer_id")),
+        counterparty=event.get("counterparty"),  # type: ignore[arg-type]
+        reverts=_uuid(event.get("reverts")),
+    )
+
+
 def legacy_event_to_domain(event: Mapping[str, object]) -> AccountEvent:
     """Validate and convert one known legacy dictionary event to a domain value."""
 
     if not isinstance(event, Mapping):
         raise TypeError("event must be a mapping")
-
     event_type = event.get("type")
-    account_id = event.get("account_id")
-    amount = event.get("amount")
-    if event_type == "Deposited":
-        return Deposited(account_id=account_id, amount=amount)  # type: ignore[arg-type]
-    if event_type == "Withdrawn":
-        return Withdrawn(account_id=account_id, amount=amount)  # type: ignore[arg-type]
-    if event_type in ("TransferDebited", "TransferCredited"):
-        transfer_id = event.get("transfer_id")
-        if isinstance(transfer_id, str):
-            transfer_id = UUID(transfer_id)
-        leg = TransferDebited if event_type == "TransferDebited" else TransferCredited
-        return leg(
-            account_id=account_id,  # type: ignore[arg-type]
-            amount=amount,  # type: ignore[arg-type]
-            transfer_id=transfer_id,  # type: ignore[arg-type]
-            counterparty=event.get("counterparty"),  # type: ignore[arg-type]
-        )
-    if event_type in ("HoldPlaced", "HoldReleased", "HoldPosted"):
-        return _hold_event_from_legacy(event_type, event)
-    raise ValueError(f"unsupported legacy event type: {event_type!r}")
+    decoder = _LEGACY_DECODERS.get(event_type) if isinstance(event_type, str) else None
+    if decoder is None:
+        raise ValueError(f"unsupported legacy event type: {event_type!r}")
+    return decoder(event_type, event)  # type: ignore[arg-type]
 
 
 def _hold_event_from_legacy(
@@ -108,6 +129,19 @@ def _hold_event_from_legacy(
     )
 
 
+_LEGACY_DECODERS: dict[str, Callable[[str, Mapping[str, object]], AccountEvent]] = {
+    "Deposited": _cash_from_legacy,
+    "Withdrawn": _cash_from_legacy,
+    "TransferDebited": _transfer_leg_from_legacy,
+    "TransferCredited": _transfer_leg_from_legacy,
+    "HoldPlaced": _hold_event_from_legacy,
+    "HoldReleased": _hold_event_from_legacy,
+    "HoldPosted": _hold_event_from_legacy,
+    "ReversalDebited": _reversal_leg_from_legacy,
+    "ReversalCredited": _reversal_leg_from_legacy,
+}
+
+
 def domain_event_to_legacy(
     event: AccountEvent,
     metadata: Mapping[str, object] | None = None,
@@ -126,12 +160,13 @@ def domain_event_to_legacy(
             "amount": event.amount,
         }
     )
-    transfer_id, counterparty, expires_at, reason = event_row_fields(event)
+    transfer_id, counterparty, expires_at, reason, reverts = event_row_fields(event)
     for key, value in (
         ("transfer_id", transfer_id),
         ("counterparty", counterparty),
         ("expires_at", expires_at),
         ("release_reason", reason),
+        ("reverts", reverts),
     ):
         if value is not None:
             legacy[key] = value
@@ -155,28 +190,38 @@ def adapt_legacy_event(event: dict) -> dict:
 def transfer_leg_fields(event: AccountEvent) -> tuple[str | None, str | None]:
     """Return ``(transfer_id, counterparty)`` for the ``events`` row; NULLs otherwise."""
 
-    transfer_id, counterparty, _, _ = event_row_fields(event)
+    transfer_id, counterparty, _, _, _ = event_row_fields(event)
     return transfer_id, counterparty
 
 
-def event_row_fields(
-    event: AccountEvent,
-) -> tuple[str | None, str | None, str | None, str | None]:
-    """Return ``(transfer_id, counterparty, expires_at, release_reason)`` for the row.
+RowFields = tuple[str | None, str | None, str | None, str | None, str | None]
 
-    Hold events store their ``hold_id`` in ``transfer_id`` (ADR-0014); every
-    other field is NULL where the event type has no such attribute.
+
+def event_row_fields(event: AccountEvent) -> RowFields:
+    """Return ``(transfer_id, counterparty, expires_at, release_reason, reverts)``.
+
+    Hold events store their ``hold_id`` in ``transfer_id`` (ADR-0014); a
+    reversal stores the set it mirrors in ``reverts`` (ADR-0015). Every field
+    is NULL where the event type has no such attribute.
     """
 
     if isinstance(event, (TransferDebited, TransferCredited)):
-        return str(event.transfer_id), event.counterparty, None, None
+        return str(event.transfer_id), event.counterparty, None, None, None
     if isinstance(event, HoldPlaced):
-        return str(event.hold_id), event.counterparty, event.expires_at, None
+        return str(event.hold_id), event.counterparty, event.expires_at, None, None
     if isinstance(event, HoldReleased):
-        return str(event.hold_id), None, None, event.reason
+        return str(event.hold_id), None, None, event.reason, None
     if isinstance(event, HoldPosted):
-        return str(event.hold_id), event.counterparty, None, None
-    return None, None, None, None
+        return str(event.hold_id), event.counterparty, None, None, None
+    if isinstance(event, (ReversalDebited, ReversalCredited)):
+        return (
+            str(event.transfer_id),
+            event.counterparty,
+            None,
+            None,
+            str(event.reverts),
+        )
+    return None, None, None, None, None
 
 
 def open_hold_from_rows(

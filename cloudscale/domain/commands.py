@@ -255,9 +255,36 @@ class ExpireHold:
         _validate_expected_version(self.expected_version)
 
 
+@dataclass(frozen=True, slots=True)
+class Revert:
+    """Undo a committed posting set by appending its mirror (ADR-0015).
+
+    ``account_id`` is the anchor: an account the revert CREDITS (money
+    returns to it) and the only stream whose ``expected_version`` the caller
+    supplies. ``transfer_id`` names the set to mirror.
+    """
+
+    account_id: str
+    transfer_id: UUID
+    expected_version: int
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_uuid(self.transfer_id, "transfer_id")
+        _validate_expected_version(self.expected_version)
+
+
 HoldCommand = Hold | PostHold | VoidHold | ExpireHold
 AccountCommand = (
-    Deposit | Withdraw | Transfer | Post | Hold | PostHold | VoidHold | ExpireHold
+    Deposit
+    | Withdraw
+    | Transfer
+    | Post
+    | Hold
+    | PostHold
+    | VoidHold
+    | ExpireHold
+    | Revert
 )
 
 __all__ = [
@@ -272,6 +299,7 @@ __all__ = [
     "MAX_SIGNED_BIGINT",
     "Post",
     "PostHold",
+    "Revert",
     "Transfer",
     "VoidHold",
     "Withdraw",

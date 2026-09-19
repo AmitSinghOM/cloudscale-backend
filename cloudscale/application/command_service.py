@@ -15,10 +15,12 @@ from cloudscale.domain.commands import (
     Hold,
     Post,
     PostHold,
+    Revert,
     Transfer,
     VoidHold,
     Withdraw,
 )
+from cloudscale.domain.events import AccountEvent
 from cloudscale.domain.results import CommandResult
 
 from .ports import CommandUnitOfWork, NormalizedCommand
@@ -33,6 +35,7 @@ _COMMAND_TYPES = (
     PostHold,
     VoidHold,
     ExpireHold,
+    Revert,
 )
 
 
@@ -99,6 +102,8 @@ def _command_specific_fields(command: AccountCommand) -> dict[str, object]:
         return {"hold_id": str(command.hold_id), "amount": command.amount}
     if isinstance(command, (VoidHold, ExpireHold)):
         return {"hold_id": str(command.hold_id)}
+    if isinstance(command, Revert):
+        return {"transfer_id": str(command.transfer_id)}
     if isinstance(command, Transfer):
         return {
             "amount": command.amount,
@@ -150,6 +155,11 @@ class CommandService:
     ) -> None:
         self._unit_of_work = unit_of_work
         self._correlation_id_factory = correlation_id_factory
+
+    def legs_of(self, transfer_id: UUID) -> tuple[AccountEvent, ...]:
+        """The committed legs of a posting set, from the log (ADR-0015)."""
+
+        return self._unit_of_work.legs_of(transfer_id)
 
     def execute(
         self,

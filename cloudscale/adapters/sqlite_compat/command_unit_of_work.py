@@ -119,9 +119,25 @@ def _add_created_at_if_missing(conn: sqlite3.Connection) -> None:
         )
     # Transfer legs (ADR-0011) pair with each other on the row; NULL elsewhere.
     # Holds (ADR-0014) add their expiry and release reason the same way.
-    for column in ("transfer_id", "counterparty", "expires_at", "release_reason"):
+    # A reversal names the set it mirrors (ADR-0015).
+    for column in (
+        "transfer_id",
+        "counterparty",
+        "expires_at",
+        "release_reason",
+        "reverts",
+    ):
         if column not in event_columns:
             conn.execute(f"ALTER TABLE events ADD COLUMN {column} TEXT")
+    # Serve legs_of / reverted_by (ADR-0015) and the open-hold derivation.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS events_transfer_idx ON events (transfer_id) "
+        "WHERE transfer_id IS NOT NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS events_reverts_idx ON events (reverts) "
+        "WHERE reverts IS NOT NULL"
+    )
 
 
 def _stream_name(account_id: str) -> str:
@@ -131,12 +147,12 @@ def _stream_name(account_id: str) -> str:
 
 _SELECT_FROM_SEQ = (
     "SELECT seq, event_id, type, account_id, amount, transfer_id, counterparty, "
-    "expires_at, release_reason, schema_version FROM events "
+    "expires_at, release_reason, reverts, schema_version FROM events "
     "WHERE stream = ? AND seq >= ? ORDER BY seq ASC"
 )
 _SELECT_ALL = (
     "SELECT seq, event_id, type, account_id, amount, transfer_id, counterparty, "
-    "expires_at, release_reason, schema_version FROM events "
+    "expires_at, release_reason, reverts, schema_version FROM events "
     "WHERE stream = ? ORDER BY seq ASC"
 )
 _SELECT_HOLD = (
@@ -144,6 +160,14 @@ _SELECT_HOLD = (
     "release_reason, schema_version FROM events "
     "WHERE stream = ? AND transfer_id = ? AND type IN "
     "('HoldPlaced', 'HoldReleased', 'HoldPosted') ORDER BY seq ASC"
+)
+_SELECT_LEGS = (
+    "SELECT type, account_id, amount, transfer_id, counterparty, expires_at, "
+    "release_reason, reverts, schema_version FROM events "
+    "WHERE transfer_id = ? ORDER BY id ASC"
+)
+_SELECT_REVERTED_BY = (
+    "SELECT transfer_id FROM events WHERE reverts = ? ORDER BY id ASC LIMIT 1"
 )
 
 
@@ -233,6 +257,16 @@ class SqliteCommandUnitOfWork:
         ).fetchall()
         return open_hold_from_rows(hold_id, (dict(r) for r in rows))
 
+    def legs_of(self, transfer_id: UUID) -> tuple[AccountEvent, ...]:
+        """Every row of the posting set ``transfer_id``, across streams (ADR-0015)."""
+        rows = self._conn.execute(_SELECT_LEGS, (str(transfer_id),)).fetchall()
+        return tuple(legacy_event_to_domain(upcast(dict(r))) for r in rows)
+
+    def reverted_by(self, transfer_id: UUID) -> UUID | None:
+        """The reversal that names ``transfer_id``, if any (ADR-0015)."""
+        row = self._conn.execute(_SELECT_REVERTED_BY, (str(transfer_id),)).fetchone()
+        return None if row is None else UUID(str(row["transfer_id"]))
+
     def _read_snapshot(self, stream: str) -> StreamSnapshot | None:
         row = self._conn.execute(
             "SELECT seq, state_json, state_version, anchor_event_id "
@@ -268,12 +302,12 @@ class SqliteCommandUnitOfWork:
         )
 
     def append_event(self, envelope: EventEnvelope, event: AccountEvent) -> None:
-        transfer_id, counterparty, expires_at, reason = event_row_fields(event)
+        transfer_id, counterparty, expires_at, reason, reverts = event_row_fields(event)
         self._conn.execute(
             "INSERT INTO events "
             "(event_id, stream, seq, type, account_id, amount, schema_version, "
-            "transfer_id, counterparty, expires_at, release_reason) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "transfer_id, counterparty, expires_at, release_reason, reverts) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 str(envelope.event_id),
                 _stream_name(event.account_id),
@@ -286,6 +320,7 @@ class SqliteCommandUnitOfWork:
                 counterparty,
                 expires_at,
                 reason,
+                reverts,
             ),
         )
         self._conn.execute(
