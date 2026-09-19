@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from functools import partial
 from typing import TYPE_CHECKING, Literal, Protocol
@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict
 from cloudscale.application.command_service import CommandService
 from cloudscale.application.ports import AccountRegistry, RegistrationOutcome
 from cloudscale.application.query_service import QueryService
-from cloudscale.domain.commands import Deposit, Withdraw
+from cloudscale.domain.commands import AccountCommand, Deposit, Transfer, Withdraw
 from cloudscale.domain.errors import DomainError
 from cloudscale.domain.results import CommandResult
 from cloudscale.domain.upcasting import UnknownSchemaVersionError
@@ -123,6 +123,34 @@ class CommandRequest(BaseModel):
     expected_version: int
 
 
+class TransferRequest(BaseModel):
+    """Move ``amount`` from the path account to ``target_account_id`` (ADR-0011).
+
+    ``expected_version`` is the source stream's version; the target has no
+    client-supplied guard.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_id: UUID
+    target_account_id: str
+    amount: int
+    expected_version: int
+
+
+class PostingResponse(BaseModel):
+    """One stream an accepted command wrote.
+
+    ``committed_version`` is present only for accounts the caller may read: a
+    stream version counts that account's activity, and a transfer's target
+    is not necessarily the caller's account.
+    """
+
+    account_id: str
+    event_id: UUID
+    committed_version: int | None
+
+
 class CommandResponse(BaseModel):
     command_id: UUID
     outcome: str
@@ -133,9 +161,21 @@ class CommandResponse(BaseModel):
     event_id: UUID | None
     correlation_id: UUID
     error_code: str | None
+    postings: list[PostingResponse]
 
 
-def _command_response(result: CommandResult) -> JSONResponse:
+def _unavailable(reason: str, retry_after_seconds: int) -> HTTPException:
+    """503 for the command path with the cause a client may log and a Retry-After."""
+    return HTTPException(
+        status_code=503,
+        detail=f"command path unavailable ({reason})",
+        headers={"Retry-After": str(retry_after_seconds)},
+    )
+
+
+def _command_response(
+    result: CommandResult, *, may_read: Callable[[str], bool] = lambda _: True
+) -> JSONResponse:
     body = CommandResponse(
         command_id=result.command_id,
         outcome=result.outcome.value,
@@ -146,6 +186,16 @@ def _command_response(result: CommandResult) -> JSONResponse:
         event_id=result.event_id,
         correlation_id=result.correlation_id,
         error_code=result.error_code,
+        postings=[
+            PostingResponse(
+                account_id=posting.account_id,
+                event_id=posting.event_id,
+                committed_version=(
+                    posting.committed_version if may_read(posting.account_id) else None
+                ),
+            )
+            for posting in result.postings
+        ],
     )
     return JSONResponse(
         status_code=result.http_status, content=body.model_dump(mode="json")
@@ -344,13 +394,71 @@ def create_app(
             },
         )
 
+    def _execute(
+        command: AccountCommand,
+        *,
+        command_id: UUID,
+        principal: Principal,
+        command_type: str,
+    ) -> CommandResult:
+        """Run one command through breaker + retry; map storage faults to 503."""
+
+        def _attempt() -> CommandResult:
+            return command_breaker.call(
+                partial(
+                    command_service.execute,
+                    command,
+                    command_id=command_id,
+                    issuer=principal.issuer,
+                    subject=principal.subject,
+                )
+            )
+
+        try:
+            result = call_with_retry(
+                _attempt, command_retry, retryable_errors=transient_errors
+            )
+        except CircuitOpenError as error:
+            retry_after = max(1, int(error.retry_after_seconds))
+            raise _unavailable("circuit open", retry_after) from error
+        except transient_errors as error:
+            raise _unavailable("transient storage failure", 1) from error
+        except UnknownSchemaVersionError as error:
+            # The stream holds an event written by a NEWER build (rolled-back
+            # deploy). Not a client error and not transient storage: the fix
+            # is redeploying the newer build. 503 tells the client to retry
+            # later; the account is frozen, never corrupted (RUNBOOK R1).
+            # The request log and metrics only see "503": name the cause here
+            # so operators can tell this from a storage outage.
+            _LOGGER.error(
+                "event schema newer than this build; redeploy the newer build",
+                extra={"account_id": command.account_id, "error": str(error)[:500]},
+            )
+            raise _unavailable("event schema newer than this build", 60) from error
+
+        audit_command(
+            subject=principal.subject,
+            issuer=principal.issuer,
+            account_id=command.account_id,
+            command_type=command_type,
+            command_id=command_id,
+            result=result,
+        )
+        metrics.observe_command(result)
+        return result
+
+    def _may_read(principal: Principal, account_id: str) -> bool:
+        if principal.may_access(account_id):
+            return True
+        return (
+            account_registry is not None
+            and account_registry.owner_of(account_id) == principal.subject
+        )
+
     @app.post(
         f"/{API_VERSION}/accounts/{{account_id}}/commands",
         status_code=201,
         responses={
-            200: {
-                "description": "Idempotent replay of a previously accepted command_id."
-            },
             400: {
                 "description": "CommandResult with outcome=domain_rejected and error_code."
             },
@@ -375,55 +483,65 @@ def create_app(
             )
         except DomainError as error:
             raise HTTPException(status_code=400, detail=error.code) from error
-
-        def _attempt() -> CommandResult:
-            return command_breaker.call(
-                partial(
-                    command_service.execute,
-                    command,
-                    command_id=request.command_id,
-                    issuer=principal.issuer,
-                    subject=principal.subject,
-                )
-            )
-
-        try:
-            result = call_with_retry(
-                _attempt, command_retry, retryable_errors=transient_errors
-            )
-        except CircuitOpenError as error:
-            raise HTTPException(
-                status_code=503,
-                detail="command path unavailable (circuit open)",
-                headers={"Retry-After": str(max(1, int(error.retry_after_seconds)))},
-            ) from error
-        except transient_errors as error:
-            raise HTTPException(
-                status_code=503,
-                detail="command path unavailable (transient storage failure)",
-                headers={"Retry-After": "1"},
-            ) from error
-        except UnknownSchemaVersionError as error:
-            # The stream holds an event written by a NEWER build (rolled-back
-            # deploy). Not a client error and not transient storage: the fix
-            # is redeploying the newer build. 503 tells the client to retry
-            # later; the account is frozen, never corrupted (RUNBOOK R1).
-            raise HTTPException(
-                status_code=503,
-                detail="command path unavailable (event schema newer than this build)",
-                headers={"Retry-After": "60"},
-            ) from error
-
-        audit_command(
-            subject=principal.subject,
-            issuer=principal.issuer,
-            account_id=account_id,
-            command_type=request.type,
+        result = _execute(
+            command,
             command_id=request.command_id,
-            result=result,
+            principal=principal,
+            command_type=request.type,
         )
-        metrics.observe_command(result)
         return _command_response(result)
+
+    @app.post(
+        f"/{API_VERSION}/accounts/{{account_id}}/transfers",
+        status_code=201,
+        responses={
+            400: {
+                "description": (
+                    "CommandResult with outcome=domain_rejected and error_code, or "
+                    "a request naming the same account twice (same_account)."
+                )
+            },
+            409: {
+                "description": (
+                    "CommandResult: version_conflict (source stream) or "
+                    "command_id_conflict."
+                )
+            },
+            422: {"description": "CommandResult: insufficient_funds on the source."},
+            **_AUTH_RESPONSES,
+        },
+    )
+    def post_transfer(
+        account_id: str,
+        request: TransferRequest,
+        principal: Principal = Depends(authenticated),
+    ) -> JSONResponse:
+        """Move funds from the path account to ``target_account_id`` (ADR-0011).
+
+        Authorization is on the source only: money leaves the caller's
+        account; the target may be any account, exactly as a deposit may
+        create one. The target posting's ``committed_version`` is redacted
+        unless the caller may read that account.
+        """
+        authorize_account(principal, account_id, account_registry)
+        try:
+            command = Transfer(
+                account_id,
+                request.target_account_id,
+                request.amount,
+                request.expected_version,
+            )
+        except DomainError as error:
+            raise HTTPException(status_code=400, detail=error.code) from error
+        result = _execute(
+            command,
+            command_id=request.command_id,
+            principal=principal,
+            command_type="transfer",
+        )
+        return _command_response(
+            result, may_read=lambda target: _may_read(principal, target)
+        )
 
     @app.get(
         f"/{API_VERSION}/accounts/{{account_id}}/balance",

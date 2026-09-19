@@ -2,7 +2,11 @@
 
 **Status:** Accepted  **Date:** 2026-09-13
 **Enforced by:** `tests/unit/domain/test_upcasting.py` — fixture corpus in
-`tests/fixtures/events/` (one file per version ever written), completeness + fold asserted; landed 2026-09-13
+`tests/fixtures/events/` (one file per version ever written), completeness + fold asserted; landed 2026-09-13.
+Write side (added 2026-09-19, review 3): `test_writer_stamps_the_current_schema_version_not_a_literal`
+asserts a stored row carries `CURRENT_SCHEMA_VERSION[type]`, not a literal — the read path is only
+safe if writers stamp what readers upcast *from*. `test_downgrade_0003_refuses_to_erase_non_v1_schema_versions`
+asserts the Alembic downgrade fails closed while any row is newer than v1.
 
 ## Context
 Every event carries `schema_version`, but no code has ever had to read an

@@ -8,13 +8,16 @@ four operations plus the surrounding transaction/serialization machinery.
 
 Contract implemented here (see ``application.ports.CommandUnitOfWork``):
 
-- equal-hash replay returns the stored result unchanged;
+- equal-hash replay returns the stored result unchanged (status included:
+  a replayed 201 is a 201, byte-for-byte);
 - a reused command id with a different hash returns ``command_id_conflict``
   WITHOUT persisting (the original record stays authoritative);
 - expected-version mismatches, insufficient funds, and other deterministic
   domain rejections are persisted WITHOUT appending;
 - an accepted command appends exactly one enveloped event and persists the
-  accepted result.
+  accepted result — except a ``Transfer`` (ADR-0011), which appends exactly
+  two (debit on the source stream, credit on the target stream) and records
+  both as ``postings``.
 
 The caller MUST invoke :func:`execute_command_decision` inside one atomic
 transaction so the fold can never go stale between read and append.
@@ -27,10 +30,11 @@ from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
-from cloudscale.domain.account import AccountState, decide
+from cloudscale.domain.account import AccountState, decide, decide_transfer
+from cloudscale.domain.commands import Transfer
 from cloudscale.domain.errors import DomainError, InsufficientFundsError
 from cloudscale.domain.events import AccountEvent, EventEnvelope
-from cloudscale.domain.results import CommandOutcome, CommandResult
+from cloudscale.domain.results import CommandOutcome, CommandResult, Posting
 
 from .ports import NormalizedCommand
 
@@ -84,39 +88,38 @@ def execute_command_decision(
         )
 
     try:
-        event = decide(state, request.command)
-    except InsufficientFundsError as error:
-        return _persisted_rejection(
-            storage,
-            request,
-            CommandOutcome.INSUFFICIENT_FUNDS,
-            error_code=error.code,
-            http_status=422,
-            current_version=state.version,
-            created_at=clock(),
-        )
+        legs = _decide_legs(storage, request, state)
     except DomainError as error:
+        outcome, http_status = _rejection_for(error)
         return _persisted_rejection(
             storage,
             request,
-            CommandOutcome.DOMAIN_REJECTED,
+            outcome,
             error_code=error.code,
-            http_status=400,
+            http_status=http_status,
             current_version=state.version,
             created_at=clock(),
         )
 
     occurred_at = clock()
-    envelope = EventEnvelope.from_domain_event(
-        event,
-        event_id=event_id_factory(),
-        stream_version=state.version + 1,
-        occurred_at=occurred_at,
-        correlation_id=request.correlation_id,
-        causation_id=request.command_id,
-        command_id=request.command_id,
-    )
-    storage.append_event(envelope, event)
+    postings: list[Posting] = []
+    addressed: EventEnvelope | None = None
+    for event, stream_version in legs:
+        envelope = EventEnvelope.from_domain_event(
+            event,
+            event_id=event_id_factory(),
+            stream_version=stream_version,
+            occurred_at=occurred_at,
+            correlation_id=request.correlation_id,
+            causation_id=request.command_id,
+            command_id=request.command_id,
+        )
+        storage.append_event(envelope, event)
+        postings.append(Posting(event.account_id, envelope.event_id, stream_version))
+        if event.account_id == request.command.account_id:
+            addressed = envelope
+    if addressed is None:  # pragma: no cover - every command writes its own stream
+        raise RuntimeError("command produced no leg on its addressed stream")
     result = CommandResult(
         command_id=request.command_id,
         request_hash=request.request_hash,
@@ -124,15 +127,49 @@ def execute_command_decision(
         account_id=request.command.account_id,
         expected_version=request.command.expected_version,
         current_version=state.version,
-        committed_version=envelope.stream_version,
-        event_id=envelope.event_id,
+        committed_version=addressed.stream_version,
+        event_id=addressed.event_id,
         correlation_id=request.correlation_id,
         error_code=None,
         http_status=201,
         created_at=occurred_at,
+        postings=tuple(postings),
     )
     storage.persist_result(result)
     return result
+
+
+def _decide_legs(
+    storage: CommandDecisionStorage, request: NormalizedCommand, state: AccountState
+) -> list[tuple[AccountEvent, int]]:
+    """Return the ``(event, stream_version)`` legs a valid command appends.
+
+    Single-account commands yield one leg. A ``Transfer`` (ADR-0011) folds the
+    target too and yields the debit and credit legs, **sorted by account id**:
+    two opposite-direction transfers then wait on one ``(stream, seq)`` key
+    instead of deadlocking on each other's uncommitted insert. The target has
+    no client-supplied version; its invariants are checked on this fresh fold
+    and a concurrent writer is caught by ``UNIQUE (stream, seq)`` inside the
+    same transaction (the unit of work retries on a fresh fold).
+    """
+    command = request.command
+    if isinstance(command, Transfer):
+        target = storage.fold_stream(command.target_account_id)
+        debit, credit = decide_transfer(
+            state, target, command, transfer_id=request.command_id
+        )
+        legs: list[tuple[AccountEvent, int]] = [
+            (debit, state.version + 1),
+            (credit, target.version + 1),
+        ]
+        return sorted(legs, key=lambda leg: leg[0].account_id)
+    return [(decide(state, command), state.version + 1)]
+
+
+def _rejection_for(error: DomainError) -> tuple[CommandOutcome, int]:
+    if isinstance(error, InsufficientFundsError):
+        return CommandOutcome.INSUFFICIENT_FUNDS, 422
+    return CommandOutcome.DOMAIN_REJECTED, 400
 
 
 def _persisted_rejection(

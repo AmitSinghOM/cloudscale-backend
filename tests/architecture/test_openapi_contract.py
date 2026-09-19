@@ -47,11 +47,16 @@ def test_openapi_declares_bearer_auth_on_every_account_route() -> None:
 
 
 def test_openapi_documents_the_real_status_codes() -> None:
-    """The codes docs/API_ERRORS.md promises must be in the contract."""
+    """The codes docs/API_ERRORS.md promises must be in the contract.
+
+    A replayed accepted command returns the stored 201 byte-for-byte, so no
+    route promises a 200 for commands (the previous contract did, wrongly).
+    """
     document = json.loads(OUTPUT.read_text())
-    commands = document["paths"]["/v1/accounts/{account_id}/commands"]["post"]
-    assert {"200", "201", "400", "409", "422", "401", "403", "429", "503"} <= set(
-        commands["responses"]
-    )
+    expected = {"201", "400", "409", "422", "401", "403", "429", "503"}
+    for route in ("commands", "transfers"):
+        op = document["paths"][f"/v1/accounts/{{account_id}}/{route}"]["post"]
+        assert expected <= set(op["responses"]), route
+        assert "200" not in op["responses"], f"{route}: replay is 201, not 200"
     balance = document["paths"]["/v1/accounts/{account_id}/balance"]["get"]
     assert {"200", "404", "401", "403"} <= set(balance["responses"])

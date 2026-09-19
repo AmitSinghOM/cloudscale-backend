@@ -22,6 +22,8 @@ import sqlite3
 import threading
 from typing import Any, Dict, Iterable
 
+from cloudscale.domain.events import BALANCE_SIGN
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS balances (
@@ -141,25 +143,14 @@ class IdempotentProjectionStore:
             "VALUES (?, 0, 0)",
             (account_id,),
         )
-        if etype == "Deposited":
-            self._conn.execute(
-                "UPDATE balances SET balance = balance + ?, version = version + 1 "
-                "WHERE account_id = ?",
-                (amount, account_id),
-            )
-        elif etype == "Withdrawn":
-            self._conn.execute(
-                "UPDATE balances SET balance = balance - ?, version = version + 1 "
-                "WHERE account_id = ?",
-                (amount, account_id),
-            )
-        else:
-            # Unknown event type: count the version bump (we saw it) but leave
-            # the balance untouched, matching BalanceProjection semantics.
-            self._conn.execute(
-                "UPDATE balances SET version = version + 1 WHERE account_id = ?",
-                (account_id,),
-            )
+        # Unknown event type: count the version bump (we saw it) but leave the
+        # balance untouched (delta 0), matching BalanceProjection semantics.
+        delta = BALANCE_SIGN.get(str(etype), 0) * amount
+        self._conn.execute(
+            "UPDATE balances SET balance = balance + ?, version = version + 1 "
+            "WHERE account_id = ?",
+            (delta, account_id),
+        )
 
     # -- query --------------------------------------------------------------
 

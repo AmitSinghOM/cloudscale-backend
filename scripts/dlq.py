@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """Inspect and redrive the dead-letter queue of a projection database.
 
+``DB`` is either a path to the SQLite projection database or a
+``postgresql://`` DSN for the PostgreSQL tier -- the production tier, where
+RUNBOOK R1 sends operators. The two stores expose the same DLQ operations.
+
 Usage:
     python scripts/dlq.py DB_PATH list [--json]
     python scripts/dlq.py DB_PATH show EVENT_ID
@@ -14,19 +18,32 @@ letter that fails again stays parked with an incremented attempt count.
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import sys
 from pathlib import Path
-from typing import Sequence
+from typing import Protocol, Sequence
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from cloudscale.adapters.postgres.pool import SchemaNotMigratedError  # noqa: E402
 from cloudscale.adapters.sqlite_compat.dead_letter_store import (  # noqa: E402
     DeadLetteringProjectionStore,
     RedriveOutcome,
 )
+
+
+class DeadLetterQueue(Protocol):
+    """What both projection stores offer the operator tool."""
+
+    def dead_letters(self) -> list[dict]: ...
+    def dead_letter_count(self) -> int: ...
+    def redrive(self, event_id: str) -> RedriveOutcome: ...
+    def redrive_all(self) -> dict[str, RedriveOutcome]: ...
+    def close(self) -> None: ...
+
 
 EXIT_OK = 0
 EXIT_FAILED_AGAIN = 1
@@ -35,7 +52,11 @@ EXIT_NOT_FOUND = 2
 
 def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("db_path", help="Path to the projection SQLite database")
+    parser.add_argument(
+        "db_path",
+        metavar="DB",
+        help="SQLite projection database path, or a postgresql:// DSN",
+    )
     parser.add_argument(
         "--consumer",
         default="balances",
@@ -61,7 +82,7 @@ def _parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(arguments)
 
 
-def _cmd_list(store: DeadLetteringProjectionStore, as_json: bool) -> int:
+def _cmd_list(store: DeadLetterQueue, as_json: bool) -> int:
     entries = store.dead_letters()
     if as_json:
         print(json.dumps(entries, indent=2, sort_keys=True))
@@ -80,7 +101,7 @@ def _cmd_list(store: DeadLetteringProjectionStore, as_json: bool) -> int:
     return EXIT_OK
 
 
-def _cmd_show(store: DeadLetteringProjectionStore, event_id: str) -> int:
+def _cmd_show(store: DeadLetterQueue, event_id: str) -> int:
     for entry in store.dead_letters():
         if entry["event_id"] == event_id:
             print(json.dumps(entry, indent=2, sort_keys=True))
@@ -90,7 +111,7 @@ def _cmd_show(store: DeadLetteringProjectionStore, event_id: str) -> int:
 
 
 def _cmd_redrive(
-    store: DeadLetteringProjectionStore,
+    store: DeadLetterQueue,
     event_ids: list[str],
     redrive_all: bool,
 ) -> int:
@@ -118,12 +139,40 @@ def _cmd_redrive(
     return exit_code
 
 
+def _is_postgres(target: str) -> bool:
+    return target.startswith(("postgresql://", "postgres://"))
+
+
+def _open_store(target: str, consumer: str) -> DeadLetterQueue:
+    """The projection store for ``target``: PostgreSQL by DSN, SQLite by path."""
+    if _is_postgres(target):
+        # An operator tool must never create schema (ADR-0007: Alembic is the
+        # only way schema reaches production). The adapter's default mode is
+        # ``auto`` (CREATE ... IF NOT EXISTS under the operator's credentials);
+        # force ``migrations`` unless the operator set it explicitly, so a
+        # mistyped DSN fails with SchemaNotMigratedError instead of quietly
+        # growing a full schema in the wrong database.
+        os.environ.setdefault("CLOUDSCALE_PG_SCHEMA", "migrations")
+        from cloudscale.adapters.postgres.projection_store import (
+            PostgresProjectionStore,
+        )
+
+        return PostgresProjectionStore(target, consumer=consumer, pool_max=1)
+    if not Path(target).exists():
+        raise FileNotFoundError(target)
+    return DeadLetteringProjectionStore(path=target, consumer=consumer)
+
+
 def main(arguments: Sequence[str] | None = None) -> int:
     args = _parse_args(arguments)
-    if not Path(args.db_path).exists():
+    try:
+        store = _open_store(args.db_path, args.consumer)
+    except FileNotFoundError:
         print(f"database not found: {args.db_path}", file=sys.stderr)
         return EXIT_NOT_FOUND
-    store = DeadLetteringProjectionStore(path=args.db_path, consumer=args.consumer)
+    except SchemaNotMigratedError as error:
+        print(f"not a migrated cloudscale database: {error}", file=sys.stderr)
+        return EXIT_NOT_FOUND
     try:
         if args.command == "list":
             return _cmd_list(store, args.json)

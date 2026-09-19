@@ -31,11 +31,26 @@ import psycopg
 
 from cloudscale.adapters.postgres import schema
 from cloudscale.adapters.postgres.pool import ensure_schema, open_pool
+from cloudscale.domain.upcasting import CURRENT_SCHEMA_VERSION
 from cqrs import ConcurrencyError
 
 _SCHEMA = schema.EVENTS + schema.OUTBOX
 
 _RELAY_LOCK_SQL = "SELECT pg_advisory_xact_lock(hashtext('cloudscale_outbox_relay'))"
+
+
+def _stamp_for(event: dict) -> int:
+    """schema_version to store for ``event``.
+
+    Absent means the caller wrote the CURRENT shape for this type (ADR-0009);
+    unknown types keep the legacy 1. A present value is stored as given --
+    never "corrected" -- so an invalid stamp surfaces at read time instead of
+    being silently relabelled.
+    """
+    stamp = event.get("schema_version")
+    if stamp is None:
+        return CURRENT_SCHEMA_VERSION.get(str(event.get("type")), 1)
+    return int(stamp)
 
 
 class PostgresEventStore:
@@ -72,7 +87,8 @@ class PostgresEventStore:
                     conn.execute(
                         "INSERT INTO events "
                         "(event_id, stream, seq, type, account_id, amount, "
-                        "schema_version) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                        "schema_version, transfer_id, counterparty) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (
                             event_id,
                             stream,
@@ -80,7 +96,9 @@ class PostgresEventStore:
                             event.get("type"),
                             event.get("account_id"),
                             event.get("amount"),
-                            int(event.get("schema_version", 1)),
+                            _stamp_for(event),
+                            event.get("transfer_id"),
+                            event.get("counterparty"),
                         ),
                     )
             except psycopg.errors.UniqueViolation as exc:
@@ -134,7 +152,7 @@ class PostgresEventStore:
             raise ValueError("after_seq must be non-negative")
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT event_id, stream, seq, type, account_id, amount, schema_version "
+                "SELECT event_id, stream, seq, type, account_id, amount, schema_version, transfer_id, counterparty "
                 "FROM events WHERE stream = %s AND seq > %s ORDER BY seq ASC",
                 (stream, after_seq),
             ).fetchall()
@@ -150,7 +168,7 @@ class PostgresEventStore:
         self.relay_outbox()
         sql = (
             "SELECT o.position, e.event_id, e.stream, e.seq, e.type, "
-            "e.account_id, e.amount, e.schema_version FROM outbox o "
+            "e.account_id, e.amount, e.schema_version, e.transfer_id, e.counterparty FROM outbox o "
             "JOIN events e ON e.event_id = o.event_id "
             "WHERE o.position > %s ORDER BY o.position ASC"
         )
@@ -189,6 +207,9 @@ class PostgresEventStore:
             event["account_id"] = row["account_id"]
         if row["amount"] is not None:
             event["amount"] = int(row["amount"])
+        for column in ("transfer_id", "counterparty"):
+            if row.get(column) is not None:
+                event[column] = row[column]
         return event
 
 

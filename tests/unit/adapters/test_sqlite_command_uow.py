@@ -19,7 +19,7 @@ from cloudscale.adapters.sqlite_compat.command_unit_of_work import (
 )
 from cloudscale.application.command_service import normalize_command
 from cloudscale.application.ports import NormalizedCommand
-from cloudscale.domain.commands import Deposit, Withdraw
+from cloudscale.domain.commands import Deposit, Transfer, Withdraw
 from cloudscale.domain.results import CommandOutcome
 from cqrs import SqliteEventStore
 
@@ -229,3 +229,72 @@ def test_concurrent_same_version_writers_yield_one_accept_one_conflict(
         "accepted",
         "version_conflict",
     ]
+
+
+# -- double-entry transfers (ADR-0011) ------------------------------------------------
+
+
+def test_transfer_appends_both_legs_atomically_and_reports_two_postings(
+    uow: SqliteCommandUnitOfWork, db_path: str
+) -> None:
+    uow.execute(_request(Deposit("src", 100, 0)))
+    command_id = uuid4()
+    result = uow.execute(_request(Transfer("src", "dst", 40, 1), command_id=command_id))
+
+    assert result.outcome is CommandOutcome.ACCEPTED
+    assert result.account_id == "src"
+    assert result.committed_version == 2
+    assert [p.account_id for p in result.postings] == ["dst", "src"]  # sorted order
+    by_account = {p.account_id: p for p in result.postings}
+    assert by_account["src"].committed_version == 2
+    assert by_account["dst"].committed_version == 1
+    assert by_account["src"].event_id == result.event_id
+
+    feed = SqliteEventStore(db_path)
+    try:
+        legs = [e for e in feed.read_all(0) if e["type"].startswith("Transfer")]
+        assert {e["type"] for e in legs} == {"TransferDebited", "TransferCredited"}
+        assert {e["transfer_id"] for e in legs} == {str(command_id)}
+        assert {e["counterparty"] for e in legs} == {"src", "dst"}
+    finally:
+        feed.close()
+
+    assert uow.fold_stream("src").balance == 60
+    assert uow.fold_stream("dst").balance == 40
+
+
+def test_transfer_replay_and_conflict_follow_the_command_contract(
+    uow: SqliteCommandUnitOfWork,
+) -> None:
+    uow.execute(_request(Deposit("src", 100, 0)))
+    command_id = uuid4()
+    first = uow.execute(_request(Transfer("src", "dst", 40, 1), command_id=command_id))
+    replay = uow.execute(_request(Transfer("src", "dst", 40, 1), command_id=command_id))
+    assert replay == first  # stored result, nothing re-executed
+    assert uow.fold_stream("dst").balance == 40
+
+    changed = uow.execute(
+        _request(Transfer("src", "dst", 41, 1), command_id=command_id)
+    )
+    assert changed.outcome is CommandOutcome.COMMAND_ID_CONFLICT
+    assert changed.postings == ()
+
+    stale = uow.execute(_request(Transfer("src", "dst", 1, 1)))
+    assert stale.outcome is CommandOutcome.VERSION_CONFLICT
+    assert stale.current_version == 2
+    assert uow.fold_stream("dst").version == 1  # nothing appended on either stream
+
+
+def test_transfer_rejections_persist_without_touching_either_stream(
+    uow: SqliteCommandUnitOfWork,
+) -> None:
+    uow.execute(_request(Deposit("src", 10, 0)))
+    request = _request(Transfer("src", "dst", 11, 1))
+    result = uow.execute(request)
+    assert result.outcome is CommandOutcome.INSUFFICIENT_FUNDS
+    assert result.http_status == 422
+    assert uow.fold_stream("src").balance == 10
+    assert uow.fold_stream("src").version == 1
+    assert uow.fold_stream("dst").version == 0
+    # Persisted: the same command_id replays the rejection.
+    assert uow.execute(request) == result

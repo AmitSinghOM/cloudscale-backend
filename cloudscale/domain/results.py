@@ -80,8 +80,95 @@ class BalanceView:
 
 
 @dataclass(frozen=True, slots=True)
+class Posting:
+    """One stream written by an accepted command (ADR-0011).
+
+    Single-account commands produce one posting; a transfer produces two
+    (debit on the source, credit on the target), sharing the command id.
+    """
+
+    account_id: str
+    event_id: UUID
+    committed_version: int
+
+    def __post_init__(self) -> None:
+        _validate_account_id(self.account_id)
+        _validate_uuid(self.event_id, "event_id")
+        if (
+            not isinstance(self.committed_version, int)
+            or isinstance(self.committed_version, bool)
+            or self.committed_version < 1
+            or self.committed_version > MAX_SIGNED_BIGINT
+        ):
+            raise ValueError(
+                "committed_version must be a positive, non-Boolean signed-BIGINT integer"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "account_id": self.account_id,
+            "event_id": str(self.event_id),
+            "committed_version": self.committed_version,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> Posting:
+        if set(value) != {"account_id", "event_id", "committed_version"}:
+            raise ValueError("invalid posting fields")
+        return cls(
+            account_id=cast(str, value["account_id"]),
+            event_id=_decode_uuid(value["event_id"], "event_id"),
+            committed_version=cast(int, value["committed_version"]),
+        )
+
+
+def _digest_from(raw: object) -> bytes:
+    if not isinstance(raw, str):
+        raise ValueError("request_hash must be a hexadecimal string")
+    try:
+        return bytes.fromhex(raw)
+    except ValueError as error:
+        raise ValueError("request_hash must be a hexadecimal string") from error
+
+
+def _postings_from(raw: object) -> tuple[Posting, ...]:
+    if not isinstance(raw, list):
+        raise ValueError("postings must be a list")
+    return tuple(Posting.from_dict(cast(Mapping[str, object], item)) for item in raw)
+
+
+def _validated_postings(
+    postings: tuple[Posting, ...], source: Posting
+) -> tuple[Posting, ...]:
+    """Return the postings of an accepted result, deriving the single one.
+
+    ``source`` is the posting implied by the result's own account_id /
+    event_id / committed_version; it must appear in ``postings`` unchanged,
+    and no account may be posted twice.
+    """
+    if not postings:
+        return (source,)
+    if not all(isinstance(posting, Posting) for posting in postings):
+        raise ValueError("postings must contain Posting values")
+    if len({posting.account_id for posting in postings}) != len(postings):
+        raise ValueError("postings must name each account at most once")
+    if source not in postings:
+        raise ValueError(
+            "postings must include the addressed account with the result's "
+            "event_id and committed_version"
+        )
+    return postings
+
+
+@dataclass(frozen=True, slots=True)
 class CommandResult:
-    """Persisted command decision, including transport-neutral response metadata."""
+    """Persisted command decision, including transport-neutral response metadata.
+
+    ``account_id``, ``committed_version`` and ``event_id`` describe the stream
+    the command was addressed to (the source, for a transfer). ``postings``
+    lists every stream an accepted command wrote, in append order; it is
+    derived for single-posting results so every reader sees one shape.
+    """
 
     command_id: UUID
     request_hash: bytes
@@ -95,6 +182,7 @@ class CommandResult:
     error_code: str | None
     http_status: int
     created_at: datetime
+    postings: tuple[Posting, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_uuid(self.command_id, "command_id")
@@ -134,26 +222,35 @@ class CommandResult:
         ):
             raise ValueError("error_code must be None or a non-empty string")
 
+        object.__setattr__(self, "postings", self._postings_for_outcome())
+
+    def _postings_for_outcome(self) -> tuple[Posting, ...]:
+        """Check the fields an outcome requires/forbids; return its postings."""
         if self.outcome is CommandOutcome.ACCEPTED:
-            if self.committed_version is None or self.event_id is None:
-                raise ValueError(
-                    "an accepted result requires committed_version and event_id"
-                )
-            if self.error_code is not None:
-                raise ValueError("an accepted result cannot contain error_code")
-            if not 200 <= self.http_status < 300:
-                raise ValueError("an accepted result requires a successful HTTP status")
-        else:
-            if self.committed_version is not None or self.event_id is not None:
-                raise ValueError(
-                    "a rejected result cannot contain committed_version or event_id"
-                )
-            if self.error_code is None:
-                raise ValueError("a rejected result requires a stable error_code")
-            if not 400 <= self.http_status < 500:
-                raise ValueError(
-                    "a rejected result requires a client-error HTTP status"
-                )
+            return self._accepted_postings()
+        if self.committed_version is not None or self.event_id is not None:
+            raise ValueError(
+                "a rejected result cannot contain committed_version or event_id"
+            )
+        if self.error_code is None:
+            raise ValueError("a rejected result requires a stable error_code")
+        if not 400 <= self.http_status < 500:
+            raise ValueError("a rejected result requires a client-error HTTP status")
+        if tuple(self.postings):
+            raise ValueError("a rejected result cannot contain postings")
+        return ()
+
+    def _accepted_postings(self) -> tuple[Posting, ...]:
+        if self.committed_version is None or self.event_id is None:
+            raise ValueError(
+                "an accepted result requires committed_version and event_id"
+            )
+        if self.error_code is not None:
+            raise ValueError("an accepted result cannot contain error_code")
+        if not 200 <= self.http_status < 300:
+            raise ValueError("an accepted result requires a successful HTTP status")
+        source = Posting(self.account_id, self.event_id, self.committed_version)
+        return _validated_postings(tuple(self.postings), source)
 
     @property
     def accepted(self) -> bool:
@@ -183,6 +280,7 @@ class CommandResult:
             "error_code": self.error_code,
             "http_status": self.http_status,
             "created_at": _format_utc_timestamp(self.created_at),
+            "postings": [posting.to_dict() for posting in self.postings],
         }
 
     def to_json(self) -> str:
@@ -208,21 +306,18 @@ class CommandResult:
             "http_status",
             "created_at",
         }
-        if set(value) != required:
-            missing = sorted(required - set(value))
-            extra = sorted(set(value) - required)
+        # ``postings`` is optional: results persisted before ADR-0011 lack it and
+        # the single posting is derived from the addressed account's fields.
+        present = set(value) - {"postings"}
+        if present != required:
+            missing = sorted(required - present)
+            extra = sorted(present - required)
             raise ValueError(
                 f"invalid command result fields; missing={missing}, extra={extra}"
             )
+        postings = _postings_from(value.get("postings", []))
 
-        request_hash = value["request_hash"]
-        if not isinstance(request_hash, str):
-            raise ValueError("request_hash must be a hexadecimal string")
-        try:
-            digest = bytes.fromhex(request_hash)
-        except ValueError as error:
-            raise ValueError("request_hash must be a hexadecimal string") from error
-
+        digest = _digest_from(value["request_hash"])
         event_id_value = value["event_id"]
         if event_id_value is not None and not isinstance(event_id_value, str):
             raise ValueError("event_id must be null or a UUID string")
@@ -247,6 +342,7 @@ class CommandResult:
             error_code=error_code,
             http_status=cast(int, value["http_status"]),
             created_at=_parse_utc_timestamp(value["created_at"], "created_at"),
+            postings=postings,
         )
 
     @classmethod
@@ -256,4 +352,4 @@ class CommandResult:
         return cls.from_dict(_decode_json_object(serialized))
 
 
-__all__ = ["BalanceView", "CommandOutcome", "CommandResult"]
+__all__ = ["BalanceView", "CommandOutcome", "CommandResult", "Posting"]

@@ -88,6 +88,7 @@ B6 Operators → everything. B7 Supply chain → image.
 | T | Malicious or vulnerable dependency | Exact pins + hash-verified install; `pip-audit` on the production lock fails CI; Trivy scans the image for OS and library CVEs; Dependabot weekly | `.github/workflows/ci.yml`, `.github/dependabot.yml`, `requirements.lock` |
 | T | Unused native code in the image | Kafka client removed from the default install (optional `[kafka]` extra) | `pyproject.toml` |
 | E | Container escape via root | Non-root user, multi-stage build, no build tools in the runtime layer | `Dockerfile` |
+| T | Compromised or retagged GitHub Action turning a red gate green | Every action pinned by commit SHA (Dependabot's `github-actions` ecosystem bumps the SHA with a version comment); workflow token is `contents: read` only, no secrets, image never pushed from CI | `.github/workflows/ci.yml` — review 4, 2026-09-19 |
 
 ## Accepted risks (dated; revisit at each release)
 

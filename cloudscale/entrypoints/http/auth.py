@@ -18,6 +18,7 @@ Anything else is 403.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import jwt
@@ -26,6 +27,8 @@ from fastapi import Depends, HTTPException, Request
 from cloudscale.application.ports import AccountRegistry
 from cloudscale.entrypoints.http.settings import HttpSettings
 from cloudscale.entrypoints.http.verifiers import TokenVerifier
+
+_LOGGER = logging.getLogger("cloudscale.http.auth")
 
 ADMIN_SCOPE = "accounts:admin"
 _INVALID_TOKEN = "invalid or expired bearer token"  # noqa: S105 — error message, not a secret
@@ -50,6 +53,34 @@ def _unauthorized(detail: str) -> HTTPException:
         detail=detail,
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+def _reject(
+    request: Request, reason: str, detail: str = _INVALID_TOKEN, **fields: object
+) -> HTTPException:
+    """Record an authentication rejection and build the 401 to raise for it.
+
+    The client always sees a fixed message (``detail``, no oracle); the
+    operator log carries a short controlled-vocabulary ``reason`` -- the
+    parser's exception class name (``ExpiredSignatureError``,
+    ``InvalidIssuerError``, ...) or one of ``missing_bearer``,
+    ``lifetime_exceeded``, ``missing_subject``, ``admin_without_jti``,
+    ``revoked`` -- never the token or the parser's message -- so a spike of
+    expiries (client clocks), issuer mismatches (a rotation gone wrong) or a
+    revoked admin token still in use can be told apart. Volume is bounded by
+    the pre-auth client rate limit, which runs before this code.
+    """
+    client = request.client
+    _LOGGER.warning(
+        "auth.rejected",
+        extra={
+            "reason": reason,
+            "route": request.url.path,
+            "client": client.host if client else None,
+            **fields,
+        },
+    )
+    return _unauthorized(detail)
 
 
 def _get_settings(request: Request) -> HttpSettings:
@@ -91,7 +122,7 @@ def authenticate(
     authorization = request.headers.get("Authorization", "")
     scheme, _, token = authorization.partition(" ")
     if scheme.lower() != "bearer" or not token.strip():
-        raise _unauthorized("missing bearer token")
+        raise _reject(request, "missing_bearer", detail="missing bearer token")
     required = ["sub", "exp", "iss", "iat"]
     if settings.jwt_audience is not None:
         required.append("aud")
@@ -100,16 +131,18 @@ def authenticate(
             token.strip(), required_claims=required, audience=settings.jwt_audience
         )
     except jwt.InvalidTokenError as error:
-        # One fixed message: never echo the parser's exception class.
-        raise _unauthorized(_INVALID_TOKEN) from error
+        # One fixed message to the client: never echo the parser's exception
+        # class. The operator log gets the class name (e.g. ExpiredSignatureError,
+        # InvalidIssuerError) -- it names the failure family, not the token.
+        raise _reject(request, type(error).__name__) from error
 
     lifetime = _int_claim(claims, "exp") - _int_claim(claims, "iat")
     if lifetime > settings.jwt_max_lifetime_seconds:
-        raise _unauthorized(_INVALID_TOKEN)
+        raise _reject(request, "lifetime_exceeded", lifetime_seconds=lifetime)
 
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject:
-        raise _unauthorized(_INVALID_TOKEN)
+        raise _reject(request, "missing_subject")
     scope_value = claims.get("scope", "")
     if not isinstance(scope_value, str):
         raise _unauthorized("token claim 'scope' must be a string")
@@ -118,9 +151,15 @@ def authenticate(
     if ADMIN_SCOPE in scopes:
         jti = claims.get("jti")
         if not isinstance(jti, str) or not jti:
-            raise _unauthorized("admin-scoped tokens must carry a jti")
+            raise _reject(
+                request,
+                "admin_without_jti",
+                detail="admin-scoped tokens must carry a jti",
+                subject=subject,
+            )
         if jti in settings.jwt_revoked_jtis:
-            raise _unauthorized(_INVALID_TOKEN)
+            # A revoked admin token still in use is a security event, not noise.
+            raise _reject(request, "revoked", subject=subject, jti=jti)
 
     return Principal(
         issuer=str(claims["iss"]),
@@ -152,6 +191,10 @@ def authorize_account(
         return
     if registry is not None and registry.owner_of(account_id) == principal.subject:
         return
+    _LOGGER.warning(
+        "authz.denied",
+        extra={"subject": principal.subject, "account_id": account_id},
+    )
     raise HTTPException(
         status_code=403, detail="principal is not authorized for this account"
     )

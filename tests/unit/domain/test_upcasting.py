@@ -202,3 +202,53 @@ def test_legacy_log_without_schema_version_column_is_upgraded_and_reads_as_v1(
         assert upcast(event)["amount"] == 42
     finally:
         store.close()
+
+
+# -- writer/reader contract ---------------------------------------------------------
+
+
+def test_writer_stamps_the_current_schema_version_not_a_literal(
+    tmp_path, clean_registry, monkeypatch
+) -> None:
+    """The stamp a writer puts on a row must be what readers expect to upcast FROM.
+
+    If the writer hardcodes 1 while CURRENT_SCHEMA_VERSION says 2, every reader
+    applies the 1->2 step to a payload that is already v2 -- silent corruption of
+    the source of record on the first real evolution. Bump the version the way
+    ``upcasting.py`` instructs and check the raw row.
+    """
+    from uuid import uuid4
+
+    from cloudscale.adapters.sqlite_compat.command_unit_of_work import (
+        SqliteCommandUnitOfWork,
+    )
+    from cloudscale.application.command_service import normalize_command
+    from cloudscale.domain.commands import Deposit
+
+    monkeypatch.setitem(CURRENT_SCHEMA_VERSION, "Deposited", 2)
+    register_upcaster("Deposited", 1)(lambda e: dict(e))  # identity step 1 -> 2
+
+    path = str(tmp_path / "stamp.db")
+    uow = SqliteCommandUnitOfWork(path)
+    try:
+        uow.execute(
+            normalize_command(
+                Deposit(account_id="acct-stamp", amount=5, expected_version=0),
+                command_id=uuid4(),
+                correlation_id=uuid4(),
+                issuer="cloudscale",
+                subject="user-1",
+            )
+        )
+    finally:
+        uow.close()
+
+    conn = sqlite3.connect(path)
+    try:
+        [(stored,)] = conn.execute("SELECT schema_version FROM events").fetchall()
+    finally:
+        conn.close()
+    assert stored == CURRENT_SCHEMA_VERSION["Deposited"], (
+        f"writer stamped v{stored} but this build's current shape is "
+        f"v{CURRENT_SCHEMA_VERSION['Deposited']}"
+    )

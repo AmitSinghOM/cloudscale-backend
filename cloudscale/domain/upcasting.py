@@ -40,6 +40,8 @@ Upcaster = Callable[[dict[str, object]], dict[str, object]]
 CURRENT_SCHEMA_VERSION: Final[dict[str, int]] = {
     "Deposited": 1,
     "Withdrawn": 1,
+    "TransferDebited": 1,
+    "TransferCredited": 1,
 }
 
 _REGISTRY: dict[tuple[str, int], Upcaster] = {}

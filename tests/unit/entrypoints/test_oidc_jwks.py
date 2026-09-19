@@ -203,7 +203,12 @@ def test_tokens_without_iat_are_rejected(tmp_path, issuer) -> None:
     )
 
 
-def test_admin_tokens_need_jti_and_revoked_jtis_are_refused(tmp_path, issuer) -> None:
+def test_admin_tokens_need_jti_and_revoked_jtis_are_refused(
+    tmp_path, issuer, caplog
+) -> None:
+    import logging
+
+    caplog.set_level(logging.WARNING, logger="cloudscale.http.auth")
     settings = HttpSettings(
         jwt_jwks_url=JWKS_URL,
         jwt_issuer=ISSUER,
@@ -233,10 +238,16 @@ def test_admin_tokens_need_jti_and_revoked_jtis_are_refused(tmp_path, issuer) ->
     )
 
     revoked = issuer.token("key-1", jti="revoked-1")
-    assert (
-        client.get("/v1/accounts/x/balance", headers=_bearer(revoked)).status_code
-        == 401
-    )
+    response = client.get("/v1/accounts/x/balance", headers=_bearer(revoked))
+    assert response.status_code == 401
+    # Client sees the same fixed message as any other failure (no oracle) ...
+    assert response.json()["detail"] == "invalid or expired bearer token"
+    # ... while the operator log names the security event.
+    [record] = [r for r in caplog.records if getattr(r, "reason", None) == "revoked"]
+    assert record.getMessage() == "auth.rejected"
+    assert record.jti == "revoked-1"  # type: ignore[attr-defined]
+    assert record.subject == "alice"  # type: ignore[attr-defined]
+    assert "revoked-1" not in response.text
 
     live = issuer.token("key-1", jti="live-1")
     assert (

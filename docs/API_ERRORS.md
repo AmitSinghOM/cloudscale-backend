@@ -9,16 +9,37 @@ command outcome in code must appear here.
 ## Command endpoint (`POST /v1/accounts/{account_id}/commands`)
 
 The response body for 2xx/409/422/400 is a `CommandResult`: `outcome`,
-`error_code`, `expected_version`, `current_version`, `committed_version`.
+`error_code`, `expected_version`, `current_version`, `committed_version`,
+and `postings` — one `{account_id, event_id, committed_version}` per stream
+the command wrote (one entry for a deposit or withdrawal; empty on rejection).
 
 | Status | `outcome` / `error_code` | Meaning | Client action |
 |---|---|---|---|
 | 201 | `accepted` | Event appended; `committed_version` is the stream's new version. | Continue. To read your write, poll the balance until `version ≥ committed_version`. |
-| 200 | `accepted` (replay) | Same `command_id` and identical request seen before; stored result returned, nothing re-executed. | Treat as success. This is the idempotent retry path — **always retry with the same `command_id`.** |
+| 201 | `accepted` (replay) | Same `command_id` and identical request seen before; the stored response is returned byte-for-byte (status included), nothing re-executed. | Treat as success. This is the idempotent retry path — **always retry with the same `command_id`.** |
 | 409 | `version_conflict` | `expected_version` ≠ the stream's `current_version`: another writer got there first. | Re-read `current_version` from the body, re-run your business decision, resubmit with a **new** `command_id`. |
 | 409 | `command_id_conflict` | Same `command_id` reused with a *different* request body. | Bug in the client: a `command_id` identifies one intent. Mint a new id for a new intent. |
 | 422 | `insufficient_funds` | Withdrawal exceeds the balance at `expected_version`. | Business rejection. Do not retry unchanged. |
 | 400 | `domain_rejected` + one of the domain codes below | Request violates a domain invariant. | Fix the request. Never retry unchanged. |
+
+## Transfer endpoint (`POST /v1/accounts/{account_id}/transfers`)
+
+Moves `amount` from the path account (the **source**) to `target_account_id`
+as two postings committed in one transaction (ADR-0011). The caller must be
+authorized for the source only; the target may be any account. The body is
+the same `CommandResult`; `account_id`, `committed_version` and `event_id`
+describe the source, and `postings` carries both legs. The target posting's
+`committed_version` is `null` unless the caller may also read that account.
+
+| Status | `outcome` / `error_code` | Meaning | Client action |
+|---|---|---|---|
+| 201 | `accepted` | Debit appended to the source, credit to the target; both in `postings`. | Continue. The read model is eventual **per account**: poll each balance to its posting's `committed_version` (when visible) before relying on it. |
+| 201 | `accepted` (replay) | Same `command_id` and identical request seen before; stored response returned byte-for-byte. | Treat as success; always retry with the same `command_id`. |
+| 409 | `version_conflict` | `expected_version` ≠ the **source** stream's `current_version`. | Re-read the source's `current_version`, re-decide, resubmit with a new `command_id`. |
+| 409 | `command_id_conflict` | Same `command_id` reused with a different request body. | Client bug; mint a new id. |
+| 422 | `insufficient_funds` | Amount exceeds the source balance at `expected_version`. | Business rejection. Do not retry unchanged. |
+| 400 | `same_account` | Source and target are the same account. | Fix the request. |
+| 400 | `domain_rejected` + a domain code | E.g. `amount_out_of_range` when the credit would overflow the target. | Fix the request. Never retry unchanged. |
 
 ### Domain error codes (400 unless noted)
 
@@ -32,6 +53,7 @@ The response body for 2xx/409/422/400 is a `CommandResult`: `outcome`,
 | `invalid_account_state` | Internal invariant violated while folding the stream (report it). |
 | `account_identity_mismatch` | Event's account id differs from the stream's (report it). |
 | `insufficient_funds` | See 422 above. |
+| `same_account` | A transfer named the same account as source and target. |
 | `unknown_command` | `type` is not `deposit` or `withdraw`. |
 | `unknown_event` | Stream holds an event type the aggregate cannot fold (report it). |
 | `domain_error` | Base code; only seen if a new rule forgot its own code. |

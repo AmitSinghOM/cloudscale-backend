@@ -180,6 +180,67 @@ def test_dead_letter_and_redrive_roundtrip(
         projection.close()
 
 
+def test_concurrent_redrives_of_one_letter_apply_it_exactly_once(
+    throwaway_dsn: str, stream: str, consumer_name: str
+) -> None:
+    """Two operators (or two ``dlq.py redrive --all``) racing on the same letter.
+
+    The old shape read the payload, applied, then deleted: both racers read the
+    row and both applied. The claim is now the DELETE itself, so the loser sees
+    NOT_FOUND. Repeated because the race is timing-dependent.
+    """
+    import threading
+
+    parked = PostgresProjectionStore(throwaway_dsn, consumer=consumer_name)
+    racers = [
+        PostgresProjectionStore(throwaway_dsn, consumer=consumer_name, pool_max=1)
+        for _ in range(2)
+    ]
+    try:
+        for round_no in range(1, 6):
+            event = _deposit(stream, 10)
+            event["id"] = round_no
+            assert parked.dead_letter(event, ValueError("transient"), 3)
+
+            barrier = threading.Barrier(2)
+            outcomes: list[RedriveOutcome] = []
+            lock = threading.Lock()
+
+            def race(
+                store: PostgresProjectionStore, event_id: str = event["event_id"]
+            ) -> None:
+                barrier.wait()
+                outcome = store.redrive(event_id)
+                with lock:
+                    outcomes.append(outcome)
+
+            threads = [threading.Thread(target=race, args=(s,)) for s in racers]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+
+            assert sorted(o.value for o in outcomes) == sorted(
+                [RedriveOutcome.APPLIED.value, RedriveOutcome.NOT_FOUND.value]
+            ), outcomes
+            # The module-scoped database also holds other tests' letters
+            # (the roundtrip test parks a deliberately poisonous one), so
+            # check this event's letter specifically.
+            remaining = [
+                letter
+                for letter in parked.dead_letters()
+                if letter["event_id"] == event["event_id"]
+            ]
+            assert remaining == [], "the winner must have removed the letter"
+            assert parked.balance(stream)["balance"] == 10 * round_no, (
+                "the event was applied more than once"
+            )
+    finally:
+        parked.close()
+        for store in racers:
+            store.close()
+
+
 def test_writes_are_visible_to_a_second_connection_after_reads(
     throwaway_dsn: str, stream: str, consumer_name: str
 ) -> None:
@@ -380,3 +441,60 @@ def test_resilient_consumer_end_to_end_on_postgres(
     finally:
         projection.close()
         store.close()
+
+
+def test_transfer_legs_project_into_both_balances_on_postgres(
+    throwaway_dsn: str, consumer_name: str
+) -> None:
+    """Both legs of a transfer reach the read model, each exactly once (ADR-0011)."""
+    from cloudscale.adapters.postgres.command_unit_of_work import (
+        PostgresCommandUnitOfWork,
+    )
+    from cloudscale.application.command_service import normalize_command
+    from cloudscale.domain.commands import Deposit, Transfer
+
+    src, dst = f"src-{uuid.uuid4().hex[:8]}", f"dst-{uuid.uuid4().hex[:8]}"
+    uow = PostgresCommandUnitOfWork(throwaway_dsn)
+    store = PostgresEventStore(throwaway_dsn)
+    projection = PostgresProjectionStore(throwaway_dsn, consumer=consumer_name)
+    try:
+
+        def run(command):
+            return uow.execute(
+                normalize_command(
+                    command,
+                    command_id=uuid.uuid4(),
+                    correlation_id=uuid.uuid4(),
+                    issuer="cloudscale",
+                    subject="user-1",
+                )
+            )
+
+        run(Deposit(src, 100, 0))
+        result = run(Transfer(src, dst, 35, 1))
+        assert result.accepted
+
+        report = ResilientConsumer(
+            store, projection, retryable_errors=(psycopg.OperationalError,)
+        ).run()
+        assert report.dead_lettered == 0
+        assert (
+            projection.balance(src)["balance"],
+            projection.balance(src)["version"],
+        ) == (65, 2)
+        assert (
+            projection.balance(dst)["balance"],
+            projection.balance(dst)["version"],
+        ) == (35, 1)
+        # The consumer feed carries the pairing so a downstream can reconcile.
+        legs = [
+            e
+            for e in store.read_all(0)
+            if e.get("transfer_id") == str(result.command_id)
+        ]
+        assert {e["type"] for e in legs} == {"TransferDebited", "TransferCredited"}
+        assert {e["counterparty"] for e in legs} == {src, dst}
+    finally:
+        projection.close()
+        store.close()
+        uow.close()

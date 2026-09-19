@@ -8,7 +8,7 @@ from collections.abc import Callable
 from typing import Final
 from uuid import UUID, uuid4
 
-from cloudscale.domain.commands import AccountCommand, Deposit, Withdraw
+from cloudscale.domain.commands import AccountCommand, Deposit, Transfer, Withdraw
 from cloudscale.domain.results import CommandResult
 
 from .ports import CommandUnitOfWork, NormalizedCommand
@@ -26,14 +26,14 @@ def canonical_command_payload(
     metadata can change on a retry without changing the business request.
     """
 
-    if not isinstance(command, (Deposit, Withdraw)):
-        raise TypeError("command must be Deposit or Withdraw")
+    if not isinstance(command, (Deposit, Withdraw, Transfer)):
+        raise TypeError("command must be Deposit, Withdraw or Transfer")
     if not isinstance(issuer, str) or issuer == "":
         raise ValueError("issuer must be a non-empty string")
     if not isinstance(subject, str) or subject == "":
         raise ValueError("subject must be a non-empty string")
 
-    normalized = {
+    normalized: dict[str, object] = {
         "account_id": command.account_id,
         "amount": command.amount,
         "expected_version": command.expected_version,
@@ -42,6 +42,8 @@ def canonical_command_payload(
         "subject": subject,
         "type": type(command).__name__,
     }
+    if isinstance(command, Transfer):
+        normalized["target_account_id"] = command.target_account_id
     return json.dumps(
         normalized,
         allow_nan=False,

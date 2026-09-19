@@ -9,7 +9,41 @@ integrator; the commit history says how.
 Developer experience: from clone to a correct first integration without
 reading source.
 
+### Added
+- Double-entry transfers (ADR-0011): `POST /v1/accounts/{account_id}/transfers`
+  moves funds to `target_account_id` as a `TransferDebited` and a
+  `TransferCredited` committed in one transaction, sharing a `transfer_id`;
+  same idempotency, version-conflict and rejection contract as commands;
+  legs appended in account order so opposite-direction transfers cannot
+  deadlock (proven on PostgreSQL). `CommandResult`/responses gain an additive
+  `postings` list; the target posting's `committed_version` is redacted for
+  accounts the caller may not read. Alembic `0004` adds nullable
+  `events.transfer_id` / `events.counterparty` with a guarded downgrade.
+  Conservation (sum of balances unchanged by transfers) is a Hypothesis property.
+  `examples/python_client.py` gains `transfer()` and a `DomainRejected`
+  exception, and its walkthrough moves funds between two accounts and
+  checks conservation; the quickstart smoke test asserts the transfer output.
+
 ### Fixed
+- `docs/API_ERRORS.md`, `docs/ARCHITECTURE.md` and the OpenAPI contract promised
+  `200` on an idempotent replay; the service has always returned the stored
+  response byte-for-byte (`201`). Docs and contract now say so; the contract
+  test refuses a `200` on command routes.
+- Review 4 (operator tooling, logging, supply chain, redrive; `docs/reviews/2026-09-19-review4-operators.md`):
+  `scripts/dlq.py` works on the PostgreSQL tier by DSN (RUNBOOK R1 was unexecutable in
+  production) and never creates schema; PostgreSQL redrive claims the letter atomically
+  so concurrent redrives cannot double-apply; authentication and authorization
+  rejections are logged for operators with a controlled vocabulary (client message
+  unchanged); every shipped fixed secret is a known development secret, enforced by a
+  test; all GitHub Actions pinned by commit SHA; `check_fresh_tree.sh` removes its
+  export on success.
+- Review 3 (longevity range v0.5.1..v0.6.0, `docs/reviews/2026-09-19-longevity-review.md`):
+  event writers stamp `schema_version` from `CURRENT_SCHEMA_VERSION` instead of a
+  literal 1 (the first real schema bump would otherwise have corrupted every
+  fold); Alembic `0003` downgrade refuses to drop `schema_version` while any row
+  is newer than v1; the soak verdict fails on PostgreSQL sampler errors and on
+  runs shorter than 30 minutes; the schema-newer-than-build 503 is logged at
+  ERROR so operators can tell it from a storage outage.
 - Four-role review of the developer-experience change set (`docs/reviews/2026-09-15-dx-review.md`):
   OpenAPI contract now declares bearer auth and real status codes; example
   client distinguishes 409 kinds and backs off on 429; `make dev` fails loudly

@@ -32,9 +32,15 @@ dated plan to become enforced or a reason it cannot.
   a new ADR that links back. The initial set (ADR-0001..0008) reconstructs
   the decisions already in the code so a future maintainer can distinguish
   a constraint from an accident.
-- **Enforced.** A pull request that changes a public contract (HTTP route,
-  event shape, table, environment variable) must reference an ADR or add
-  one. Reviewers reject otherwise; `CONTRIBUTING.md` says so.
+- **Policy** (relabelled 2026-09-19 — a reviewer, not a machine, rejects;
+  by this charter's own definition that is not *enforced*). A pull request
+  that changes a public contract (HTTP route, event shape, table,
+  environment variable) must reference an ADR or add one; `CONTRIBUTING.md`
+  says so. Partial machine coverage exists: `docs/openapi.json`,
+  `docs/CONFIGURATION.md` and the fixture corpus each fail the build when
+  the route, variable or event shape changes without the matching artefact.
+  Plan: 2027-Q1, a CI check that a PR touching those surfaces also touches
+  `docs/adr/`.
 
 ## 3. Builds are reproducible for the whole horizon
 
