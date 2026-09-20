@@ -1,0 +1,102 @@
+{
+  "classification": {
+    "derived": [
+      "balances",
+      "consumer_offset",
+      "dead_letters",
+      "holds",
+      "outbox",
+      "processed_events",
+      "stream_snapshots",
+      "transfer_legs",
+      "transfers"
+    ],
+    "ephemeral": [
+      "rate_limit_buckets"
+    ],
+    "system_of_record": [
+      "accounts",
+      "command_results",
+      "event_envelopes",
+      "events"
+    ]
+  },
+  "consumer": {
+    "applied": 27,
+    "dead_lettered": 0,
+    "duplicates": 0,
+    "halt_reason": null,
+    "halted": false
+  },
+  "criteria": {
+    "adapters_start_in_migrations_mode": {
+      "detail": "migrations mode accepted the restored revision",
+      "pass": true
+    },
+    "conservation_total_balance_unchanged": {
+      "detail": "before=7990 after=7990",
+      "pass": true
+    },
+    "consumer_did_not_halt": {
+      "detail": "halted=False reason=None",
+      "pass": true
+    },
+    "dead_letters_subset_of_dump": {
+      "detail": "dead letters: 0 equal",
+      "pass": true
+    },
+    "open_holds_equal_log": {
+      "detail": "open holds: 1 equal",
+      "pass": true
+    },
+    "processed_events_equal_events": {
+      "detail": "processed=27 events=27",
+      "pass": true
+    },
+    "rebuilt_balances_equal_dump": {
+      "detail": "balances: 8 equal",
+      "pass": true
+    },
+    "rebuilt_balances_equal_full_fold": {
+      "detail": "balances vs fold: 8 equal",
+      "pass": true
+    },
+    "rebuilt_holds_equal_dump": {
+      "detail": "holds: 4 equal",
+      "pass": true
+    },
+    "rebuilt_transfers_equal_dump": {
+      "detail": "transfers: 5 equal; transfer_legs: 11 equal",
+      "pass": true
+    },
+    "schema_revision_matches_build": {
+      "detail": "Rev: 0007_reverts (head)",
+      "pass": true
+    }
+  },
+  "dump_bytes": 28184,
+  "durations_seconds": {
+    "dump": 0.2539,
+    "full_fold": 0.015,
+    "rebuild": 0.0698,
+    "restore": 0.2788,
+    "seed": 0.1462,
+    "seed_migrate": 0.2876,
+    "verify_revision": 0.354
+  },
+  "events": 27,
+  "generated_at": "2026-09-20T06:34:57+00:00",
+  "git_sha": "06c3084c76141058984d3cd84d3ae391e8d3214b",
+  "mode": "seeded",
+  "notes": [
+    "postgresql server major 17, client matched",
+    "seed: {'accepted': 20, 'rejected': 1}",
+    "truncated: ['balances', 'consumer_offset', 'dead_letters', 'holds', 'outbox', 'processed_events', 'stream_snapshots', 'transfer_legs', 'transfers']"
+  ],
+  "pass": true,
+  "rebuild_events_per_second": 386.8,
+  "rpo_events": 0,
+  "schema_revision": "0007_reverts",
+  "streams": 8,
+  "tier": "postgresql"
+}
