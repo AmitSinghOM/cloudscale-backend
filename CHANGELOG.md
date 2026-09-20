@@ -35,6 +35,14 @@ integrator; the commit history says how.
   in the gate job too); drill criteria carry an `exercised` flag and the
   dead-letter criterion is labelled unexercised when the dump had none.
 
+- ADR-0017 (Proposed): account registration as an event on the account
+  stream — `RegisterAccount` → `AccountRegistered.v1`; `accounts` becomes a
+  transactional read model (written in the append transaction and rebuilt by
+  the consumer) so authorization stays a strongly consistent primary-key
+  read; the same-id race resolves on `UNIQUE (stream, seq)`; idempotent
+  backfill script; `SYSTEM_OF_RECORD` shrinks to the log, envelopes and
+  command results. Written before its code, per `docs/LONGEVITY.md`.
+
 ### Changed
 - `docs/LONGEVITY.md` §4 "derived and rebuildable" is now truthfully
   *Enforced*; it had carried the label since v0.5.1 with no test behind it.
