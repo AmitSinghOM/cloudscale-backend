@@ -79,6 +79,11 @@ EXIT_FAILED = 3
 
 DRILL_PREFIX = "cloudscale_drill_"
 HOLD_EVENT_TYPES = ("HoldPlaced", "HoldPosted", "HoldReleased")
+#: One ``?`` per entry of HOLD_EVENT_TYPES; a literal so no SQL is assembled.
+_SQLITE_HOLD_ROWS = (
+    "SELECT type, transfer_id FROM events WHERE type IN (?, ?, ?) "
+    "AND transfer_id IS NOT NULL ORDER BY id"
+)
 CONSUMER_BATCH = 500
 
 
@@ -240,6 +245,26 @@ def _version(uow: Any, account: str) -> int:
     return int(uow.fold_stream(account).version)
 
 
+def _seed_holds(uow: Any, ids: tuple[str, str, str, str, str]) -> uuid.UUID:
+    """Every hold outcome: posted (partial), voided, still open, and one to expire.
+
+    Returns the hold that ``seed_workload`` expires after the first drain,
+    once the read model knows it.
+    """
+    a, e, f, g, h = ids
+    posted_hold = uuid.uuid4()
+    _accepted(uow, Hold(e, f, 200, _version(uow, e), 3_600), command_id=posted_hold)
+    _accepted(uow, PostHold(e, posted_hold, _version(uow, e), amount=120))  # partial
+    voided_hold = uuid.uuid4()
+    _accepted(uow, Hold(e, g, 100, _version(uow, e), 3_600), command_id=voided_hold)
+    _accepted(uow, VoidHold(e, voided_hold, _version(uow, e)))
+    expired_hold = uuid.uuid4()
+    _accepted(uow, Hold(f, a, 40, _version(uow, f), 1), command_id=expired_hold)
+    open_hold = uuid.uuid4()
+    _accepted(uow, Hold(g, h, 25, _version(uow, g), 3_600), command_id=open_hold)
+    return expired_hold
+
+
 def seed_workload(
     uow: Any,
     future_uow: Any,
@@ -286,16 +311,7 @@ def seed_workload(
         raise SeedError("the overdraft was accepted; the seed is wrong")
     counts["rejected"] += 1
 
-    posted_hold = uuid.uuid4()
-    _accepted(uow, Hold(e, f, 200, _version(uow, e), 3_600), command_id=posted_hold)
-    _accepted(uow, PostHold(e, posted_hold, _version(uow, e), amount=120))  # partial
-    voided_hold = uuid.uuid4()
-    _accepted(uow, Hold(e, g, 100, _version(uow, e), 3_600), command_id=voided_hold)
-    _accepted(uow, VoidHold(e, voided_hold, _version(uow, e)))
-    expired_hold = uuid.uuid4()
-    _accepted(uow, Hold(f, a, 40, _version(uow, f), 1), command_id=expired_hold)
-    open_hold = uuid.uuid4()
-    _accepted(uow, Hold(g, h, 25, _version(uow, g), 3_600), command_id=open_hold)
+    expired_hold = _seed_holds(uow, (a, e, f, g, h))
     counts["accepted"] += 6
 
     _accepted(uow, Revert(a, transfer_id, _version(uow, a)))
@@ -731,10 +747,8 @@ class SqliteDrill:
             streams = conn.execute(
                 "SELECT stream, MAX(account_id) FROM events GROUP BY stream"
             ).fetchall()
-            placeholders = ", ".join("?" for _ in HOLD_EVENT_TYPES)
             hold_rows = conn.execute(
-                f"SELECT type, transfer_id FROM events WHERE type IN ({placeholders}) "  # noqa: S608 - placeholders only
-                "AND transfer_id IS NOT NULL ORDER BY id",
+                _SQLITE_HOLD_ROWS,
                 HOLD_EVENT_TYPES,
             ).fetchall()
         finally:
@@ -867,6 +881,67 @@ def _diff(label: str, before: Any, after: Any) -> str:
     return f"{label}: before={before!r} after={after!r}"
 
 
+def _compare(
+    report: Report,
+    facts: LogFacts,
+    before: ReadModelSnapshot,
+    folds: dict[str, tuple[int, int, int]],
+    drained: dict[str, int | bool | str | None],
+    after: ReadModelSnapshot,
+) -> None:
+    """The pass criteria, fixed in code (ADR-0016). Each names its cause when red."""
+    report.criterion(
+        "consumer_did_not_halt",
+        not drained["halted"],
+        f"halted={drained['halted']} reason={drained['halt_reason']}",
+    )
+    report.criterion(
+        "rebuilt_balances_equal_full_fold",
+        after.balances == folds,
+        _diff("balances vs fold", folds, after.balances),
+    )
+    report.criterion(
+        "rebuilt_balances_equal_dump",
+        after.balances == before.balances,
+        _diff("balances", before.balances, after.balances),
+    )
+    report.criterion(
+        "rebuilt_holds_equal_dump",
+        after.holds == before.holds,
+        _diff("holds", before.holds, after.holds),
+    )
+    report.criterion(
+        "rebuilt_transfers_equal_dump",
+        after.transfers == before.transfers
+        and after.transfer_legs == before.transfer_legs,
+        _diff("transfers", before.transfers, after.transfers)
+        + "; "
+        + _diff("transfer_legs", before.transfer_legs, after.transfer_legs),
+    )
+    report.criterion(
+        "conservation_total_balance_unchanged",
+        before.total_balance
+        == after.total_balance
+        == sum(b for b, _h, _v in folds.values()),
+        f"before={before.total_balance} after={after.total_balance}",
+    )
+    report.criterion(
+        "open_holds_equal_log",
+        after.open_hold_ids == facts.open_hold_ids,
+        _diff("open holds", facts.open_hold_ids, after.open_hold_ids),
+    )
+    report.criterion(
+        "processed_events_equal_events",
+        after.processed_events == facts.events,
+        f"processed={after.processed_events} events={facts.events}",
+    )
+    report.criterion(
+        "dead_letters_subset_of_dump",
+        after.dead_letter_ids <= before.dead_letter_ids,
+        _diff("dead letters", before.dead_letter_ids, after.dead_letter_ids),
+    )
+
+
 def run_drill(
     tier: PostgresDrill | SqliteDrill,
     report: Report,
@@ -876,7 +951,6 @@ def run_drill(
     accounts: int,
     source_log_tail: Callable[[], int | None],
 ) -> Report:
-    source_dsn: str | None = None
     with tier.environment():
         return _run_drill(
             tier,
@@ -885,8 +959,19 @@ def run_drill(
             dump_path=dump_path,
             accounts=accounts,
             source_log_tail=source_log_tail,
-            source_dsn=source_dsn,
         )
+
+
+def _seed_and_dump(
+    tier: PostgresDrill | SqliteDrill, report: Report, *, accounts: int
+) -> Path:
+    """Seeded mode: a throwaway source with every event type, then its dump."""
+    source_dsn = tier.create_database("source")
+    _timed(report, "seed_migrate", lambda: tier.migrate_head(source_dsn))
+    counts = _timed(report, "seed", lambda: tier.seed(source_dsn, accounts=accounts))
+    report.notes.append(f"seed: {counts}")
+    dump_path: Path = _timed(report, "dump", lambda: tier.dump(source_dsn))
+    return dump_path
 
 
 def _run_drill(
@@ -897,17 +982,10 @@ def _run_drill(
     dump_path: Path | None,
     accounts: int,
     source_log_tail: Callable[[], int | None],
-    source_dsn: str | None,
 ) -> Report:
     try:
         if seeded:
-            source_dsn = tier.create_database("source")
-            _timed(report, "seed_migrate", lambda: tier.migrate_head(source_dsn))
-            counts = _timed(
-                report, "seed", lambda: tier.seed(source_dsn, accounts=accounts)
-            )
-            report.notes.append(f"seed: {counts}")
-            dump_path = _timed(report, "dump", lambda: tier.dump(source_dsn))
+            dump_path = _seed_and_dump(tier, report, accounts=accounts)
         assert dump_path is not None
         report.dump_bytes = sum(
             p.stat().st_size
@@ -941,56 +1019,7 @@ def _run_drill(
             report.rebuild_events_per_second = round(facts.events / rebuild_seconds, 1)
         after = tier.read_models(restored)
 
-        report.criterion(
-            "consumer_did_not_halt",
-            not drained["halted"],
-            f"halted={drained['halted']} reason={drained['halt_reason']}",
-        )
-        report.criterion(
-            "rebuilt_balances_equal_full_fold",
-            after.balances == folds,
-            _diff("balances vs fold", folds, after.balances),
-        )
-        report.criterion(
-            "rebuilt_balances_equal_dump",
-            after.balances == before.balances,
-            _diff("balances", before.balances, after.balances),
-        )
-        report.criterion(
-            "rebuilt_holds_equal_dump",
-            after.holds == before.holds,
-            _diff("holds", before.holds, after.holds),
-        )
-        report.criterion(
-            "rebuilt_transfers_equal_dump",
-            after.transfers == before.transfers
-            and after.transfer_legs == before.transfer_legs,
-            _diff("transfers", before.transfers, after.transfers)
-            + "; "
-            + _diff("transfer_legs", before.transfer_legs, after.transfer_legs),
-        )
-        report.criterion(
-            "conservation_total_balance_unchanged",
-            before.total_balance
-            == after.total_balance
-            == sum(b for b, _h, _v in folds.values()),
-            f"before={before.total_balance} after={after.total_balance}",
-        )
-        report.criterion(
-            "open_holds_equal_log",
-            after.open_hold_ids == facts.open_hold_ids,
-            _diff("open holds", facts.open_hold_ids, after.open_hold_ids),
-        )
-        report.criterion(
-            "processed_events_equal_events",
-            after.processed_events == facts.events,
-            f"processed={after.processed_events} events={facts.events}",
-        )
-        report.criterion(
-            "dead_letters_subset_of_dump",
-            after.dead_letter_ids <= before.dead_letter_ids,
-            _diff("dead letters", before.dead_letter_ids, after.dead_letter_ids),
-        )
+        _compare(report, facts, before, folds, drained, after)
 
         tail_now = source_log_tail()
         report.rpo_events = (
@@ -1077,6 +1106,34 @@ def _source_tail_reader(source_dsn: str | None) -> Callable[[], int | None]:
     return read
 
 
+def _build_tier(
+    args: argparse.Namespace, report: Report, workdir: Path
+) -> PostgresDrill | SqliteDrill:
+    if args.dsn:
+        return PostgresDrill(
+            args.dsn,
+            pg_bin=_resolve_pg_bin(args.pg_bin),
+            consumer=args.consumer,
+            keep=args.keep,
+            workdir=workdir,
+            report=report,
+        )
+    return SqliteDrill(workdir, consumer=args.consumer, keep=args.keep, report=report)
+
+
+def _write_report(report: Report, path: Path, *, quiet: bool) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(report.to_json() + "\n")
+    if not quiet:
+        print(report.to_json())
+    failed = sorted(name for name, c in report.criteria.items() if not c["pass"])
+    verdict = "PASS" if report.passed else f"FAIL {failed}"
+    print(
+        f"restore drill {verdict}: {report.events} events, {report.streams} streams, "
+        f"rebuild {report.durations_seconds.get('rebuild', 0):.2f}s, report {path}"
+    )
+
+
 def main(arguments: Sequence[str] | None = None) -> int:
     args = _parse_args(arguments)
     sha = _git_sha()
@@ -1091,22 +1148,8 @@ def main(arguments: Sequence[str] | None = None) -> int:
         workdir.mkdir(parents=True, exist_ok=True)
 
     try:
-        tier: PostgresDrill | SqliteDrill
-        if args.dsn:
-            tier = PostgresDrill(
-                args.dsn,
-                pg_bin=_resolve_pg_bin(args.pg_bin),
-                consumer=args.consumer,
-                keep=args.keep,
-                workdir=workdir,
-                report=report,
-            )
-        else:
-            tier = SqliteDrill(
-                workdir, consumer=args.consumer, keep=args.keep, report=report
-            )
         run_drill(
-            tier,
+            _build_tier(args, report, workdir),
             report,
             seeded=args.seeded,
             dump_path=Path(args.dump) if args.dump else None,
@@ -1120,17 +1163,7 @@ def main(arguments: Sequence[str] | None = None) -> int:
         if args.dsn and not args.keep:
             shutil.rmtree(workdir, ignore_errors=True)
 
-    path = _report_path(args.report, sha)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(report.to_json() + "\n")
-    if not args.quiet:
-        print(report.to_json())
-    failed = sorted(name for name, c in report.criteria.items() if not c["pass"])
-    verdict = "PASS" if report.passed else f"FAIL {failed}"
-    print(
-        f"restore drill {verdict}: {report.events} events, {report.streams} streams, "
-        f"rebuild {report.durations_seconds.get('rebuild', 0):.2f}s, report {path}"
-    )
+    _write_report(report, _report_path(args.report, sha), quiet=args.quiet)
     return EXIT_OK if report.passed else EXIT_FAILED
 
 

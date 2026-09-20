@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -103,96 +104,85 @@ def test_seeded_postgres_drill_passes_and_cleans_up(tmp_path: Path) -> None:
     assert _drill_databases() == before
 
 
-def test_dump_mode_measures_rpo_against_the_live_source(tmp_path: Path) -> None:
-    """The annual drill's path: an existing dump, and rpo_events read honestly."""
-    report = Report(tier="postgresql", mode="dump")
+@pytest.fixture()
+def seeded_dump(tmp_path: Path) -> Iterator[tuple[str, Path]]:
+    """A seeded source database and its pg_dump; the source is dropped afterwards."""
     tier = PostgresDrill(
         _ADMIN_DSN,
         pg_bin=_resolve_pg_bin(None),
         consumer="balances",
-        keep=True,  # we clean up the source ourselves below
+        keep=True,  # the fixture owns the cleanup
         workdir=tmp_path,
-        report=report,
+        report=Report(tier="postgresql", mode="dump"),
     )
-    source = tier.create_database("source")
-    try:
-        tier.migrate_head(source)
-        tier.seed(source, accounts=8)
-        dump = tier.dump(source)
-
-        exit_code = main(
-            [
-                "--dsn",
-                _ADMIN_DSN,
-                "--dump",
-                str(dump),
-                "--source-dsn",
-                source,
-                "--report",
-                str(tmp_path / "first.json"),
-                "--quiet",
-            ]
-        )
-        assert exit_code == EXIT_OK
-        first = json.loads((tmp_path / "first.json").read_text())
-        assert first["mode"] == "dump" and first["pass"] is True
-        assert first["rpo_events"] == 0
-
-        # The live database moves on after the dump: the next drill must say so.
-        from cloudscale.adapters.postgres.command_unit_of_work import (
-            PostgresCommandUnitOfWork,
-        )
-
-        uow = PostgresCommandUnitOfWork(source, pool_max=1)
+    with tier.environment():
+        source = tier.create_database("source")
         try:
-            result = uow.execute(
-                normalize_command(
-                    Deposit("late", 5, 0),
-                    command_id=uuid.uuid4(),
-                    correlation_id=uuid.uuid4(),
-                    issuer="cloudscale",
-                    subject="test",
-                )
-            )
+            tier.migrate_head(source)
+            tier.seed(source, accounts=8)
+            yield source, tier.dump(source)
         finally:
-            uow.close()
-        assert result.outcome.value == "accepted"
+            tier._keep = False  # noqa: SLF001 - drop what the fixture created
+            tier.cleanup()
 
-        exit_code = main(
-            [
-                "--dsn",
-                _ADMIN_DSN,
-                "--dump",
-                str(dump),
-                "--source-dsn",
-                source,
-                "--report",
-                str(tmp_path / "second.json"),
-                "--quiet",
-            ]
-        )
-        assert exit_code == EXIT_OK
-        second = json.loads((tmp_path / "second.json").read_text())
-        assert second["pass"] is True
-        assert second["rpo_events"] == 1
 
-        # Without --source-dsn the report must not pretend to know.
-        exit_code = main(
-            [
-                "--dsn",
-                _ADMIN_DSN,
-                "--dump",
-                str(dump),
-                "--report",
-                str(tmp_path / "third.json"),
-                "--quiet",
-            ]
+def _drill_dump(dump: Path, report: Path, *, source: str | None) -> dict:
+    arguments = [
+        "--dsn",
+        _ADMIN_DSN,
+        "--dump",
+        str(dump),
+        "--report",
+        str(report),
+        "--quiet",
+    ]
+    if source is not None:
+        arguments += ["--source-dsn", source]
+    assert main(arguments) == EXIT_OK
+    return json.loads(report.read_text())
+
+
+def _deposit(dsn: str, account: str) -> None:
+    from cloudscale.adapters.postgres.command_unit_of_work import (
+        PostgresCommandUnitOfWork,
+    )
+
+    uow = PostgresCommandUnitOfWork(dsn, pool_max=1)
+    try:
+        result = uow.execute(
+            normalize_command(
+                Deposit(account, 5, 0),
+                command_id=uuid.uuid4(),
+                correlation_id=uuid.uuid4(),
+                issuer="cloudscale",
+                subject="test",
+            )
         )
-        assert exit_code == EXIT_OK
-        assert json.loads((tmp_path / "third.json").read_text())["rpo_events"] is None
     finally:
-        tier._keep = False  # noqa: SLF001 - drop the source we kept for the test
-        tier.cleanup()
+        uow.close()
+    assert result.outcome.value == "accepted"
+
+
+def test_dump_mode_drills_an_existing_dump(
+    seeded_dump: tuple[str, Path], tmp_path: Path
+) -> None:
+    """The annual drill's path: an existing dump instead of a seeded database."""
+    source, dump = seeded_dump
+    report = _drill_dump(dump, tmp_path / "dump-mode.json", source=source)
+    assert report["mode"] == "dump" and report["pass"] is True
+    assert report["events"] >= 20 and report["streams"] == 8
+
+
+def test_dump_mode_measures_rpo_against_the_live_source(
+    seeded_dump: tuple[str, Path], tmp_path: Path
+) -> None:
+    """rpo_events is read from the live source: 0 now, 1 after one more commit,
+    and unknown (null) when no source is given — never implied."""
+    source, dump = seeded_dump
+    assert _drill_dump(dump, tmp_path / "first.json", source=source)["rpo_events"] == 0
+    _deposit(source, "late")
+    assert _drill_dump(dump, tmp_path / "second.json", source=source)["rpo_events"] == 1
+    assert _drill_dump(dump, tmp_path / "third.json", source=None)["rpo_events"] is None
 
 
 def test_version_mismatch_is_a_tooling_error_not_a_failed_drill(
