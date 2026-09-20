@@ -120,6 +120,20 @@ groups:
     annotations: {runbook: "docs/RUNBOOK.md#r5"}
 ```
 
+## Recovery (ADR-0016)
+
+Recovery objectives are stated separately from availability because a
+single-database service does not get them from replication.
+
+| Objective | Value | How it is known |
+|---|---|---|
+| RPO | the age of the last dump | a deployment property. The repository measures it (`rpo_events` in the restore-drill report, when run with `--source-dsn`) and cannot set it; RUNBOOK D-item recommends WAL archiving for point-in-time recovery, which brings RPO to seconds |
+| RTO | dump + restore + revision check + derived-table rebuild | the restore-drill report's `durations_seconds` and `rebuild_events_per_second`. **Measured at seeded scale only** (tens of events) until the first production-scale drill; the number for a production log is `events / rebuild_events_per_second` and is *not promised* until that report exists under `evidence/<sha>/restore-drill/` |
+
+Every tagged release commits the seeded report. The annual production-scale
+drill (LONGEVITY §5) replaces "seeded scale only" above with a measured
+figure and its evidence path.
+
 ## Review cadence
 
 Re-derive targets from a fresh dual-tier gate run at each tagged release; if

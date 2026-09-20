@@ -3,6 +3,7 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ["v*"]  # ADR-0016: every tagged release carries a restore-drill report
   pull_request:
 
 permissions:
@@ -74,6 +75,73 @@ jobs:
         # only bump pyproject; the lock must be regenerated with the recorded
         # uv command, which is exactly the act this check forces each quarter.
         run: scripts/check_lock_age.sh requirements.lock requirements-dev.lock
+
+  restore-drill:
+    name: restore drill (dump · restore · verify revision · rebuild derived tables · compare)
+    # ADR-0016: the charter's "every other table is derived and rebuildable"
+    # is enforced here, on every push to main, every pull request and every
+    # tag, not remembered annually. The report is the release's RTO evidence.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: cloudscale
+          POSTGRES_PASSWORD: cloudscale
+          POSTGRES_DB: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cloudscale"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      CLOUDSCALE_TEST_PG: postgresql://cloudscale:cloudscale@localhost:5432/postgres
+      # pg_dump refuses a server newer than itself; the runner ships client 16.
+      CLOUDSCALE_PG_BIN: /usr/lib/postgresql/17/bin
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install PostgreSQL 17 client (matches the service container's major)
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc >/dev/null
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+          "$CLOUDSCALE_PG_BIN/pg_dump" --version
+      - name: Install (hash-pinned)
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --require-hashes -r requirements-dev.lock
+      - name: Drill (seeded, PostgreSQL) — fails the job on any criterion
+        run: |
+          .venv/bin/python scripts/restore_drill.py --dsn "$CLOUDSCALE_TEST_PG" --seeded \
+            --report restore-drill-report.json
+      - name: Drill (seeded, SQLite)
+        run: |
+          .venv/bin/python scripts/restore_drill.py --sqlite-dir "$RUNNER_TEMP/drill" --seeded \
+            --report restore-drill-sqlite-report.json --quiet
+      - name: Drill tests ran against PostgreSQL (no skips)
+        run: |
+          .venv/bin/python -m pytest tests/unit/adapters/test_postgres_restore_drill.py \
+            tests/unit/adapters/test_postgres_migrations.py::test_every_migrated_table_is_classified \
+            -q -rs 2>&1 | tee drill.log
+          ! grep -q "SKIPPED" drill.log
+      - name: Upload reports
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: restore-drill-reports
+          path: |
+            restore-drill-report.json
+            restore-drill-sqlite-report.json
+          if-no-files-found: error
 
   image:
     name: container image builds

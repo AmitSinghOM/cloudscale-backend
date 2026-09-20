@@ -61,8 +61,15 @@ dated plan to become enforced or a reason it cannot.
 ## 4. Data outlives code
 
 - **Enforced.** The event log is the only source of record; every other
-  table is derived and rebuildable (RUNBOOK R7 lists which). Alembic
-  revisions are the only way schema changes reach production
+  table is derived and rebuildable. Every table is classified in code
+  (`schema.SYSTEM_OF_RECORD` / `DERIVED` / `EPHEMERAL`, ADR-0016); an
+  unclassified table fails the build, RUNBOOK R7 is tested against the
+  classes, and the restore drill truncates every `DERIVED` table and proves
+  the consumer rebuilds it (`tests/unit/scripts/test_restore_drill.py`,
+  `tests/unit/adapters/test_postgres_restore_drill.py`, CI job
+  `restore-drill`). *Until 2026-09-20 this item wore the enforced label with
+  no test behind it, and R7's list had drifted from the schema twice.*
+  Alembic revisions are the only way schema changes reach production
   (`CLOUDSCALE_PG_SCHEMA=migrations` refuses anything else).
 - **Enforced.** Events are stored as JSON with explicit `schema_version`,
   not pickled objects — readable by any language in any decade.
@@ -75,10 +82,17 @@ dated plan to become enforced or a reason it cannot.
 
 - **Enforced.** Soak harness (`scripts/soak_run.py`) with criteria fixed
   in code; gate harness with per-commit evidence.
-- **Policy.** Annual restore drill: `pg_dump` a production-like database,
-  restore to a fresh instance, run `migrate current`, start in
-  `migrations` mode, rebuild the projection from the log, and compare
-  balances. Record the time taken in `evidence/<sha>/restore-drill/`.
+- **Enforced.** Restore drill at seeded scale, every push to `main`, every
+  pull request and every tag (ADR-0016): `scripts/restore_drill.py` dumps,
+  restores into a fresh database, verifies the Alembic revision, starts the
+  adapters in `migrations` mode, truncates every derived table, rebuilds
+  them through the consumer and compares against a full fold of the log and
+  the read models the dump carried; pass criteria fixed in code; the report
+  is committed under `evidence/<sha>/restore-drill/` at each release.
+- **Policy.** Restore drill at production scale, annually (first: 2026-Q4):
+  the same script with `--dump <production dump> --source-dsn <live>`, so
+  the report records a real RTO and an honest `rpo_events`, committed the
+  same way. Stays policy because only a person has a production dump.
 - **Policy.** Quarterly failover drill in the pilot environment: SIGKILL
   the leader consumer; confirm the standby leads within 5 s.
 

@@ -44,6 +44,7 @@ precondition; a deployment missing one is not production.
 | D5 | **Client budgets are enforced at the edge too.** The in-app pre-auth limiter bounds CPU per replica; it is not a volumetric defence. | Layer-3/4 floods never reach the application. | Edge rate limit and connection limits configured; `CLOUDSCALE_TRUST_PROXY_HEADERS=true` set **only** if the edge overwrites `X-Forwarded-For`. |
 | D6 | **Retention job is scheduled.** `python -m cloudscale.entrypoints.retention` runs at least daily (see R9). | Idempotency records and limiter buckets otherwise grow without bound. | Last run's JSON report is recent and its exit code was 0. |
 | D7 | **Multiple HTTP workers/replicas on the PostgreSQL tier.** One uvicorn worker is CPU-bound near 850 rps; throughput scales horizontally (`--workers N` or N replicas). | Single-process ceiling is structural (GIL), not tunable. | Load test at the deployment's replica count, not on one worker. |
+| D8 | **Scheduled `pg_dump` of the whole database, and WAL archiving if the RPO must be seconds rather than the dump interval.** The system of record is four tables (R7); the deployment chooses how often they are captured. | The service has one database and no replication story of its own (ADR-0016); RPO is a deployment property. | The latest dump restores through `scripts/restore_drill.py --dump` with exit 0; `docs/SLO.md` § Recovery states the interval. |
 
 ## Retention (R9)
 
@@ -208,23 +209,63 @@ compromised.
 
 ## R7 — Backup and restore (PostgreSQL)
 
-The system of record is the `events` table plus `command_results`
-(idempotency) and `event_envelopes` (trace identity). Everything else is
-derived:
+Every table has one class, declared in code
+(`cloudscale/adapters/postgres/schema.py`, ADR-0016). This list is tested
+against that code and against the migrated schema; if you are reading a
+copy that disagrees with `schema.py`, the code wins.
 
-- `balances`, `processed_events`, `consumer_offset` — rebuildable by
-  truncating them, resetting `consumer_offset.last_id = 0`, and letting the
-  consumer replay (`processed_events` guarantees exactly-once on replay).
-- `outbox` + `events.published` — rebuildable: truncate `outbox`, set
-  `published = false`, the relay republishes in id order.
-- `dead_letters`, `accounts`, `rate_limit_buckets` — small; include in backups.
-- `stream_snapshots` — a cache (ADR-0012). Safe to exclude or truncate; a
+**System of record** — lost data is lost money, idempotency or ownership.
+The backup is these:
+- `events` — the log (ADR-0002). `events.published` is a derived column, see below.
+- `event_envelopes` — trace identity for every event.
+- `command_results` — idempotency. A persisted rejection has no event, and a
+  persisted acceptance is what makes a client's retry a replay instead of a
+  second deposit; a restore without it turns every in-flight retry into a
+  duplicate command.
+- `accounts` — ownership registrations are written outside the log (see
+  ADR-0016 alternatives for the plan to make them events).
+
+**Derived** — rebuilt from `events`; a restore may truncate every one of these:
+- `balances`, `holds`, `transfers`, `transfer_legs`, `processed_events`,
+  `consumer_offset`, `dead_letters` — the consumer rebuilds them: truncate,
+  and the consumer (which re-creates its offset row at 0) replays the whole
+  log; `processed_events` guarantees exactly-once on replay; a poison event
+  dead-letters again.
+- `outbox` (with `events.published`) — truncate `outbox`, set
+  `published = false`, and the relay republishes in id order.
+- `stream_snapshots` — a cache (ADR-0012); the next fold rewrites it. A
   restore from a different dump is detected per stream (anchor mismatch is
-  logged at WARNING and the stream is refolded from `events`).
+  logged at WARNING and the stream is refolded from the log).
 
-Use `pg_dump` of the whole database at a consistent snapshot; restore with
-`pg_restore`, then `migrate current` to confirm the revision matches the
-build before starting processes in `migrations` mode.
+**Ephemeral** — neither backed up nor rebuilt:
+- `rate_limit_buckets` — a restart forgives a budget.
+
+**Procedure.** `pg_dump --format=custom` the whole database (a consistent
+snapshot; carrying the derived tables makes a straight restore fast).
+Restore with `pg_restore` into a fresh database, run
+`python -m cloudscale.entrypoints.migrate current` and confirm it prints the
+revision this build requires (`schema.CURRENT_REVISION`), then start
+processes in `migrations` mode. If any read model is suspect after the
+restore, rebuild it per the Derived list rather than trusting it.
+
+**The drill.** `scripts/restore_drill.py` executes this procedure end to end
+and refuses to pass unless the rebuilt read models equal both a full fold of
+the restored log and the read models carried in the dump:
+
+    python scripts/restore_drill.py --dsn postgresql://…/postgres --seeded     # CI, every release
+    python scripts/restore_drill.py --dsn postgresql://…/postgres --dump FILE  # annual, on a production dump
+
+`--dsn` is an administrative connection able to `CREATE DATABASE`; every
+database the drill creates is named `cloudscale_drill_*` and dropped unless
+`--keep`. `pg_dump`/`pg_restore` must be the server's major version
+(`--pg-bin DIR` or `CLOUDSCALE_PG_BIN` points at them; a mismatch exits 2).
+Exit 0 pass, 3 a comparison failed (the report names which), 2 tooling.
+The report (`--report PATH`, default under `evidence/<sha>/restore-drill/`)
+records dump, restore, verify and rebuild durations — the RTO components —
+and `rpo_events`, the log tail at report time minus the tail in the dump,
+which a production drill must read honestly. See `docs/SLO.md` § Recovery.
+SQLite: `--sqlite-dir DIR --seeded` runs the same steps over a log file and a
+projection file (the backup API stands in for `pg_dump`).
 
 ---
 

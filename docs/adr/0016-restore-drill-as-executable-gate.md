@@ -1,23 +1,26 @@
 # ADR-0016: Restore drill as an executable gate over a classified schema
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-20
-**Enforced by (once accepted):**
-`tests/architecture/test_table_classification.py` (every table in a
-migrated PostgreSQL database — and in the SQLite consumer's DDL — belongs to
-exactly one of `SYSTEM_OF_RECORD`, `DERIVED`, `EPHEMERAL`; an unclassified
-table fails the build); `tests/architecture/test_runbook_r7_matches_schema.py`
-(RUNBOOK R7 names every table in each class and no other);
-`tests/unit/adapters/test_postgres_restore_drill.py` and
-`tests/unit/adapters/test_sqlite_restore_drill.py` (seeded mixed workload →
-dump → restore into a fresh database → `migrate current` equals
-`CURRENT_REVISION` → adapters start in `migrations` mode → every `DERIVED`
-table truncated → consumer rebuilds → balances, `held`, open holds and
-`transfers` equal both a full fold of the restored log and the pre-dump
-read models; every pass criterion fixed in code); CI job `restore-drill`
-producing `evidence/<sha>/restore-drill/report.json` on every push to
-`main` and every tag; `scripts/restore_drill.py` exit codes (0 pass, 3 any
-comparison failed, 2 tooling/version mismatch).
+**Enforced by:**
+`tests/architecture/test_table_classification.py` (the three classes are
+disjoint; every `CREATE TABLE` in the PostgreSQL DDL and in the SQLite tier's
+DDL names a classified table; RUNBOOK R7 names every table in each class and
+no other);
+`tests/unit/adapters/test_postgres_migrations.py::test_every_migrated_table_is_classified`
+(`information_schema` of a migrated database equals the classes plus
+`alembic_version`);
+`tests/unit/scripts/test_restore_drill.py` (SQLite: seeded drill passes every
+criterion; a consumer that never rebuilds turns `rebuilt_balances_equal_full_fold`
+red; a log row lost between dump and restore turns `rebuilt_balances_equal_dump`
+red; exit code 3 on any failed criterion);
+`tests/unit/adapters/test_postgres_restore_drill.py` (PostgreSQL: seeded
+drill passes and drops what it created; `--dump` mode reads `rpo_events` from
+the live source — 0, then 1 after one more commit, `null` without
+`--source-dsn`; a client/server major mismatch is exit 2, not a failed
+drill); CI job `restore-drill` on every push to `main`, pull request and tag,
+uploading the report and asserting the PostgreSQL drill tests did not skip;
+`evidence/<sha>/restore-drill/report.json` committed at each release.
 
 ## Context
 

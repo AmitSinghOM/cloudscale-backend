@@ -110,6 +110,34 @@ def test_upgrade_head_creates_the_full_schema_and_stamps_revision(
     } <= tables
 
 
+def test_every_migrated_table_is_classified(
+    fresh_dsn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0016: the classes partition the migrated schema exactly.
+
+    A migration that adds a table without adding it to ``SYSTEM_OF_RECORD``,
+    ``DERIVED`` or ``EPHEMERAL`` fails here, so the backup/restore contract
+    can never lag the schema the way RUNBOOK R7 did between v0.5.0 and
+    v0.9.0.
+    """
+    _upgrade(fresh_dsn, monkeypatch)
+    with psycopg.connect(fresh_dsn) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'public' AND table_type = 'BASE TABLE'"
+            ).fetchall()
+        }
+    classified = (
+        schema.SYSTEM_OF_RECORD | schema.DERIVED | schema.EPHEMERAL | schema.TOOLING
+    )
+    assert tables == classified, (
+        f"unclassified: {sorted(tables - classified)}; "
+        f"classified but absent: {sorted(classified - tables)}"
+    )
+
+
 def test_downgrade_0003_refuses_to_erase_non_v1_schema_versions(
     fresh_dsn: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

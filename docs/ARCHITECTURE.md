@@ -112,7 +112,7 @@ events (id order)                                                               
 
 `compose.yaml` is this topology at N=1 and is exercised in CI. Assumptions the
 service does not implement itself — TLS, secrets, log sink, `/metrics`
-exposure — are RUNBOOK D1–D7.
+exposure — are RUNBOOK D1–D8.
 
 ## Performance shape
 
@@ -135,4 +135,4 @@ under `evidence/<sha>/`; targets and alerts in `docs/SLO.md`.
 | Add a table or column | `adapters/postgres/schema.py` **and** a new Alembic revision, bump `CURRENT_REVISION` | parity test asserts both paths match |
 | Add a setting | `HttpSettings` or `os.environ` | `docs/CONFIGURATION.md` (test enforces) |
 | Add a projection | implement `apply(event) -> bool` + `dead_letter(...)` | consumer name → own lease |
-| Add a read model (like `transfers`) | the per-event effect as a pure function in `application/<name>_read_model.py` shared by **both** projections (`postgres/projection_store.py`, `cqrs/idempotent_consumer.py`), tables in `schema.py` + Alembic + the consumer's SQLite DDL, a reader method on both stores, `ProjectionReader`/`QueryService`, a route | ADR-0015 pattern; every statement idempotent (`ON CONFLICT DO NOTHING`) because the consumer may replay; decisions never read it |
+| Add a read model (like `transfers`) | the per-event effect as a pure function in `application/<name>_read_model.py` shared by **both** projections (`postgres/projection_store.py`, `cqrs/idempotent_consumer.py`), tables in `schema.py` + Alembic + the consumer's SQLite DDL, **the table added to `schema.DERIVED` and `schema.CONSUMER_REBUILT` and to RUNBOOK R7** (tests fail until both), **its rows compared in `scripts/restore_drill.py` `read_models()`** (a reviewer's job — nothing fails if you forget), a reader method on both stores, `ProjectionReader`/`QueryService`, a route | ADR-0015 pattern; every statement idempotent (`ON CONFLICT DO NOTHING`) because the consumer may replay; decisions never read it; ADR-0016: derived means the drill truncates it and the consumer must bring it back |
