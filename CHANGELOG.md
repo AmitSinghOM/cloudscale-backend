@@ -6,6 +6,16 @@ integrator; the commit history says how.
 
 ## [Unreleased]
 
+### Added
+- ADR-0016 (Proposed): restore drill as an executable gate over a classified
+  schema. Every table classified in code as system of record, derived or
+  ephemeral; `scripts/restore_drill.py` dumps, restores, truncates derived
+  tables and rebuilds them, with pass criteria fixed in code and a report
+  under `evidence/<sha>/restore-drill/`. Written before its code, per
+  `docs/LONGEVITY.md`. Also records that the charter's §4 "derived and
+  rebuildable" item is currently policy, not enforced, and that RUNBOOK R7
+  omits the `holds`, `transfers` and `transfer_legs` read models.
+
 ## [0.9.0] — 2026-09-20
 
 ### Added
