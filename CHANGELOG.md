@@ -29,6 +29,12 @@ integrator; the commit history says how.
   production-scale report exists). RUNBOOK D8: scheduled dumps and WAL
   archiving are a deployment precondition.
 
+- Review 5 (`docs/reviews/2026-09-20-adr-0016-review.md`): independent
+  code-reviewer pass over the ADR-0016 change set; CI `defaults.run.shell: bash`
+  so a `pytest | tee` step can no longer pass on a failing suite (pre-existing
+  in the gate job too); drill criteria carry an `exercised` flag and the
+  dead-letter criterion is labelled unexercised when the dump had none.
+
 ### Changed
 - `docs/LONGEVITY.md` §4 "derived and rebuildable" is now truthfully
   *Enforced*; it had carried the label since v0.5.1 with no test behind it.

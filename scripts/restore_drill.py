@@ -140,8 +140,17 @@ class Report:
     )
     notes: list[str] = field(default_factory=list)
 
-    def criterion(self, name: str, passed: bool, detail: str) -> None:
-        self.criteria[name] = {"pass": bool(passed), "detail": detail}
+    def criterion(
+        self, name: str, passed: bool, detail: str, *, exercised: bool = True
+    ) -> None:
+        """Record a criterion. ``exercised=False`` marks a pass the data could
+        not have failed (nothing to compare), so a reader never mistakes a
+        vacuous pass for coverage."""
+        self.criteria[name] = {
+            "pass": bool(passed),
+            "detail": detail,
+            "exercised": bool(exercised),
+        }
 
     @property
     def passed(self) -> bool:
@@ -938,7 +947,11 @@ def _compare(
     report.criterion(
         "dead_letters_subset_of_dump",
         after.dead_letter_ids <= before.dead_letter_ids,
-        _diff("dead letters", before.dead_letter_ids, after.dead_letter_ids),
+        _diff("dead letters", before.dead_letter_ids, after.dead_letter_ids)
+        if before.dead_letter_ids
+        else "not exercised: the dump carried no dead letters (a seeded drill "
+        "has none; the consumer's poison-event tests cover re-dead-lettering)",
+        exercised=bool(before.dead_letter_ids),
     )
 
 

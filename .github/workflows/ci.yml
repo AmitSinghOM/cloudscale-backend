@@ -9,6 +9,12 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    # An explicit `bash` runs with `-eo pipefail`; the runner's default does
+    # not, so `pytest ... | tee log` would exit 0 on a failing suite.
+    shell: bash
+
 jobs:
   gate:
     name: gate · py${{ matrix.python }} (format · lint · types · tests, SQLite + PostgreSQL)

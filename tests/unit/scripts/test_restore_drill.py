@@ -54,6 +54,14 @@ def test_seeded_sqlite_drill_passes_every_criterion(tmp_path: Path) -> None:
     assert report["schema_revision"] == schema.CURRENT_REVISION
     failed = [name for name, c in report["criteria"].items() if not c["pass"]]
     assert failed == []
+    # A pass the data could not have failed is labelled, never implied: the
+    # seed has no poison events, so the dead-letter criterion is the only
+    # unexercised one (independent review, ADR-0016).
+    unexercised = sorted(n for n, c in report["criteria"].items() if not c["exercised"])
+    assert unexercised == ["dead_letters_subset_of_dump"]
+    assert (
+        "not exercised" in report["criteria"]["dead_letters_subset_of_dump"]["detail"]
+    )
     # Every event type the seed promises is in the log: hold lifecycle,
     # transfer, N-leg, reversal, cash. The read models it populates prove it.
     assert report["events"] >= 20 and report["streams"] == 8

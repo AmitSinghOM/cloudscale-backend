@@ -89,10 +89,11 @@ def test_seeded_postgres_drill_passes_and_cleans_up(tmp_path: Path) -> None:
     assert exit_code == EXIT_OK
     report = json.loads((tmp_path / "report.json").read_text())
     assert report["pass"] is True and report["tier"] == "postgresql"
-    assert report["criteria"]["schema_revision_matches_build"] == {
-        "pass": True,
-        "detail": f"Rev: {schema.CURRENT_REVISION} (head)",
-    }
+    revision = report["criteria"]["schema_revision_matches_build"]
+    assert (revision["pass"], revision["detail"]) == (
+        True,
+        f"Rev: {schema.CURRENT_REVISION} (head)",
+    )
     assert report["criteria"]["adapters_start_in_migrations_mode"]["pass"] is True
     truncated = next(n for n in report["notes"] if n.startswith("truncated:"))
     assert truncated == f"truncated: {sorted(schema.DERIVED)}"
