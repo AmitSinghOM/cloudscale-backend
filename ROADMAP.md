@@ -321,7 +321,7 @@ a 30-day availability window; backup/restore rehearsal; live (restart-free)
 admin revocation; consumer partitioning by account hash; alert routing to a
 pager; independent penetration test; static security lint (`ruff` S rules).
 
-## Phase 6 — Longevity (seven-year horizon)  ·  🚧 started 2026-09-13 · v0.6.0 tagged · v0.7.0 tagged 2026-09-19 · v0.8.0 tagged 2026-09-20 · v0.9.0 tagged 2026-09-20
+## Phase 6 — Longevity (seven-year horizon)  ·  🚧 started 2026-09-13 · v0.6.0 tagged · v0.7.0 tagged 2026-09-19 · v0.8.0 tagged 2026-09-20 · v0.9.0 tagged 2026-09-20 · v0.10.0 tagged 2026-09-20
 
 Governed by `docs/LONGEVITY.md`. The structure landed first (charter,
 ADR-0001..0010 reconstructing existing decisions, `CONTRIBUTING.md`,
@@ -376,6 +376,9 @@ What follows turns each remaining *policy* item into an *enforced* one.
       on `main`, PRs and tags; report under `evidence/<sha>/restore-drill/`.
       Found on the way: LONGEVITY §4 had carried the *enforced* label with no
       test behind it, and R7 omitted `holds`, `transfers`, `transfer_legs`.
+      An independent review pass fixed one MEDIUM (a `pytest | tee` CI step
+      could pass on a failing suite) and one LOW (a vacuously true criterion)
+      before merge. Released as v0.10.0.
 - [ ] **Annual restore drill at production scale** (first: 2026-Q4) — the
       same script with `--dump <production dump> --source-dsn <live>`; the
       report's RTO and `rpo_events` replace the "seeded scale only" line in

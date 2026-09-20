@@ -142,4 +142,7 @@ past its target date; ADR-0012/0013/0014 written before their code; the "add a p
 and "add an HTTP route" procedures were added to ARCHITECTURE so the next contributor does not
 rediscover them); reviewed at v0.9.0 on 2026-09-20 (no item past its target date; ADR-0015 written
 before its code; the "add a read model" procedure and two revert guarantees were added to
-ARCHITECTURE, and THREAT_MODEL gained the revert-authorization and disclosure rows).*
+ARCHITECTURE, and THREAT_MODEL gained the revert-authorization and disclosure rows); reviewed at
+v0.10.0 on 2026-09-20 (no item past its target date; ADR-0016 written before its code; §4
+"derived and rebuildable" moved from a label to an enforced test and a runnable drill, and the
+annual production-scale drill remains a dated policy item, first due 2026-Q4).*
