@@ -366,10 +366,20 @@ What follows turns each remaining *policy* item into an *enforced* one.
       `scripts/check_lock_age.sh` in the CI dependency-audit job: fails when
       either lock is > 120 days since its last regeneration (warns at 90).
       First refresh due 2026-12.
-- [ ] **Annual restore drill** (first: 2026-Q4) — dump, restore to a fresh
-      instance, `migrate current`, start in `migrations` mode, rebuild the
-      projection from the log, compare balances; record time under
-      `evidence/<sha>/restore-drill/`.
+- [x] **Restore drill — enforced at seeded scale** (ADR-0016, 2026-09-20) —
+      every table classified in code (`SYSTEM_OF_RECORD` / `DERIVED` /
+      `EPHEMERAL`; an unclassified table fails the build; RUNBOOK R7 is
+      tested against the classes). `scripts/restore_drill.py` dumps,
+      restores, verifies the revision, truncates every derived table,
+      rebuilds through the consumer and compares against a full fold and the
+      dump's read models; pass criteria fixed in code; CI job `restore-drill`
+      on `main`, PRs and tags; report under `evidence/<sha>/restore-drill/`.
+      Found on the way: LONGEVITY §4 had carried the *enforced* label with no
+      test behind it, and R7 omitted `holds`, `transfers`, `transfer_legs`.
+- [ ] **Annual restore drill at production scale** (first: 2026-Q4) — the
+      same script with `--dump <production dump> --source-dsn <live>`; the
+      report's RTO and `rpo_events` replace the "seeded scale only" line in
+      `docs/SLO.md` § Recovery.
 - [ ] **Bus factor ≥ 2** (before any external SLA) — second maintainer has
       merged a non-trivial change and performed one restore drill; every
       `CODEOWNERS` line lists two people.

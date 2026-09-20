@@ -30,5 +30,7 @@ or add one. Reviewers reject otherwise.
 | [0013](0013-n-leg-balanced-postings.md) | N-leg balanced postings on the transfer_id grouping | Accepted |
 | [0014](0014-pending-transfers-holds.md) | Pending transfers (holds) as reserve, post, void, expire | Accepted |
 | [0015](0015-revert-as-mirror-posting-set.md) | Revert as a mirror posting set linked to the original | Accepted |
+| [0016](0016-restore-drill-as-executable-gate.md) | Restore drill as an executable gate over a classified schema | Accepted |
+| [0017](0017-account-registration-as-event.md) | Account registration as an event on the account stream | Proposed |
 
 Template: [`TEMPLATE.md`](TEMPLATE.md).

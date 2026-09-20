@@ -6,7 +6,7 @@ read from files. This page is checked by
 code but missing here fails the build, so the table cannot drift.
 
 Defaults are the safe choice for a laptop; the **Production** column is what
-a customer-facing deployment must set (RUNBOOK D1–D7).
+a customer-facing deployment must set (RUNBOOK D1–D8).
 
 ## Storage
 
@@ -53,6 +53,12 @@ a customer-facing deployment must set (RUNBOOK D1–D7).
 | `CLOUDSCALE_CONSUMER_NAME` | `balances` | `balances` | Lease name: exactly one leader per name across all replicas. |
 | `CLOUDSCALE_CONSUMER_METRICS_PORT` | unset (no server) | set, network-restricted | Prometheus endpoint for `is_leader`, `lag_events`, `last_drain_timestamp`, counters. |
 | `CLOUDSCALE_CONSUMER_POLL_SECONDS` | `0.02` | `0.02` | Standby retry interval for the lease and idle sleep for the leader; bounds failover time. |
+
+## Operator tools
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CLOUDSCALE_PG_BIN` | unset (`PATH`) | Directory holding `pg_dump`/`pg_restore` for `scripts/restore_drill.py` (ADR-0016). Must be the server's major version; the drill exits 2 on a mismatch. `--pg-bin` overrides. CI sets `/usr/lib/postgresql/17/bin`. |
 
 ## Test-only
 

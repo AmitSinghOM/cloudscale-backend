@@ -6,6 +6,52 @@ integrator; the commit history says how.
 
 ## [Unreleased]
 
+### Added
+- Restore drill as an executable gate (ADR-0016). Every table is classified
+  in code — `schema.SYSTEM_OF_RECORD` (`events`, `event_envelopes`,
+  `command_results`, `accounts`), `schema.DERIVED` (nine tables) and
+  `schema.EPHEMERAL` (`rate_limit_buckets`); an unclassified table fails the
+  build on both tiers and RUNBOOK R7 is tested against the classes.
+  `scripts/restore_drill.py` dumps, restores into a fresh database, verifies
+  the Alembic revision with the documented command, starts the adapters in
+  `migrations` mode, truncates every derived table, rebuilds them through the
+  consumer and compares against a full fold of the log and the read models
+  the dump carried — eleven criteria fixed in code, exit 0/2/3, report with
+  RTO components and `rpo_events` under `evidence/<sha>/restore-drill/`.
+  Seeded mode covers every event type (cash, transfer, N-leg, hold
+  place/post-partial/void/expire, revert, a persisted rejection); `--dump`
+  mode drills a production dump. New CI job `restore-drill` (PostgreSQL 17
+  client installed to match the service) on `main`, pull requests and tags.
+  Tests prove the drill discriminates: a consumer that never rebuilds and a
+  log row lost in restore each go red on the criterion that names the cause.
+- `docs/SLO.md` § Recovery states RPO (a deployment property, measured not
+  set) and RTO (measured at seeded scale, not promised until a
+  production-scale report exists). RUNBOOK D8: scheduled dumps and WAL
+  archiving are a deployment precondition.
+
+- Review 5 (`docs/reviews/2026-09-20-adr-0016-review.md`): independent
+  code-reviewer pass over the ADR-0016 change set; CI `defaults.run.shell: bash`
+  so a `pytest | tee` step can no longer pass on a failing suite (pre-existing
+  in the gate job too); drill criteria carry an `exercised` flag and the
+  dead-letter criterion is labelled unexercised when the dump had none.
+
+- ADR-0017 (Proposed): account registration as an event on the account
+  stream — `RegisterAccount` → `AccountRegistered.v1`; `accounts` becomes a
+  transactional read model (written in the append transaction and rebuilt by
+  the consumer) so authorization stays a strongly consistent primary-key
+  read; the same-id race resolves on `UNIQUE (stream, seq)`; idempotent
+  backfill script; `SYSTEM_OF_RECORD` shrinks to the log, envelopes and
+  command results. Written before its code, per `docs/LONGEVITY.md`.
+
+### Changed
+- `docs/LONGEVITY.md` §4 "derived and rebuildable" is now truthfully
+  *Enforced*; it had carried the label since v0.5.1 with no test behind it.
+  §5's restore drill is split into an enforced seeded drill every release and
+  the annual production-scale policy drill (first 2026-Q4).
+- RUNBOOK R7 rewritten around the three classes; the previous list omitted
+  `holds`, `transfers` and `transfer_legs` and filed `accounts` under "small;
+  include in backups" rather than as system of record.
+
 ## [0.9.0] — 2026-09-20
 
 ### Added

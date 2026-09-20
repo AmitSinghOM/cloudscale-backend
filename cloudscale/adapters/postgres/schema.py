@@ -151,14 +151,84 @@ CREATE TABLE IF NOT EXISTS rate_limit_buckets (
 #: Every statement group, in dependency order (outbox references events).
 ALL = (EVENTS, OUTBOX, COMMAND_RESULTS, SNAPSHOTS, PROJECTION, ACCOUNTS, RATE_LIMIT)
 
+# -- Table classification (ADR-0016) -----------------------------------------
+#
+# Every table belongs to exactly one class. The classes are what a backup must
+# contain and what a restore may throw away; RUNBOOK R7 is checked against
+# them, the migrated schema is checked against them, and the restore drill
+# truncates exactly ``DERIVED`` before rebuilding. A new table that is not
+# classified fails the build.
+
+#: Lost data is lost money, idempotency, identity or ownership. The backup
+#: is these. ``accounts`` is here because registrations are written outside
+#: the log (see ADR-0016, alternatives) and cannot be rebuilt from it.
+SYSTEM_OF_RECORD: frozenset[str] = frozenset(
+    {"events", "event_envelopes", "command_results", "accounts"}
+)
+
+#: Rebuilt from ``events`` by the consumer (read models, dedupe, offset,
+#: dead letters), by the relay (``outbox`` and the ``events.published``
+#: column) or by the next fold (``stream_snapshots``, ADR-0012).
+DERIVED: frozenset[str] = frozenset(
+    {
+        "outbox",
+        "stream_snapshots",
+        "balances",
+        "holds",
+        "transfers",
+        "transfer_legs",
+        "processed_events",
+        "consumer_offset",
+        "dead_letters",
+    }
+)
+
+#: Neither backed up nor rebuilt; a restart forgives a rate-limit budget.
+EPHEMERAL: frozenset[str] = frozenset({"rate_limit_buckets"})
+
+#: Alembic's own bookkeeping; verified through ``migrate current``, not ours.
+TOOLING: frozenset[str] = frozenset({"alembic_version"})
+
+#: Derived tables the consumer rebuilds from the log, in the order the drill
+#: truncates them (no foreign keys among them; order is for readable reports).
+CONSUMER_REBUILT: tuple[str, ...] = (
+    "balances",
+    "holds",
+    "transfers",
+    "transfer_legs",
+    "processed_events",
+    "consumer_offset",
+    "dead_letters",
+)
+
+
+def classify(table: str) -> str:
+    """Return the class of ``table`` or raise: an unclassified table is a build error."""
+    for name, members in (
+        ("system_of_record", SYSTEM_OF_RECORD),
+        ("derived", DERIVED),
+        ("ephemeral", EPHEMERAL),
+        ("tooling", TOOLING),
+    ):
+        if table in members:
+            return name
+    raise KeyError(f"table {table!r} is not classified (ADR-0016)")
+
+
 __all__ = [
     "ACCOUNTS",
     "ALL",
     "COMMAND_RESULTS",
+    "CONSUMER_REBUILT",
     "CURRENT_REVISION",
+    "DERIVED",
+    "EPHEMERAL",
     "EVENTS",
     "OUTBOX",
     "PROJECTION",
     "RATE_LIMIT",
     "SNAPSHOTS",
+    "SYSTEM_OF_RECORD",
+    "TOOLING",
+    "classify",
 ]
