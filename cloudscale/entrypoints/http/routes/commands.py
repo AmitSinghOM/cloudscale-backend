@@ -144,9 +144,9 @@ def build_router(ctx: RouteContext) -> APIRouter:
     ) -> JSONResponse:
         """Commit a balanced N-leg posting set in one transaction (ADR-0013).
 
-        Authorization is on the anchor (the path account), which must be a
-        debited leg. Every other leg's ``committed_version`` is redacted unless
-        the caller may read that account.
+        Every debited account must be authorized (ADR-0018). Credit-only
+        accounts need no authorization; their ``committed_version`` is
+        redacted unless the caller may read them.
         """
         authorize_account(principal, account_id, ctx.account_registry)
         try:
@@ -160,6 +160,9 @@ def build_router(ctx: RouteContext) -> APIRouter:
             )
         except DomainError as error:
             raise HTTPException(status_code=400, detail=error.code) from error
+        for leg in command.postings:
+            if leg.direction == "debit" and leg.account_id != account_id:
+                authorize_account(principal, leg.account_id, ctx.account_registry)
         result = ctx.executor.execute(
             command,
             command_id=request.command_id,

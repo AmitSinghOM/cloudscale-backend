@@ -6,7 +6,10 @@ claim into evidence: dump a database, restore it into a fresh one, confirm
 the schema revision, start the adapters in ``migrations`` mode, **truncate
 every table classified DERIVED**, let the consumer rebuild them, and compare
 the result against a full fold of the restored log *and* against the read
-models the dump carried. Pass criteria are fixed in code; the report goes to
+models the dump carried. Seeded mode also compares authoritative content with
+the quiescent pre-dump source (ADR-0020); dump mode marks that check unexercised.
+Both modes verify authoritative content is unchanged by rebuild.
+Pass criteria are fixed in code; the report goes to
 ``evidence/<git-sha>/restore-drill/report.json``.
 
 Usage::
@@ -36,6 +39,7 @@ On PostgreSQL the adapters run in ``migrations`` mode for the whole drill
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -224,6 +228,66 @@ def _open_holds_from_rows(rows: Iterable[tuple[str, str]]) -> frozenset[str]:
         else:
             closed.add(hold_id)
     return frozenset(placed - closed)
+
+
+@dataclass(frozen=True)
+class TableFingerprint:
+    rows: int
+    sha256: str
+
+
+def _canonical_value(value: Any) -> Any:
+    if isinstance(value, (bytes, memoryview)):
+        return {"bytes": bytes(value).hex()}
+    if isinstance(value, datetime):
+        return {"datetime": value.astimezone(UTC).isoformat()}
+    return value
+
+
+def _table_fingerprint(cursor: Any, table: str) -> TableFingerprint:
+    # All classified tables have their primary key as the first column. Include
+    # column names so a changed schema cannot accidentally hash like old rows.
+    cursor.execute(f"SELECT * FROM {table} ORDER BY 1")
+    columns = [column[0] for column in cursor.description]
+    included = [
+        index
+        for index, name in enumerate(columns)
+        if not (table == "events" and name == "published")
+    ]
+    digest = hashlib.sha256()
+    digest.update(json.dumps([columns[i] for i in included]).encode())
+    count = 0
+    for row in cursor:
+        values = [_canonical_value(row[i]) for i in included]
+        digest.update(b"\n" + json.dumps(values, separators=(",", ":")).encode())
+        count += 1
+    return TableFingerprint(count, digest.hexdigest())
+
+
+def _compare_authoritative(
+    report: Report,
+    phase: str,
+    expected: dict[str, TableFingerprint] | None,
+    actual: dict[str, TableFingerprint],
+) -> None:
+    for table in sorted(schema.SYSTEM_OF_RECORD):
+        if expected is None:
+            report.criterion(
+                f"{phase}_{table}_preserved",
+                True,
+                "not exercised: no independent backup-snapshot baseline; "
+                "a restored copy or current live source is not that baseline",
+                exercised=False,
+            )
+        else:
+            before, after = expected[table], actual[table]
+            report.criterion(
+                f"{phase}_{table}_preserved",
+                before == after,
+                f"expected rows={before.rows}, actual rows={after.rows}; "
+                f"canonical content equal={before == after}",
+                exercised=bool(before.rows or after.rows or before != after),
+            )
 
 
 # -- seed workload (shared by both tiers) -------------------------------------------
@@ -546,6 +610,15 @@ class PostgresDrill:
             return False, str(error)
         return True, "migrations mode accepted the restored revision"
 
+    def authoritative_snapshot(self, dsn: str) -> dict[str, TableFingerprint]:
+        with self._psycopg.connect(dsn) as conn:
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            result = {}
+            for table in sorted(schema.SYSTEM_OF_RECORD):
+                with conn.cursor(name=f"integrity_{table}") as cursor:
+                    result[table] = _table_fingerprint(cursor, table)
+            return result
+
     # -- read / truncate / rebuild --------------------------------------------
 
     def log_facts(self, dsn: str) -> LogFacts:
@@ -746,6 +819,17 @@ class SqliteDrill:
     def adapters_start(self, dsn: str) -> tuple[bool, str]:
         self.migrate_head(dsn)
         return True, "adapters opened both files"
+
+    def authoritative_snapshot(self, dsn: str) -> dict[str, TableFingerprint]:
+        conn = sqlite3.connect(self._log(dsn))
+        try:
+            conn.execute("BEGIN")
+            return {
+                table: _table_fingerprint(conn.cursor(), table)
+                for table in sorted(schema.SYSTEM_OF_RECORD)
+            }
+        finally:
+            conn.close()
 
     def log_facts(self, dsn: str) -> LogFacts:
         conn = sqlite3.connect(self._log(dsn))
@@ -977,14 +1061,18 @@ def run_drill(
 
 def _seed_and_dump(
     tier: PostgresDrill | SqliteDrill, report: Report, *, accounts: int
-) -> Path:
+) -> tuple[Path, dict[str, TableFingerprint]]:
     """Seeded mode: a throwaway source with every event type, then its dump."""
     source_dsn = tier.create_database("source")
     _timed(report, "seed_migrate", lambda: tier.migrate_head(source_dsn))
     counts = _timed(report, "seed", lambda: tier.seed(source_dsn, accounts=accounts))
     report.notes.append(f"seed: {counts}")
+    baseline = _timed(
+        report, "source_integrity", lambda: tier.authoritative_snapshot(source_dsn)
+    )
     dump_path: Path = _timed(report, "dump", lambda: tier.dump(source_dsn))
-    return dump_path
+    report.notes.append("backup baseline: quiescent seeded source, before dump")
+    return dump_path, baseline
 
 
 def _run_drill(
@@ -997,8 +1085,9 @@ def _run_drill(
     source_log_tail: Callable[[], int | None],
 ) -> Report:
     try:
+        baseline = None
         if seeded:
-            dump_path = _seed_and_dump(tier, report, accounts=accounts)
+            dump_path, baseline = _seed_and_dump(tier, report, accounts=accounts)
         assert dump_path is not None
         report.dump_bytes = sum(
             p.stat().st_size
@@ -1011,9 +1100,15 @@ def _run_drill(
             report, "verify_revision", lambda: tier.verify_revision(restored)
         )
         report.criterion("schema_revision_matches_build", ok, detail)
+        if not ok:
+            return report
+        restored_content = _timed(
+            report, "restored_integrity", lambda: tier.authoritative_snapshot(restored)
+        )
+        _compare_authoritative(report, "backup", baseline, restored_content)
         ok, detail = tier.adapters_start(restored)
         report.criterion("adapters_start_in_migrations_mode", ok, detail)
-        if not report.criteria["schema_revision_matches_build"]["pass"] or not ok:
+        if not ok:
             return report  # nothing below is meaningful on the wrong schema
 
         facts = tier.log_facts(restored)
@@ -1032,6 +1127,16 @@ def _run_drill(
             report.rebuild_events_per_second = round(facts.events / rebuild_seconds, 1)
         after = tier.read_models(restored)
 
+        _compare_authoritative(
+            report,
+            "rebuild",
+            restored_content,
+            _timed(
+                report,
+                "rebuilt_integrity",
+                lambda: tier.authoritative_snapshot(restored),
+            ),
+        )
         _compare(report, facts, before, folds, drained, after)
 
         tail_now = source_log_tail()

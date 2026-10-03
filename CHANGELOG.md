@@ -6,6 +6,30 @@ integrator; the commit history says how.
 
 ## [Unreleased]
 
+### Added
+- Proposed trusted account provisioning policy (ADR-0019): dedicated service
+  authority, beneficiary identity, registration/credit races, and rollout gates.
+  This proposal does not enable provisioning; a separate containment patch
+  now disables the old self-registration path (ADR-0021).
+
+### Changed
+- Disabled first-claim account self-registration (`POST /v1/accounts`): all
+  authenticated, well-formed requests receive generic 403 with no ownership
+  or event writes (ADR-0021). Existing bindings and claims/admin payment
+  access remain; onboarding through this path is interrupted, and full trusted
+  provisioning remains proposed. No automatic production cutover is included.
+
+### Fixed
+- Restore drill checks canonical ownership, command-result, envelope, and event
+  content against the seeded pre-dump source and across rebuild (ADR-0020).
+  Existing-dump mode explicitly marks independent backup integrity unexercised.
+  Both-tier HTTP regressions verify restored replay and current authorization.
+- N-leg postings authorize every debited account before command execution
+  (ADR-0018), not just the anchor. Unauthorized secondary debits return the
+  existing generic 403 without persisting events or a command result;
+  replays also require current authorization. Credit-only recipients and
+  per-account committed-version redaction are unchanged.
+
 ## [0.10.0] — 2026-09-20
 
 ### Added

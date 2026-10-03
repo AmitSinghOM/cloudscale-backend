@@ -1,6 +1,6 @@
 # ADR-0013: N-leg balanced postings on the transfer_id grouping
 
-**Status:** Accepted
+**Status:** Superseded by ADR-0018 (posting authorization only; all other decisions remain accepted)
 **Date:** 2026-09-19
 **Enforced by:** `tests/unit/domain/test_postings.py` (command validation:
 balanced, no duplicate account, anchor debited, leg bounds; decision rules;

@@ -7,11 +7,11 @@ token-parser fingerprinting).
 
 Authorization is claims-based plus ownership-based. A token grants access to
 the accounts it names, and the system's own ownership registry grants access
-to accounts the subject registered:
+to accounts with an existing ownership binding:
 
 - ``accounts``: list of account ids the subject may command and read;
 - ``scope``: space-separated scopes; ``accounts:admin`` grants all accounts;
-- registry: ``owner_of(account_id) == subject`` (see ``POST /v1/accounts``).
+- registry: ``owner_of(account_id) == subject`` (existing bindings only).
 
 Anything else is 403.
 """

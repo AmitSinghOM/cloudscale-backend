@@ -30,6 +30,40 @@ that overwrites `X-Forwarded-For`, otherwise clients can spoof out of it;
 `CLOUDSCALE_RATE_LIMIT_PER_MINUTE` (shared across replicas with the
 `postgres` backend).
 
+## Posting authorization failures (ADR-0018)
+
+`POST /v1/accounts/{account_id}/postings` requires access to every debited
+account, including on replay. A token naming only the anchor is insufficient
+for a multi-debit set. Credit-only recipients need no spending authorization;
+their committed versions stay redacted unless the caller may read them.
+
+A generic 403 occurs before command execution and persists neither events
+nor a command result. Check the caller's issuer-signed account grants and
+registry ownership for each debit; do not grant admin scope just to bypass
+a denial. After legitimate authorization is established, retry the same
+request with the same `command_id`. Do not register an existing unregistered
+stream as a workaround: ADR-0021 disables that unsafe operation.
+No migration or event rewrite is needed for this change.
+
+## Registration containment (ADR-0021)
+
+`POST /v1/accounts` no longer binds an account to its caller: valid bearer
+requests return the same 403 for every account ID, including empty IDs,
+existing bindings, and financially active but unregistered streams. Anonymous
+valid-body requests return 401; malformed bodies can return 422. No binding,
+event, command result, or `account.registered` success audit is written. The
+ordinary request log counts the denied requests by route and status.
+
+Onboarding by self-registration is interrupted. Inventory callers, arrange a
+maintenance/cutover window, and review old bindings and issuer-signed
+`accounts`/admin grants before considering production deployment. Existing
+owners still authorize via registry reads, and authorized claims/admin writes
+and credit-only recipients are unchanged; this patch is not a freeze of those
+paths. Do not disable the registry to contain signup, claim an unregistered
+financial stream for a beneficiary, or reopen first-claim signup as rollback.
+The new provisioning operation remains unimplemented (ADR-0019 Proposed).
+Coordinate any rollout and rollback with an accountable allocation owner.
+
 ## Deployment assumptions (non-negotiable for customer traffic)
 
 The service deliberately does **not** implement these itself. Each is a
@@ -44,7 +78,7 @@ precondition; a deployment missing one is not production.
 | D5 | **Client budgets are enforced at the edge too.** The in-app pre-auth limiter bounds CPU per replica; it is not a volumetric defence. | Layer-3/4 floods never reach the application. | Edge rate limit and connection limits configured; `CLOUDSCALE_TRUST_PROXY_HEADERS=true` set **only** if the edge overwrites `X-Forwarded-For`. |
 | D6 | **Retention job is scheduled.** `python -m cloudscale.entrypoints.retention` runs at least daily (see R9). | Idempotency records and limiter buckets otherwise grow without bound. | Last run's JSON report is recent and its exit code was 0. |
 | D7 | **Multiple HTTP workers/replicas on the PostgreSQL tier.** One uvicorn worker is CPU-bound near 850 rps; throughput scales horizontally (`--workers N` or N replicas). | Single-process ceiling is structural (GIL), not tunable. | Load test at the deployment's replica count, not on one worker. |
-| D8 | **Scheduled `pg_dump` of the whole database, and WAL archiving if the RPO must be seconds rather than the dump interval.** The system of record is four tables (R7); the deployment chooses how often they are captured. | The service has one database and no replication story of its own (ADR-0016); RPO is a deployment property. | The latest dump restores through `scripts/restore_drill.py --dump` with exit 0; `docs/SLO.md` § Recovery states the interval. |
+| D8 | **Scheduled `pg_dump` of the whole database, and WAL archiving if the RPO must be seconds rather than the dump interval.** The system of record is four tables (R7); the deployment chooses how often they are captured. | The service has one database and no replication story of its own (ADR-0016); RPO is a deployment property. | The latest dump restores through `scripts/restore_drill.py --dump` with exit 0 (backup-content integrity remains unexercised without an independent snapshot manifest); `docs/SLO.md` § Recovery states the interval. |
 
 ## Retention (R9)
 
@@ -266,6 +300,21 @@ and `rpo_events`, the log tail at report time minus the tail in the dump,
 which a production drill must read honestly. See `docs/SLO.md` § Recovery.
 SQLite: `--sqlite-dir DIR --seeded` runs the same steps over a log file and a
 projection file (the backup API stands in for `pg_dump`).
+
+**Independent integrity (ADR-0020).** Seeded mode fingerprints all four
+system-of-record tables from the quiescent source before the dump, then checks
+`backup_<table>_preserved` on the restored copy. Both modes check
+`rebuild_<table>_preserved` after rebuild. Counts and canonical content must
+match; only the deliberately reset `events.published` column is excluded.
+Ownership and accepted/rejected command outcomes are not derivable from a
+financial fold. A named mismatch exits 3; reports expose no raw rows or hashes.
+
+For `--dump`, the backup criteria are **unexercised**, because no independently
+trusted backup-snapshot manifest is supplied. Exit 0 proves only the exercised
+criteria: do not certify independent backup integrity from that exit code.
+A current `--source-dsn` measures log-tail lag, not historical content integrity.
+Production manifest integration (bound to dump checksum and consistent source
+snapshot) remains follow-up work; no manifest CLI exists in this change.
 
 ---
 

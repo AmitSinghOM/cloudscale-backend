@@ -27,10 +27,14 @@ or add one. Reviewers reject otherwise.
 | [0010](0010-python-version-policy.md) | Python version policy | Accepted |
 | [0011](0011-double-entry-transfer.md) | Double-entry Transfer as two postings in one transaction | Accepted |
 | [0012](0012-stream-snapshots-verified-cache.md) | Stream snapshots as a verified cache over the event log | Accepted |
-| [0013](0013-n-leg-balanced-postings.md) | N-leg balanced postings on the transfer_id grouping | Accepted |
+| [0013](0013-n-leg-balanced-postings.md) | N-leg balanced postings on the transfer_id grouping (authorization superseded by ADR-0018) | Superseded |
 | [0014](0014-pending-transfers-holds.md) | Pending transfers (holds) as reserve, post, void, expire | Accepted |
 | [0015](0015-revert-as-mirror-posting-set.md) | Revert as a mirror posting set linked to the original | Accepted |
 | [0016](0016-restore-drill-as-executable-gate.md) | Restore drill as an executable gate over a classified schema | Accepted |
 | [0017](0017-account-registration-as-event.md) | Account registration as an event on the account stream | Proposed |
+| [0018](0018-all-debit-posting-authorization.md) | Authorize every debit in an N-leg posting set (supersedes ADR-0013 authorization only) | Supersedes |
+| [0019](0019-trusted-account-provisioning.md) | Trusted account provisioning | Proposed |
+| [0020](0020-independent-restore-integrity.md) | Independent restore integrity and restored command replay | Accepted |
+| [0021](0021-contain-unsafe-self-registration.md) | Contain unsafe self-registration | Accepted |
 
 Template: [`TEMPLATE.md`](TEMPLATE.md).

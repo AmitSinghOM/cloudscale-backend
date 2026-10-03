@@ -2,6 +2,11 @@
 
 **Status:** Proposed
 **Date:** 2026-09-20
+
+**Compatibility note (2026-10-03):** Accepted ADR-0021 disables the old
+self-registration path. This proposed ADR's unchanged 201/200/409 HTTP
+contract must be revised or superseded before it can be implemented.
+
 **Enforced by (once accepted):** `tests/unit/domain/test_register_account.py`
 (fold sets `owner_subject` once; a second registration is `account_taken`; the
 fixture corpus gains `AccountRegistered.v1`); `tests/unit/adapters/test_*_command_uow.py::test_register_*`

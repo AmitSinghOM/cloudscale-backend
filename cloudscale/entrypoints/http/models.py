@@ -33,7 +33,7 @@ class ReadyResponse(BaseModel):
 
 
 class RegisterAccountRequest(BaseModel):
-    """Claim ownership of an account id for the authenticated caller."""
+    """Legacy request shape retained while self-registration is denied."""
 
     model_config = ConfigDict(extra="forbid")
 

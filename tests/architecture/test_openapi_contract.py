@@ -58,5 +58,9 @@ def test_openapi_documents_the_real_status_codes() -> None:
         op = document["paths"][f"/v1/accounts/{{account_id}}/{route}"]["post"]
         assert expected <= set(op["responses"]), route
         assert "200" not in op["responses"], f"{route}: replay is 201, not 200"
+    registration = document["paths"]["/v1/accounts"]["post"]
+    assert registration["summary"] == "Self-registration disabled (ADR-0021)"
+    assert {"401", "403", "422"} <= set(registration["responses"])
+    assert not {"200", "201", "400", "409", "501"} & set(registration["responses"])
     balance = document["paths"]["/v1/accounts/{account_id}/balance"]["get"]
     assert {"200", "404", "401", "403"} <= set(balance["responses"])

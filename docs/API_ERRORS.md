@@ -161,11 +161,10 @@ account sees nothing until the post. `GET …/balance` returns `held` and
 | Status | Body `detail` | Meaning | Client action |
 |---|---|---|---|
 | 401 | `invalid or expired bearer token` | Always the same text, whatever the cause (no oracle). | Obtain a fresh token. If it persists, check issuer/audience/algorithm configuration. |
-| 403 | `principal is not authorized for this account` | Token is valid but not permitted for this account. | Register ownership (`POST /v1/accounts`) or use a token carrying the account / admin scope. |
+| 403 | `principal is not authorized for this account` | Token is valid but not permitted for this account; on `POST /v1/accounts`, self-registration is disabled for every caller (ADR-0021). | For account operations, obtain an approved account claim or existing registry ownership. Do not attempt self-registration. |
 | 404 | `account not found` | Balance read before any event was projected for the account. | Not an error after a write: poll until the projection catches up (see 201). |
 | 413 | `request body exceeds N bytes` | Body exceeds `CLOUDSCALE_MAX_BODY_BYTES` (16 KiB default). | Commands are ~150 bytes; this is a client bug. |
 | 429 | `rate limit exceeded` + `Retry-After` | Per-client (pre-auth) or per-subject budget exhausted. | Sleep `Retry-After` seconds, then retry (same `command_id`). |
-| 501 | `account registration is not enabled` | Deployment has no ownership registry configured. | Use claim-based or admin tokens. |
 | 503 | `command path unavailable (circuit open)` + `Retry-After` | Storage was failing; breaker is open. | Sleep `Retry-After`, retry with the **same** `command_id`. |
 | 503 | `command path unavailable (transient storage failure)` | Retries exhausted against a flaky store, or the pool was exhausted. | Same as above. |
 | 503 | `command path unavailable (event schema newer than this build)` | Stream holds an event written by a newer build (rolled-back deploy). | Sleep `Retry-After` (60 s). Operators must redeploy the newer build; the account is frozen, not corrupted. |
@@ -176,9 +175,12 @@ account sees nothing until the post. `GET …/balance` returns `held` and
 
 | Status | Meaning |
 |---|---|
-| 201 | Ownership registered to the caller's subject. |
-| 200 | Already registered to this subject (idempotent). |
-| 409 | Registered to a different subject. |
-| 400 | `invalid_account_id`. |
+| 403 | Valid bearer and well-formed request: self-registration is disabled for every caller, including administrator-scoped tokens; no ownership lookup or write occurs (ADR-0021). |
+| 401 | Missing or invalid bearer on a well-formed request. |
+| 422 | Request shape is invalid; framework validation may occur before authentication. |
+
+Do not retry to create ownership here. Existing registry bindings continue to
+authorize account operations, but new provisioning requires a separately
+approved allocation authority and new API (ADR-0019 Proposed).
 
 `examples/python_client.py` implements every client action above.

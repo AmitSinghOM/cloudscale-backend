@@ -257,7 +257,7 @@
       },
       "RegisterAccountRequest": {
         "additionalProperties": false,
-        "description": "Claim ownership of an account id for the authenticated caller.",
+        "description": "Legacy request shape retained while self-registration is denied.",
         "properties": {
           "account_id": {
             "title": "Account Id",
@@ -493,7 +493,6 @@
   "paths": {
     "/v1/accounts": {
       "post": {
-        "description": "Bind an account to the caller. Idempotent for the same caller.",
         "operationId": "register_account_v1_accounts_post",
         "requestBody": {
           "content": {
@@ -506,28 +505,16 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Already registered to this caller (idempotent)."
+          "401": {
+            "description": "Missing, invalid or expired bearer token (fixed message)."
           },
-          "201": {
+          "403": {
             "content": {
               "application/json": {
                 "schema": {}
               }
             },
-            "description": "Successful Response"
-          },
-          "400": {
-            "description": "invalid_account_id."
-          },
-          "401": {
-            "description": "Missing, invalid or expired bearer token (fixed message)."
-          },
-          "403": {
-            "description": "Token valid but not authorized for this account."
-          },
-          "409": {
-            "description": "Registered to a different subject."
+            "description": "Token valid but not authorized for this operation or account."
           },
           "422": {
             "content": {
@@ -542,9 +529,6 @@
           "429": {
             "description": "Rate limit exceeded; honour Retry-After."
           },
-          "501": {
-            "description": "Registration not enabled in this deployment."
-          },
           "503": {
             "description": "Command path unavailable; retry with the SAME command_id after Retry-After."
           }
@@ -554,7 +538,7 @@
             "bearerAuth": []
           }
         ],
-        "summary": "Register Account"
+        "summary": "Self-registration disabled (ADR-0021)"
       }
     },
     "/v1/accounts/{account_id}/balance": {
@@ -586,7 +570,7 @@
             "description": "Missing, invalid or expired bearer token (fixed message)."
           },
           "403": {
-            "description": "Token valid but not authorized for this account."
+            "description": "Token valid but not authorized for this operation or account."
           },
           "404": {
             "description": "No event projected yet for this account; poll after a write."
@@ -656,7 +640,7 @@
             "description": "Missing, invalid or expired bearer token (fixed message)."
           },
           "403": {
-            "description": "Token valid but not authorized for this account."
+            "description": "Token valid but not authorized for this operation or account."
           },
           "409": {
             "description": "CommandResult: version_conflict or command_id_conflict."
@@ -720,7 +704,7 @@
             "description": "Missing, invalid or expired bearer token (fixed message)."
           },
           "403": {
-            "description": "Token valid but not authorized for this account."
+            "description": "Token valid but not authorized for this operation or account."
           },
           "409": {
             "description": "CommandResult: version_conflict (source stream) or command_id_conflict."
@@ -794,7 +778,7 @@
             "description": "Missing, invalid or expired bearer token (fixed message)."
           },
           "403": {
-            "description": "Token valid but not authorized for this account."
+            "description": "Token valid but not authorized for this operation or account."
           },
           "409": {
             "description": "CommandResult: version_conflict (source stream) or command_id_conflict."
@@ -868,7 +852,7 @@
             "description": "Missing, invalid or expired bearer token (fixed message)."
           },
           "403": {
-            "description": "Token valid but not authorized for this account."
+            "description": "Token valid but not authorized for this operation or account."
           },
           "409": {
             "description": "CommandResult: version_conflict (source stream) or command_id_conflict."
@@ -893,7 +877,7 @@
     },
     "/v1/accounts/{account_id}/postings": {
       "post": {
-        "description": "Commit a balanced N-leg posting set in one transaction (ADR-0013).\n\nAuthorization is on the anchor (the path account), which must be a\ndebited leg. Every other leg's ``committed_version`` is redacted unless\nthe caller may read that account.",
+        "description": "Commit a balanced N-leg posting set in one transaction (ADR-0013).\n\nEvery debited account must be authorized (ADR-0018). Credit-only\naccounts need no authorization; their ``committed_version`` is\nredacted unless the caller may read them.",
         "operationId": "post_postings_v1_accounts__account_id__postings_post",
         "parameters": [
           {
@@ -932,7 +916,7 @@
             "description": "Missing, invalid or expired bearer token (fixed message)."
           },
           "403": {
-            "description": "Token valid but not authorized for this account."
+            "description": "Token valid but not authorized for this operation or account."
           },
           "409": {
             "description": "CommandResult: version_conflict (anchor stream) or command_id_conflict."
@@ -996,7 +980,7 @@
             "description": "Missing, invalid or expired bearer token (fixed message)."
           },
           "403": {
-            "description": "Token valid but not authorized for this account."
+            "description": "Token valid but not authorized for this operation or account."
           },
           "409": {
             "description": "CommandResult: version_conflict (source stream) or command_id_conflict."
@@ -1070,7 +1054,7 @@
             "description": "Missing, invalid or expired bearer token (fixed message)."
           },
           "403": {
-            "description": "Token valid but not authorized for this account."
+            "description": "Token valid but not authorized for this operation or account."
           },
           "409": {
             "description": "CommandResult: already_reverted, version_conflict (anchor stream) or command_id_conflict."
@@ -1170,7 +1154,7 @@
             "description": "Missing, invalid or expired bearer token (fixed message)."
           },
           "403": {
-            "description": "Token valid but not authorized for this account."
+            "description": "Token valid but not authorized for this operation or account."
           },
           "404": {
             "description": "No such posting set projected yet; poll after the write, or the caller may read none of its accounts."
