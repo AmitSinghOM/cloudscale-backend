@@ -244,10 +244,19 @@ def _canonical_value(value: Any) -> Any:
     return value
 
 
+# A table name is an identifier, not a bindable parameter. The fingerprint
+# statements are therefore fixed at import time over the build's own table
+# classification (ADR-0016); an unclassified name is a KeyError, never SQL.
+_FINGERPRINT_SELECT: dict[str, str] = {
+    table: f'SELECT * FROM "{table}" ORDER BY 1'
+    for table in schema.SYSTEM_OF_RECORD | schema.DERIVED | schema.EPHEMERAL
+}
+
+
 def _table_fingerprint(cursor: Any, table: str) -> TableFingerprint:
     # All classified tables have their primary key as the first column. Include
     # column names so a changed schema cannot accidentally hash like old rows.
-    cursor.execute(f"SELECT * FROM {table} ORDER BY 1")
+    cursor.execute(_FINGERPRINT_SELECT[table])
     columns = [column[0] for column in cursor.description]
     included = [
         index
@@ -1075,6 +1084,42 @@ def _seed_and_dump(
     return dump_path, baseline
 
 
+def _dump_size(dump_path: Path) -> int:
+    """Bytes on disk of a plain dump file or a directory-format dump."""
+    members = [dump_path] if dump_path.is_file() else list(dump_path.iterdir())
+    return sum(p.stat().st_size for p in members)
+
+
+def _restore_and_verify(
+    tier: PostgresDrill | SqliteDrill,
+    report: Report,
+    dump_path: Path,
+    baseline: dict[str, TableFingerprint] | None,
+) -> tuple[Any, dict[str, TableFingerprint]] | None:
+    """Restore the dump, then verify revision, authoritative content, adapters.
+
+    Returns the restored target and its authoritative fingerprints, or ``None``
+    when a gating criterion failed and the drill must stop at that criterion.
+    """
+    restored = _timed(report, "restore", lambda: tier.restore(dump_path))
+
+    ok, detail = _timed(
+        report, "verify_revision", lambda: tier.verify_revision(restored)
+    )
+    report.criterion("schema_revision_matches_build", ok, detail)
+    if not ok:
+        return None
+    restored_content = _timed(
+        report, "restored_integrity", lambda: tier.authoritative_snapshot(restored)
+    )
+    _compare_authoritative(report, "backup", baseline, restored_content)
+    ok, detail = tier.adapters_start(restored)
+    report.criterion("adapters_start_in_migrations_mode", ok, detail)
+    if not ok:
+        return None
+    return restored, restored_content
+
+
 def _run_drill(
     tier: PostgresDrill | SqliteDrill,
     report: Report,
@@ -1089,27 +1134,12 @@ def _run_drill(
         if seeded:
             dump_path, baseline = _seed_and_dump(tier, report, accounts=accounts)
         assert dump_path is not None
-        report.dump_bytes = sum(
-            p.stat().st_size
-            for p in ([dump_path] if dump_path.is_file() else dump_path.iterdir())
-        )
+        report.dump_bytes = _dump_size(dump_path)
 
-        restored = _timed(report, "restore", lambda: tier.restore(dump_path))
-
-        ok, detail = _timed(
-            report, "verify_revision", lambda: tier.verify_revision(restored)
-        )
-        report.criterion("schema_revision_matches_build", ok, detail)
-        if not ok:
-            return report
-        restored_content = _timed(
-            report, "restored_integrity", lambda: tier.authoritative_snapshot(restored)
-        )
-        _compare_authoritative(report, "backup", baseline, restored_content)
-        ok, detail = tier.adapters_start(restored)
-        report.criterion("adapters_start_in_migrations_mode", ok, detail)
-        if not ok:
+        verified = _restore_and_verify(tier, report, dump_path, baseline)
+        if verified is None:
             return report  # nothing below is meaningful on the wrong schema
+        restored, restored_content = verified
 
         facts = tier.log_facts(restored)
         report.events, report.streams = facts.events, len(facts.streams)

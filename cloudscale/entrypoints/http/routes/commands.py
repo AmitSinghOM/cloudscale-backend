@@ -25,6 +25,19 @@ from cloudscale.entrypoints.http.models import (
 )
 
 
+def _authorize_every_debit(
+    principal: Principal, command: Post, *, anchor: str, ctx: RouteContext
+) -> None:
+    """ADR-0018: every debited account must be authorized, not just the anchor.
+
+    Raises the same generic 403 as the anchor check, before anything is
+    persisted; credit-only accounts are not checked.
+    """
+    for leg in command.postings:
+        if leg.direction == "debit" and leg.account_id != anchor:
+            authorize_account(principal, leg.account_id, ctx.account_registry)
+
+
 def build_router(ctx: RouteContext) -> APIRouter:
     router = APIRouter()
 
@@ -160,9 +173,7 @@ def build_router(ctx: RouteContext) -> APIRouter:
             )
         except DomainError as error:
             raise HTTPException(status_code=400, detail=error.code) from error
-        for leg in command.postings:
-            if leg.direction == "debit" and leg.account_id != account_id:
-                authorize_account(principal, leg.account_id, ctx.account_registry)
+        _authorize_every_debit(principal, command, anchor=account_id, ctx=ctx)
         result = ctx.executor.execute(
             command,
             command_id=request.command_id,

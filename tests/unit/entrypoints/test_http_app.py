@@ -484,6 +484,48 @@ def _postings_body(**overrides: object) -> dict:
     return body
 
 
+def _two_debit_postings_body(secondary_debit_index: int) -> dict:
+    """acct-src (anchor) and acct-secondary both debited, one credit leg.
+
+    The secondary debit is placed at ``secondary_debit_index`` so the check
+    is proven independent of leg order.
+    """
+    legs = [
+        {"account_id": "acct-src", "amount": 1, "direction": "debit"},
+        {"account_id": "acct-recipient", "amount": 101, "direction": "credit"},
+    ]
+    legs.insert(
+        secondary_debit_index,
+        {"account_id": "acct-secondary", "amount": 100, "direction": "debit"},
+    )
+    return _postings_body(postings=legs)
+
+
+def _assert_postings_denied_without_writes(
+    stack: _Stack,
+    body: dict,
+    *,
+    headers: dict[str, str],
+    accounts: tuple[str, ...],
+):
+    """POST the set, expect the generic 403, and prove nothing was persisted.
+
+    ADR-0018: an unauthorized debit must leave no command result, no legs and
+    every touched stream exactly as it was. Returns the denied response.
+    """
+    command_id = uuid.UUID(body["command_id"])
+    before = {account: stack.uow.fold_stream(account) for account in accounts}
+    denied = stack.client.post(
+        "/v1/accounts/acct-src/postings", json=body, headers=headers
+    )
+    assert denied.status_code == 403
+    assert denied.json() == {"detail": "principal is not authorized for this account"}
+    assert stack.uow.stored_result(command_id) is None
+    assert stack.uow.legs_of(command_id) == ()
+    assert {account: stack.uow.fold_stream(account) for account in accounts} == before
+    return denied
+
+
 def test_post_postings_returns_one_posting_per_leg_and_reaches_every_balance(
     stack: _Stack, caplog
 ) -> None:
@@ -556,30 +598,16 @@ def test_postings_require_every_debit_before_persisting(
 ) -> None:
     _seed(stack, "acct-src", amount=1)
     _seed(stack, "acct-secondary", amount=100)
-    legs = [
-        {"account_id": "acct-src", "amount": 1, "direction": "debit"},
-        {"account_id": "acct-recipient", "amount": 101, "direction": "credit"},
-    ]
-    legs.insert(
-        secondary_debit_index,
-        {"account_id": "acct-secondary", "amount": 100, "direction": "debit"},
-    )
-    body = _postings_body(postings=legs)
+    body = _two_debit_postings_body(secondary_debit_index)
     command_id = uuid.UUID(body["command_id"])
     accounts = ("acct-src", "acct-secondary", "acct-recipient")
-    before = {account: stack.uow.fold_stream(account) for account in accounts}
     anchor_only = {
         "Authorization": f"Bearer {_token(scope=None, accounts=['acct-src'])}"
     }
 
-    denied = stack.client.post(
-        "/v1/accounts/acct-src/postings", json=body, headers=anchor_only
+    denied = _assert_postings_denied_without_writes(
+        stack, body, headers=anchor_only, accounts=accounts
     )
-    assert denied.status_code == 403
-    assert denied.json() == {"detail": "principal is not authorized for this account"}
-    assert stack.uow.stored_result(command_id) is None
-    assert stack.uow.legs_of(command_id) == ()
-    assert {account: stack.uow.fold_stream(account) for account in accounts} == before
 
     headers = (
         _auth()
