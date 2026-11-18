@@ -6,6 +6,22 @@ integrator; the commit history says how.
 
 ## [Unreleased]
 
+### Removed (BREAKING — incompatible public-contract changes)
+- `POST /v1/accounts` (first-claim self-registration) no longer returns
+  201, 200, 409, 400 or 501. Every authenticated, well-formed request,
+  including administrator-scoped tokens, receives the generic 403 with no
+  ownership lookup, no event and no audit write (ADR-0021). Existing bindings
+  and claims/admin payment
+  access remain; onboarding through this path stops, no provisioning path
+  replaces it yet (ADR-0019 is Proposed). Operators must inventory callers
+  and agree a cutover before deploying (RUNBOOK "Registration containment").
+- `POST /v1/accounts/{account_id}/postings` sets that debit an account the
+  caller is not authorized on, and replays of such sets, now return 403
+  instead of 201 (ADR-0018, superseding the authorization rule of ADR-0013).
+  Clients that built multi-debit sets on an anchor-only token must present
+  claims covering every debited account. `docs/API_ERRORS.md` and
+  `SECURITY.md` now state both rules.
+
 ### Added
 - Proposed trusted account provisioning policy (ADR-0019): dedicated service
   authority, beneficiary identity, registration/credit races, and rollout gates.
@@ -13,11 +29,6 @@ integrator; the commit history says how.
   now disables the old self-registration path (ADR-0021).
 
 ### Changed
-- Disabled first-claim account self-registration (`POST /v1/accounts`): all
-  authenticated, well-formed requests receive generic 403 with no ownership
-  or event writes (ADR-0021). Existing bindings and claims/admin payment
-  access remain; onboarding through this path is interrupted, and full trusted
-  provisioning remains proposed. No automatic production cutover is included.
 - Dependencies: `pyjwt` 2.13.0 -> 2.15.1 (PYSEC-2026-4140..4152, -4183,
   GHSA-pxh4-856f-4h89), `certifi` 2026.7.22 -> 2026.10.23 (PYSEC-2026-4320,
   GHSA-6q48-6c7w-9gw2), OpenTelemetry 1.44.0/0.65b0 -> 1.45.2/0.66b2

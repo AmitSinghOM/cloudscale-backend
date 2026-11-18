@@ -71,7 +71,8 @@ jobs:
           .venv/bin/python -m pytest tests/unit/adapters/test_postgres_tier.py \
             tests/unit/adapters/test_postgres_command_uow.py \
             tests/unit/adapters/test_postgres_restore_drill.py \
-            tests/unit/entrypoints/test_restored_replay.py -q -rs 2>&1 | tee pg.log
+            tests/unit/entrypoints/test_restored_replay.py \
+            tests/unit/scripts/test_restore_integrity.py -q -rs 2>&1 | tee pg.log
           ! grep -q "SKIPPED" pg.log
 
   dependency-audit:
@@ -154,6 +155,7 @@ jobs:
         run: |
           .venv/bin/python -m pytest tests/unit/adapters/test_postgres_restore_drill.py \
             tests/unit/adapters/test_postgres_migrations.py::test_every_migrated_table_is_classified \
+            tests/unit/scripts/test_restore_integrity.py \
             -q -rs 2>&1 | tee drill.log
           ! grep -q "SKIPPED" drill.log
       - name: Upload reports

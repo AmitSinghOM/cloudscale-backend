@@ -41,13 +41,15 @@ describe the source, and `postings` carries both legs. The target posting's
 | 400 | `same_account` | Source and target are the same account. | Fix the request. |
 | 400 | `domain_rejected` + a domain code | E.g. `amount_out_of_range` when the credit would overflow the target. | Fix the request. Never retry unchanged. |
 
-## `POST /v1/accounts/{account_id}/postings` (ADR-0013)
+## `POST /v1/accounts/{account_id}/postings` (ADR-0013, ADR-0018)
 
 An N-leg balanced posting set: 2 to 16 legs (`MAX_LEGS`), each
 `{account_id, amount, direction: debit|credit}`, committed in one
-transaction. The path account is the **anchor**: it is authorized, it is the
-only stream whose `expected_version` the caller supplies, and it must be one
-of the debited legs. Debits must equal credits. Success returns the same
+transaction. The path account is the **anchor**: it must be one of the
+debited legs and it is the only stream whose `expected_version` the caller
+supplies. **Every debited account must be authorized** for the caller
+(ADR-0018); credit-only recipients need no authorization. Debits must equal
+credits. Success returns the same
 `CommandResult` shape as a transfer with one entry per leg in `postings`;
 `committed_version` is `null` for legs on accounts the caller may not read.
 `/transfers` is the two-leg convenience and is unchanged.
@@ -55,7 +57,8 @@ of the debited legs. Debits must equal credits. Success returns the same
 | Status | `outcome` / `error_code` | Meaning | Client action |
 |---|---|---|---|
 | 201 | `accepted` | Every leg appended, one per stream, in `postings`. | Continue; poll each visible balance to its `committed_version`. |
-| 201 | `accepted` (replay) | Same `command_id`, identical request (including leg order). | Treat as success. |
+| 201 | `accepted` (replay) | Same `command_id`, identical request (including leg order), and the caller still has access to every debited account. | Treat as success. |
+| 403 | — | The caller is not authorized on the anchor **or** on another debited account (ADR-0018); also on a replay when that access has since been lost. The same generic body in every case, checked before anything is read or written: nothing is persisted under the `command_id`. | Use a token whose claims cover every debited account, or the admin scope; the same `command_id` may then be retried. |
 | 409 | `version_conflict` | `expected_version` ≠ the **anchor** stream's version. | Re-read, re-decide, resubmit with a new `command_id`. |
 | 409 | `command_id_conflict` | Same `command_id`, different request (a reordered set counts as different). | Client bug; mint a new id. |
 | 422 | `insufficient_funds` | A debited leg exceeds that account's balance. Nothing was appended on any stream. | Business rejection. Do not retry unchanged. |

@@ -245,17 +245,19 @@ def _canonical_value(value: Any) -> Any:
 
 
 # A table name is an identifier, not a bindable parameter. The fingerprint
-# statements are therefore fixed at import time over the build's own table
-# classification (ADR-0016); an unclassified name is a KeyError, never SQL.
+# statements are therefore fixed at import time over the system-of-record
+# tables (ADR-0016, ADR-0020); any other name is a KeyError, never SQL.
+# ORDER BY 1 is deterministic only because every system-of-record table has a
+# single-column primary key first (events.id, event_envelopes.event_id,
+# command_results.command_id, accounts.account_id). Derived tables such as
+# transfer_legs have composite keys and must not be added here as-is.
 _FINGERPRINT_SELECT: dict[str, str] = {
-    table: f'SELECT * FROM "{table}" ORDER BY 1'
-    for table in schema.SYSTEM_OF_RECORD | schema.DERIVED | schema.EPHEMERAL
+    table: f'SELECT * FROM "{table}" ORDER BY 1' for table in schema.SYSTEM_OF_RECORD
 }
 
 
 def _table_fingerprint(cursor: Any, table: str) -> TableFingerprint:
-    # All classified tables have their primary key as the first column. Include
-    # column names so a changed schema cannot accidentally hash like old rows.
+    # Column names are hashed too, so a changed schema cannot hash like old rows.
     cursor.execute(_FINGERPRINT_SELECT[table])
     columns = [column[0] for column in cursor.description]
     included = [
