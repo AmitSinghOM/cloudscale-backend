@@ -321,7 +321,7 @@ a 30-day availability window; backup/restore rehearsal; live (restart-free)
 admin revocation; consumer partitioning by account hash; alert routing to a
 pager; independent penetration test; static security lint (`ruff` S rules).
 
-## Phase 6 — Longevity (seven-year horizon)  ·  🚧 started 2026-09-13 · v0.6.0 tagged · v0.7.0 tagged 2026-09-19 · v0.8.0 tagged 2026-09-20 · v0.9.0 tagged 2026-09-20 · v0.10.0 tagged 2026-09-20
+## Phase 6 — Longevity (seven-year horizon)  ·  🚧 started 2026-09-13 · v0.6.0 tagged · v0.7.0 tagged 2026-09-19 · v0.8.0 tagged 2026-09-20 · v0.9.0 tagged 2026-09-20 · v0.10.0 tagged 2026-09-20 · v1.0.0 tagged 2026-11-18
 
 Governed by `docs/LONGEVITY.md`. The structure landed first (charter,
 ADR-0001..0010 reconstructing existing decisions, `CONTRIBUTING.md`,
@@ -379,6 +379,19 @@ What follows turns each remaining *policy* item into an *enforced* one.
       An independent review pass fixed one MEDIUM (a `pytest | tee` CI step
       could pass on a failing suite) and one LOW (a vacuously true criterion)
       before merge. Released as v0.10.0.
+- [x] **Every-debit posting authorization, independent restore integrity,
+      self-registration contained** (ADR-0018, ADR-0020, ADR-0021; ADR-0019
+      proposed) — N-leg postings authorize every debited account before
+      anything is persisted; the drill fingerprints the four system-of-record
+      tables across dump, restore and rebuild; `POST /v1/accounts` is an
+      unconditional 403 until a trusted provisioning authority exists. Two
+      public contracts changed incompatibly, so CONTRIBUTING made this the
+      first major. Four independent review seats (Staff / Product / Security
+      / CTO) before merge: 6 accepted findings, 5 fixed in the PR, the
+      version decision escalated (`docs/reviews/2026-11-18-pr29-four-seat-review.md`).
+      Also: gate jobs install the PostgreSQL 17 client (runner drift to
+      `pg_dump` 18); pyjwt, certifi and OpenTelemetry bumped for advisories.
+      Released as v1.0.0.
 - [ ] **Annual restore drill at production scale** (first: 2026-Q4) — the
       same script with `--dump <production dump> --source-dsn <live>`; the
       report's RTO and `rpo_events` replace the "seeded scale only" line in

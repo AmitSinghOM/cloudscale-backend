@@ -145,4 +145,8 @@ before its code; the "add a read model" procedure and two revert guarantees were
 ARCHITECTURE, and THREAT_MODEL gained the revert-authorization and disclosure rows); reviewed at
 v0.10.0 on 2026-09-20 (no item past its target date; ADR-0016 written before its code; §4
 "derived and rebuildable" moved from a label to an enforced test and a runnable drill, and the
-annual production-scale drill remains a dated policy item, first due 2026-Q4).*
+annual production-scale drill remains a dated policy item, first due 2026-Q4); reviewed at
+v1.0.0 on 2026-11-18 (no item past its target date — the production-scale drill is due within
+2026-Q4, not past it; ADR-0018/0020/0021 written before their code; the "public contract change
+requires a superseding ADR and a major" rule was applied for the first time, after two review
+seats found the planned minor tag contradicting it).*
