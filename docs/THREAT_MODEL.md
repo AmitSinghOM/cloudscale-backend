@@ -51,8 +51,9 @@ B6 Operators → everything. B7 Supply chain → image.
 | D | Unauthenticated flood exhausting CPU on token verification | Pre-auth per-client budget before any verification; probes exempt | `limits.ClientRateLimitMiddleware`; flood test `401,401,401,429,429` |
 | D | Authenticated subject floods | Per-subject budget; shared across replicas via PostgreSQL backend | `RateLimiter`, `PostgresRateLimiter`; 429 tests |
 | D | Spoofed `X-Forwarded-For` to escape client budget | Header ignored unless `trust_proxy_headers`; documented as edge-only | test `forwarded_for_ignored_unless_proxy_trusted` |
-| E | Non-admin registers ownership of someone else's account | First registration wins; 409 on conflict; admin bypass requires `jti` | registry tests |
+| E | Non-admin registers ownership of another account or pre-existing financial stream | Self-registration always returns generic 403 for authenticated requests, without binding, event or result writes; no provisioning authority is currently enabled (ADR-0021) | `test_self_registration_denied_without_binding_or_event`, both-tier `test_self_registration_cannot_claim_existing_financial_stream`; ADR-0019 remains proposed |
 | E | Revoked admin token still used | `jti` denylist checked on every admin request | revocation tests |
+| E | Caller hides an unauthorized debit in a balanced posting set | Every debited account is authorized before executor entry, including replays; a denial is a generic 403 and persists neither events nor command results (ADR-0018) | `routes/commands.post_postings`; `test_postings_require_every_debit_before_persisting`, `test_postings_denies_later_debit_before_executor_or_balance_lookup`, registry posting tests |
 | E | Payer claws a payment back unilaterally via revert | A revert is authorized on **every account it debits** (each original payee) or the admin scope, never the anchor alone; the debit set is read from the log, not the eventual read model; a 403 is not persisted under the `command_id` (ADR-0015) | `routes/commands.post_revert`; `test_revert_authorizes_on_the_accounts_it_debits_not_the_anchor` |
 | I | Existence of other people's payments disclosed via `GET /v1/transfers/{id}` | A set the caller may read none of is a 404, not a 403; amounts on legs the caller may not read are redacted | `routes/queries.get_transfer`; `test_revert_rejections_and_transfer_read_visibility` |
 
@@ -114,6 +115,19 @@ B6 Operators → everything. B7 Supply chain → image.
    source of record and is never pruned; cold-start replay of one very
    long account stream is the remaining ceiling until snapshots land.
    *2026-09-13*
+
+## Restore-integrity boundary
+
+ADR-0020 adds independent seeded backup-content checks and both-tier restored
+HTTP replay/authorization regressions. Content checks include ownership,
+accepted/rejected outcomes, request hashes, event identity and financial values;
+only the derived `events.published` flag is excluded. Reports contain counts
+and equality verdicts, not financial rows, owner identities, or hashes.
+Existing-dump mode has no trusted snapshot manifest and explicitly labels
+backup integrity unexercised. These checks detect tested loss/substitution;
+they do not authenticate an adversary-controlled backup or replace the
+separately implemented registration containment (ADR-0021), command-ID
+retention, or consumer fencing policies.
 
 ## Out of scope
 

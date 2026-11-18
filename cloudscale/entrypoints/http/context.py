@@ -46,7 +46,9 @@ _LOGGER = logging.getLogger("cloudscale.http")
 #: the committed contract (docs/openapi.json) honest for client generators.
 AUTH_RESPONSES: dict[int | str, dict[str, Any]] = {
     401: {"description": "Missing, invalid or expired bearer token (fixed message)."},
-    403: {"description": "Token valid but not authorized for this account."},
+    403: {
+        "description": "Token valid but not authorized for this operation or account."
+    },
     429: {"description": "Rate limit exceeded; honour Retry-After."},
     503: {
         "description": "Command path unavailable; retry with the SAME command_id after Retry-After."

@@ -41,14 +41,17 @@ Verified by tests in this repository and by CI on every pull request:
   capped at `CLOUDSCALE_JWT_MAX_LIFETIME_SECONDS` (default 1 h); admin tokens
   require `jti` and are revocable via `CLOUDSCALE_JWT_REVOKED_JTIS`.
 - **Authorization.** Default deny per account. Access requires the admin
-  scope, an `accounts` claim naming the account, or ownership registered via
-  `POST /v1/accounts`. Reads may be relaxed only by explicit setting.
+  scope, an `accounts` claim naming the account, or an existing registry
+  ownership binding; self-registration (`POST /v1/accounts`) is disabled for
+  every caller (ADR-0021) and trusted provisioning is proposed (ADR-0019).
+  A posting set requires authorization on every debited account, not just
+  the anchor (ADR-0018). Reads may be relaxed only by explicit setting.
 - **Abuse controls.** Pre-authentication per-client budget (bounds token
   verification cost), request body cap, per-subject budget (shared across
   replicas on the PostgreSQL tier), CORS closed by default.
 - **Data integrity.** Idempotent command unit of work — a retried
   `command_id` can never double-apply; append-only event log; audit log of
-  every command outcome and registration.
+  every command outcome.
 - **Schema safety.** Production mode refuses to start against a database
   Alembic has not stamped at the required revision.
 - **Supply chain.** Exact-pinned dependencies with hash-verified installs;

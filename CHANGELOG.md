@@ -6,6 +6,51 @@ integrator; the commit history says how.
 
 ## [Unreleased]
 
+### Removed (BREAKING — incompatible public-contract changes)
+- `POST /v1/accounts` (first-claim self-registration) no longer returns
+  201, 200, 409, 400 or 501. Every authenticated, well-formed request,
+  including administrator-scoped tokens, receives the generic 403 with no
+  ownership lookup, no event and no audit write (ADR-0021). Existing bindings
+  and claims/admin payment
+  access remain; onboarding through this path stops, no provisioning path
+  replaces it yet (ADR-0019 is Proposed). Operators must inventory callers
+  and agree a cutover before deploying (RUNBOOK "Registration containment").
+- `POST /v1/accounts/{account_id}/postings` sets that debit an account the
+  caller is not authorized on, and replays of such sets, now return 403
+  instead of 201 (ADR-0018, superseding the authorization rule of ADR-0013).
+  Clients that built multi-debit sets on an anchor-only token must present
+  claims covering every debited account. `docs/API_ERRORS.md` and
+  `SECURITY.md` now state both rules.
+
+### Added
+- Proposed trusted account provisioning policy (ADR-0019): dedicated service
+  authority, beneficiary identity, registration/credit races, and rollout gates.
+  This proposal does not enable provisioning; a separate containment patch
+  now disables the old self-registration path (ADR-0021).
+
+### Changed
+- Dependencies: `pyjwt` 2.13.0 -> 2.15.1 (PYSEC-2026-4140..4152, -4183,
+  GHSA-pxh4-856f-4h89), `certifi` 2026.7.22 -> 2026.10.23 (PYSEC-2026-4320,
+  GHSA-6q48-6c7w-9gw2), OpenTelemetry 1.44.0/0.65b0 -> 1.45.2/0.66b2
+  (GHSA-xcq7-p3pf-p88h, GHSA-mf5v-w3w3-f6cg). Both locks regenerated with the
+  recorded `uv pip compile` command; `pip-audit --strict` on the production
+  lock reports no known vulnerabilities.
+- CI gate jobs install the PostgreSQL 17 client, as the restore-drill job
+  already did: the runner image moved to `pg_dump` 18, which refuses the 17
+  service, so the drill tests skipped or errored. The gate's no-skip
+  assertion now covers the drill and restored-replay test files too.
+
+### Fixed
+- Restore drill checks canonical ownership, command-result, envelope, and event
+  content against the seeded pre-dump source and across rebuild (ADR-0020).
+  Existing-dump mode explicitly marks independent backup integrity unexercised.
+  Both-tier HTTP regressions verify restored replay and current authorization.
+- N-leg postings authorize every debited account before command execution
+  (ADR-0018), not just the anchor. Unauthorized secondary debits return the
+  existing generic 403 without persisting events or a command result;
+  replays also require current authorization. Credit-only recipients and
+  per-account committed-version redaction are unchanged.
+
 ## [0.10.0] — 2026-09-20
 
 ### Added

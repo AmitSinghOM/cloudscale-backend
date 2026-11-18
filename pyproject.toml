@@ -12,16 +12,16 @@ dependencies = [
     "alembic==1.19.2",
     "fastapi==0.141.1",
     "httpx==0.28.1",
-    "opentelemetry-api==1.44.0",
-    "opentelemetry-exporter-otlp-proto-grpc==1.44.0",
-    "opentelemetry-instrumentation-fastapi==0.65b0",
-    "opentelemetry-instrumentation-psycopg==0.65b0",
-    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-api==1.45.2",
+    "opentelemetry-exporter-otlp-proto-grpc==1.45.2",
+    "opentelemetry-instrumentation-fastapi==0.66b2",
+    "opentelemetry-instrumentation-psycopg==0.66b2",
+    "opentelemetry-sdk==1.45.2",
     "prometheus-client==0.26.0",
     "psycopg[binary,pool]==3.3.5",
     "pydantic==2.13.5",
     "pydantic-settings==2.15.0",
-    "pyjwt[crypto]==2.13.0",
+    "pyjwt[crypto]==2.15.1",
     "uvicorn[standard]==0.52.4",
 ]
 
@@ -31,7 +31,7 @@ dependencies = [
 # client; install with `pip install .[kafka]` when the transport lands.
 kafka = [
     "confluent-kafka==2.15.0",
-    "opentelemetry-instrumentation-confluent-kafka==0.65b0",
+    "opentelemetry-instrumentation-confluent-kafka==0.66b2",
 ]
 dev = [
     "coverage==7.16.0",

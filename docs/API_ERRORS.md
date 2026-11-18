@@ -41,13 +41,15 @@ describe the source, and `postings` carries both legs. The target posting's
 | 400 | `same_account` | Source and target are the same account. | Fix the request. |
 | 400 | `domain_rejected` + a domain code | E.g. `amount_out_of_range` when the credit would overflow the target. | Fix the request. Never retry unchanged. |
 
-## `POST /v1/accounts/{account_id}/postings` (ADR-0013)
+## `POST /v1/accounts/{account_id}/postings` (ADR-0013, ADR-0018)
 
 An N-leg balanced posting set: 2 to 16 legs (`MAX_LEGS`), each
 `{account_id, amount, direction: debit|credit}`, committed in one
-transaction. The path account is the **anchor**: it is authorized, it is the
-only stream whose `expected_version` the caller supplies, and it must be one
-of the debited legs. Debits must equal credits. Success returns the same
+transaction. The path account is the **anchor**: it must be one of the
+debited legs and it is the only stream whose `expected_version` the caller
+supplies. **Every debited account must be authorized** for the caller
+(ADR-0018); credit-only recipients need no authorization. Debits must equal
+credits. Success returns the same
 `CommandResult` shape as a transfer with one entry per leg in `postings`;
 `committed_version` is `null` for legs on accounts the caller may not read.
 `/transfers` is the two-leg convenience and is unchanged.
@@ -55,7 +57,8 @@ of the debited legs. Debits must equal credits. Success returns the same
 | Status | `outcome` / `error_code` | Meaning | Client action |
 |---|---|---|---|
 | 201 | `accepted` | Every leg appended, one per stream, in `postings`. | Continue; poll each visible balance to its `committed_version`. |
-| 201 | `accepted` (replay) | Same `command_id`, identical request (including leg order). | Treat as success. |
+| 201 | `accepted` (replay) | Same `command_id`, identical request (including leg order), and the caller still has access to every debited account. | Treat as success. |
+| 403 | — | The caller is not authorized on the anchor **or** on another debited account (ADR-0018); also on a replay when that access has since been lost. The same generic body in every case, checked before anything is read or written: nothing is persisted under the `command_id`. | Use a token whose claims cover every debited account, or the admin scope; the same `command_id` may then be retried. |
 | 409 | `version_conflict` | `expected_version` ≠ the **anchor** stream's version. | Re-read, re-decide, resubmit with a new `command_id`. |
 | 409 | `command_id_conflict` | Same `command_id`, different request (a reordered set counts as different). | Client bug; mint a new id. |
 | 422 | `insufficient_funds` | A debited leg exceeds that account's balance. Nothing was appended on any stream. | Business rejection. Do not retry unchanged. |
@@ -161,11 +164,10 @@ account sees nothing until the post. `GET …/balance` returns `held` and
 | Status | Body `detail` | Meaning | Client action |
 |---|---|---|---|
 | 401 | `invalid or expired bearer token` | Always the same text, whatever the cause (no oracle). | Obtain a fresh token. If it persists, check issuer/audience/algorithm configuration. |
-| 403 | `principal is not authorized for this account` | Token is valid but not permitted for this account. | Register ownership (`POST /v1/accounts`) or use a token carrying the account / admin scope. |
+| 403 | `principal is not authorized for this account` | Token is valid but not permitted for this account; on `POST /v1/accounts`, self-registration is disabled for every caller (ADR-0021). | For account operations, obtain an approved account claim or existing registry ownership. Do not attempt self-registration. |
 | 404 | `account not found` | Balance read before any event was projected for the account. | Not an error after a write: poll until the projection catches up (see 201). |
 | 413 | `request body exceeds N bytes` | Body exceeds `CLOUDSCALE_MAX_BODY_BYTES` (16 KiB default). | Commands are ~150 bytes; this is a client bug. |
 | 429 | `rate limit exceeded` + `Retry-After` | Per-client (pre-auth) or per-subject budget exhausted. | Sleep `Retry-After` seconds, then retry (same `command_id`). |
-| 501 | `account registration is not enabled` | Deployment has no ownership registry configured. | Use claim-based or admin tokens. |
 | 503 | `command path unavailable (circuit open)` + `Retry-After` | Storage was failing; breaker is open. | Sleep `Retry-After`, retry with the **same** `command_id`. |
 | 503 | `command path unavailable (transient storage failure)` | Retries exhausted against a flaky store, or the pool was exhausted. | Same as above. |
 | 503 | `command path unavailable (event schema newer than this build)` | Stream holds an event written by a newer build (rolled-back deploy). | Sleep `Retry-After` (60 s). Operators must redeploy the newer build; the account is frozen, not corrupted. |
@@ -176,9 +178,12 @@ account sees nothing until the post. `GET …/balance` returns `held` and
 
 | Status | Meaning |
 |---|---|
-| 201 | Ownership registered to the caller's subject. |
-| 200 | Already registered to this subject (idempotent). |
-| 409 | Registered to a different subject. |
-| 400 | `invalid_account_id`. |
+| 403 | Valid bearer and well-formed request: self-registration is disabled for every caller, including administrator-scoped tokens; no ownership lookup or write occurs (ADR-0021). |
+| 401 | Missing or invalid bearer on a well-formed request. |
+| 422 | Request shape is invalid; framework validation may occur before authentication. |
+
+Do not retry to create ownership here. Existing registry bindings continue to
+authorize account operations, but new provisioning requires a separately
+approved allocation authority and new API (ADR-0019 Proposed).
 
 `examples/python_client.py` implements every client action above.

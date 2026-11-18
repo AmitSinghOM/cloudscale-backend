@@ -484,6 +484,48 @@ def _postings_body(**overrides: object) -> dict:
     return body
 
 
+def _two_debit_postings_body(secondary_debit_index: int) -> dict:
+    """acct-src (anchor) and acct-secondary both debited, one credit leg.
+
+    The secondary debit is placed at ``secondary_debit_index`` so the check
+    is proven independent of leg order.
+    """
+    legs = [
+        {"account_id": "acct-src", "amount": 1, "direction": "debit"},
+        {"account_id": "acct-recipient", "amount": 101, "direction": "credit"},
+    ]
+    legs.insert(
+        secondary_debit_index,
+        {"account_id": "acct-secondary", "amount": 100, "direction": "debit"},
+    )
+    return _postings_body(postings=legs)
+
+
+def _assert_postings_denied_without_writes(
+    stack: _Stack,
+    body: dict,
+    *,
+    headers: dict[str, str],
+    accounts: tuple[str, ...],
+):
+    """POST the set, expect the generic 403, and prove nothing was persisted.
+
+    ADR-0018: an unauthorized debit must leave no command result, no legs and
+    every touched stream exactly as it was. Returns the denied response.
+    """
+    command_id = uuid.UUID(body["command_id"])
+    before = {account: stack.uow.fold_stream(account) for account in accounts}
+    denied = stack.client.post(
+        "/v1/accounts/acct-src/postings", json=body, headers=headers
+    )
+    assert denied.status_code == 403
+    assert denied.json() == {"detail": "principal is not authorized for this account"}
+    assert stack.uow.stored_result(command_id) is None
+    assert stack.uow.legs_of(command_id) == ()
+    assert {account: stack.uow.fold_stream(account) for account in accounts} == before
+    return denied
+
+
 def test_post_postings_returns_one_posting_per_leg_and_reaches_every_balance(
     stack: _Stack, caplog
 ) -> None:
@@ -545,6 +587,127 @@ def test_post_postings_authorizes_the_anchor_and_redacts_other_legs(
         headers=stranger,
     )
     assert denied.status_code == 403
+
+
+@pytest.mark.parametrize("secondary_debit_index", [0, 1, 2])
+@pytest.mark.parametrize("authorization", ["claims", "admin"])
+def test_postings_require_every_debit_before_persisting(
+    stack: _Stack,
+    secondary_debit_index: int,
+    authorization: str,
+) -> None:
+    _seed(stack, "acct-src", amount=1)
+    _seed(stack, "acct-secondary", amount=100)
+    body = _two_debit_postings_body(secondary_debit_index)
+    command_id = uuid.UUID(body["command_id"])
+    accounts = ("acct-src", "acct-secondary", "acct-recipient")
+    anchor_only = {
+        "Authorization": f"Bearer {_token(scope=None, accounts=['acct-src'])}"
+    }
+
+    denied = _assert_postings_denied_without_writes(
+        stack, body, headers=anchor_only, accounts=accounts
+    )
+
+    headers = (
+        _auth()
+        if authorization == "admin"
+        else {
+            "Authorization": "Bearer "
+            + _token(scope=None, accounts=["acct-src", "acct-secondary"])
+        }
+    )
+    accepted = stack.client.post(
+        "/v1/accounts/acct-src/postings", json=body, headers=headers
+    )
+    assert accepted.status_code == 201, accepted.text
+    result = accepted.json()
+    assert {p["account_id"]: p["committed_version"] for p in result["postings"]} == {
+        "acct-src": 2,
+        "acct-secondary": 2,
+        "acct-recipient": 1 if authorization == "admin" else None,
+    }
+    after = {account: stack.uow.fold_stream(account) for account in accounts}
+    assert {account: state.balance for account, state in after.items()} == {
+        "acct-src": 0,
+        "acct-secondary": 0,
+        "acct-recipient": 101,
+    }
+    stored_result = stack.uow.stored_result(command_id)
+    committed_legs = stack.uow.legs_of(command_id)
+    assert stored_result is not None
+    assert len(committed_legs) == 3
+
+    replay = stack.client.post(
+        "/v1/accounts/acct-src/postings", json=body, headers=headers
+    )
+    assert replay.status_code == 201 and replay.json() == result
+    denied_replay = stack.client.post(
+        "/v1/accounts/acct-src/postings", json=body, headers=anchor_only
+    )
+    assert denied_replay.status_code == 403
+    assert denied_replay.json() == denied.json()
+    assert stack.uow.stored_result(command_id) == stored_result
+    assert stack.uow.legs_of(command_id) == committed_legs
+    assert {account: stack.uow.fold_stream(account) for account in accounts} == after
+
+
+@pytest.mark.parametrize("secondary_balance", [None, 1, 100])
+def test_postings_denies_later_debit_before_executor_or_balance_lookup(
+    stack: _Stack, monkeypatch: pytest.MonkeyPatch, secondary_balance: int | None
+) -> None:
+    from cloudscale.entrypoints.http.context import CommandExecutor
+
+    _seed(stack, "acct-src", amount=1)
+    _seed(stack, "acct-consenting", amount=1)
+    if secondary_balance is not None:
+        _seed(stack, "acct-secondary", amount=secondary_balance)
+    body = _postings_body(
+        postings=[
+            {"account_id": "acct-src", "amount": 1, "direction": "debit"},
+            {"account_id": "acct-consenting", "amount": 1, "direction": "debit"},
+            {"account_id": "acct-recipient", "amount": 102, "direction": "credit"},
+            {"account_id": "acct-secondary", "amount": 100, "direction": "debit"},
+        ]
+    )
+    headers = {
+        "Authorization": "Bearer "
+        + _token(scope=None, accounts=["acct-src", "acct-consenting"])
+    }
+
+    def unexpected_execute(*args, **kwargs):
+        pytest.fail("unauthorized posting reached the command executor")
+
+    monkeypatch.setattr(CommandExecutor, "execute", unexpected_execute)
+    denied = stack.client.post(
+        "/v1/accounts/acct-src/postings", json=body, headers=headers
+    )
+    assert denied.status_code == 403
+    assert denied.json() == {"detail": "principal is not authorized for this account"}
+    assert stack.uow.stored_result(uuid.UUID(body["command_id"])) is None
+    assert stack.uow.legs_of(uuid.UUID(body["command_id"])) == ()
+
+
+def test_postings_validates_shape_before_authorizing_additional_debits(
+    stack: _Stack,
+) -> None:
+    body = _postings_body(
+        postings=[
+            {"account_id": "acct-src", "amount": 1, "direction": "debit"},
+            {"account_id": "acct-secondary", "amount": 100, "direction": "debit"},
+            {"account_id": "acct-recipient", "amount": 100, "direction": "credit"},
+        ]
+    )
+    response = stack.client.post(
+        "/v1/accounts/acct-src/postings",
+        json=body,
+        headers={
+            "Authorization": f"Bearer {_token(scope=None, accounts=['acct-src'])}"
+        },
+    )
+    assert response.status_code == 400
+    assert response.json() == {"detail": "unbalanced"}
+    assert stack.uow.stored_result(uuid.UUID(body["command_id"])) is None
 
 
 @pytest.mark.parametrize(

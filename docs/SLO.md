@@ -130,6 +130,13 @@ single-database service does not get them from replication.
 | RPO | the age of the last dump | a deployment property. The repository measures it (`rpo_events` in the restore-drill report, when run with `--source-dsn`) and cannot set it; RUNBOOK D-item recommends WAL archiving for point-in-time recovery, which brings RPO to seconds |
 | RTO | dump + restore + revision check + derived-table rebuild | the restore-drill report's `durations_seconds` and `rebuild_events_per_second`. **Measured at seeded scale only** (tens of events) until the first production-scale drill; the number for a production log is `events / rebuild_events_per_second` and is *not promised* until that report exists under `evidence/<sha>/restore-drill/` |
 
+ADR-0020 adds separately recorded `source_integrity`, `restored_integrity`,
+and `rebuilt_integrity` scan durations to the drill. Include these costs in a
+complete drill budget; the rebuild rate alone is not end-to-end recovery time.
+Existing-dump mode marks independent backup-content integrity unexercised;
+exit 0 and an RPO log-tail measurement do not establish that missing ownership
+or command outcomes would be detected without a trusted snapshot manifest.
+
 Every tagged release commits the seeded report. The annual production-scale
 drill (LONGEVITY §5) replaces "seeded scale only" above with a measured
 figure and its evidence path.
