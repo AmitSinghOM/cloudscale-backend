@@ -6,6 +6,14 @@ integrator; the commit history says how.
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-11-18
+
+First major release. Per CONTRIBUTING "Releases", a release that changes a
+public contract incompatibly is a major; this one removes two documented
+HTTP behaviours (below), each with a superseding ADR. Deploy note: the
+RUNBOOK "Registration containment" cutover applies before any production
+rollout.
+
 ### Removed (BREAKING — incompatible public-contract changes)
 - `POST /v1/accounts` (first-claim self-registration) no longer returns
   201, 200, 409, 400 or 501. Every authenticated, well-formed request,
@@ -307,7 +315,8 @@ fold (29.6× hot-path throughput).
 Phases 0–2: hexagonal core, idempotent command unit of work, resilient
 consumer with retry, circuit breaker and dead-letter redrive.
 
-[Unreleased]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.10.0...v1.0.0
 [0.10.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/AmitSinghOM/cloudscale-backend/compare/v0.7.0...v0.8.0
