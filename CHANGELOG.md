@@ -18,6 +18,16 @@ integrator; the commit history says how.
   or event writes (ADR-0021). Existing bindings and claims/admin payment
   access remain; onboarding through this path is interrupted, and full trusted
   provisioning remains proposed. No automatic production cutover is included.
+- Dependencies: `pyjwt` 2.13.0 -> 2.15.1 (PYSEC-2026-4140..4152, -4183,
+  GHSA-pxh4-856f-4h89), `certifi` 2026.7.22 -> 2026.10.23 (PYSEC-2026-4320,
+  GHSA-6q48-6c7w-9gw2), OpenTelemetry 1.44.0/0.65b0 -> 1.45.2/0.66b2
+  (GHSA-xcq7-p3pf-p88h, GHSA-mf5v-w3w3-f6cg). Both locks regenerated with the
+  recorded `uv pip compile` command; `pip-audit --strict` on the production
+  lock reports no known vulnerabilities.
+- CI gate jobs install the PostgreSQL 17 client, as the restore-drill job
+  already did: the runner image moved to `pg_dump` 18, which refuses the 17
+  service, so the drill tests skipped or errored. The gate's no-skip
+  assertion now covers the drill and restored-replay test files too.
 
 ### Fixed
 - Restore drill checks canonical ownership, command-result, envelope, and event

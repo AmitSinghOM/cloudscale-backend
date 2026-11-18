@@ -40,11 +40,26 @@ jobs:
     env:
       # PG-gated tests skip without this; CI must NOT skip them.
       CLOUDSCALE_TEST_PG: postgresql://cloudscale:cloudscale@localhost:5432/postgres
+      # pg_dump refuses a server newer than itself and the runner's client
+      # major drifts (16, then 18); the drill tests need the service's major.
+      CLOUDSCALE_PG_BIN: /usr/lib/postgresql/17/bin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
+      - name: Install PostgreSQL 17 client (matches the service container's major)
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo tee /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc >/dev/null
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(. /etc/os-release && echo "$VERSION_CODENAME")-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+          "$CLOUDSCALE_PG_BIN/pg_dump" --version
       - name: Install (hash-pinned)
         run: |
           python -m venv .venv
@@ -54,7 +69,9 @@ jobs:
       - name: Assert PostgreSQL tests actually ran
         run: |
           .venv/bin/python -m pytest tests/unit/adapters/test_postgres_tier.py \
-            tests/unit/adapters/test_postgres_command_uow.py -q -rs 2>&1 | tee pg.log
+            tests/unit/adapters/test_postgres_command_uow.py \
+            tests/unit/adapters/test_postgres_restore_drill.py \
+            tests/unit/entrypoints/test_restored_replay.py -q -rs 2>&1 | tee pg.log
           ! grep -q "SKIPPED" pg.log
 
   dependency-audit:
@@ -102,7 +119,7 @@ jobs:
           --health-interval 5s --health-timeout 3s --health-retries 10
     env:
       CLOUDSCALE_TEST_PG: postgresql://cloudscale:cloudscale@localhost:5432/postgres
-      # pg_dump refuses a server newer than itself; the runner ships client 16.
+      # pg_dump refuses a server newer than itself; the runner's client major drifts.
       CLOUDSCALE_PG_BIN: /usr/lib/postgresql/17/bin
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -171,7 +188,7 @@ jobs:
           set -e
           docker compose up -d --wait --wait-timeout 120
           curl -sf http://127.0.0.1:8000/v1/ready
-          python3 -m pip install --quiet pyjwt==2.13.0  # matches requirements.lock (ADR-0008)
+          python3 -m pip install --quiet pyjwt==2.15.1  # matches requirements.lock (ADR-0008)
           TOKEN=$(CLOUDSCALE_JWT_SECRET=local-dev-only-secret-0123456789abcdef-0123456789abcdef \
                   python3 scripts/dev_token.py --subject ci --minutes 5)
           curl -sf -X POST http://127.0.0.1:8000/v1/accounts/ci/commands \
